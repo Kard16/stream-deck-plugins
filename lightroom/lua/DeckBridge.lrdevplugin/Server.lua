@@ -1,6 +1,10 @@
 -- Two localhost LrSocket listeners, because each LrSocket is one-way:
 -- Config.CMD_PORT receives commands, Config.EVT_PORT sends events.
 -- Every bind gets a generation number; callbacks from a replaced socket are ignored.
+--
+-- Never reloads. Init points onLine, onClientConnected and onClientGone at callbacks
+-- that look the handler modules up on every call, so a hot reload swaps the handlers
+-- in around these sockets without touching them.
 local LrDate = import 'LrDate'
 local LrSocket = import 'LrSocket'
 local LrTasks = import 'LrTasks'
@@ -11,16 +15,15 @@ local Log = require 'Log'
 local State = require 'State'
 
 local Server = {
-  onLine = nil, -- function(line), set by Init
-  onClientConnected = nil, -- function(), set by Init: hello, state, vals
+  onLine = nil, -- function(line), set by Init: a command line arrived
+  onClientConnected = nil, -- function(), set by Init: a client connected to the event port
+  onClientGone = nil, -- function(why), set by Init: the command connection ended
 
   context = nil,
   recv = nil,
   sender = nil,
   cmdConnected = false,
   evtConnected = false,
-  senderBoundAt = 0,
-  senderHadClient = false,
   binding = false, -- true while LrSocket.bind runs for either listener
   lastSenderRecreateAt = -1,
   lastRecvReconnectAt = -1,
@@ -46,6 +49,28 @@ local function reconnectQuietly(sock)
   LrTasks.pcall(function() sock:reconnect() end)
 end
 
+-- The deck went away: Lightroom's own send socket never notices, so this is the only
+-- sign of it. Ends an open gesture, as if done had arrived.
+local function clientGone(why)
+  if Server.onClientGone then
+    local ok, err = LrTasks.pcall(Server.onClientGone, why)
+    if not ok then
+      Log.warn('cmd: client-gone handling failed: %s', tostring(err))
+    end
+  end
+end
+
+-- While no client comes, LrSocket times out every 10 s, onError reconnects, and
+-- onConnecting fires again. Only the first time per generation is worth a log line;
+-- the rest would write 12 lines a minute into an idle Lightroom's log.
+local function listening(what, port, gen, again)
+  if again then
+    Log.debug('%s: listening again on %s (gen %d)', what, tostring(port), gen)
+  else
+    Log.info('%s: listening on %s (gen %d)', what, tostring(port), gen)
+  end
+end
+
 function Server.bindRecv()
   -- Bump the generation before closing: onClosed can fire synchronously inside close().
   State.recvGen = State.recvGen + 1
@@ -54,6 +79,7 @@ function Server.bindRecv()
   Server.recv, Server.cmdConnected = nil, false
   closeQuietly(old)
 
+  local announced = false
   Server.binding = true
   local ok, sock = LrTasks.pcall(LrSocket.bind, {
     functionContext = Server.context,
@@ -62,7 +88,8 @@ function Server.bindRecv()
     mode = 'receive',
     onConnecting = function(_, port)
       if gen ~= State.recvGen then return end
-      Log.info('cmd: listening on %s (gen %d)', tostring(port), gen)
+      listening('cmd', port, gen, announced)
+      announced = true
     end,
     onConnected = function()
       if gen ~= State.recvGen then return end
@@ -82,6 +109,7 @@ function Server.bindRecv()
       if gen ~= State.recvGen then return end
       Server.cmdConnected = false
       Log.info('cmd: client closed (gen %d)', gen)
+      clientGone('client closed')
       if not State.running then return end
       Server.relisten(s) -- listen for the next client
       -- The client is gone, so its event connection is too. Recreate the send socket
@@ -98,6 +126,7 @@ function Server.bindRecv()
       if not State.running then return end
       if Server.cmdConnected then
         Server.cmdConnected = false
+        clientGone('client error')
         Server.relisten(s)
         Server.recreateSender('cmd socket error')
       else
@@ -121,9 +150,8 @@ function Server.bindSender()
   local old = Server.sender
   Server.sender, Server.evtConnected = nil, false
   closeQuietly(old)
-  Server.senderBoundAt = now()
-  Server.senderHadClient = false
 
+  local announced = false
   Server.binding = true
   local ok, sock = LrTasks.pcall(LrSocket.bind, {
     functionContext = Server.context,
@@ -132,12 +160,12 @@ function Server.bindSender()
     mode = 'send',
     onConnecting = function(_, port)
       if gen ~= State.sendGen then return end
-      Log.info('evt: listening on %s (gen %d)', tostring(port), gen)
+      listening('evt', port, gen, announced)
+      announced = true
     end,
     onConnected = function()
       if gen ~= State.sendGen then return end
       Server.evtConnected = true
-      Server.senderHadClient = true
       Log.info('evt: client connected (gen %d)', gen)
       if Server.onClientConnected then
         local okGreet, err = LrTasks.pcall(Server.onClientConnected)
@@ -222,7 +250,7 @@ function Server.start(context)
   Server.bindSender()
 end
 
--- Called from the poll loop: retries listeners that failed to open.
+-- Called from the poll loop: retries listeners that failed to open, and paced rebinds.
 function Server.tick()
   local t = now()
   if Server.rebindRecvAt and t >= Server.rebindRecvAt then
@@ -259,6 +287,7 @@ function Server.stop()
 end
 
 -- Sends one JSON line. Drops it, and counts the drop, while no client is connected.
+-- Returns true only when the line went out.
 function Server.send(tbl)
   if not (Server.sender and Server.evtConnected) then
     Server.drops = Server.drops + 1
@@ -267,7 +296,7 @@ function Server.send(tbl)
   local ok, line = LrTasks.pcall(json.encode, tbl)
   if not ok then
     Log.error('encode failed for %s: %s', tostring(tbl and tbl.t), tostring(line))
-    line = json.encode({ t = 'err', msg = 'encode failed: ' .. tostring(line), cmd = tostring(tbl and tbl.t) })
+    line = json.encode({ t = 'err', code = 'failed', msg = 'encode failed: ' .. tostring(line), cmd = tostring(tbl and tbl.t) })
   end
   local sender = Server.sender
   local okSend, err = LrTasks.pcall(function() sender:send(line .. '\n') end)

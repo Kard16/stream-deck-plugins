@@ -1,0 +1,15 @@
+{
+  "name": "lightroom-tools",
+  "private": true,
+  "description": "Developer tools for the Lightroom side: mock Lightroom, fixture runner, fake deck, latency harness. Node 24, no dependencies.",
+  "type": "module",
+  "main": "tests/all.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test .",
+    "fixtures": "node fixtures/run.mjs --clock both",
+    "mock": "node mock-lr/cli.mjs"
+  }
+}

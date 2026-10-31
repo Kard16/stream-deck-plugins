@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Apply Preset</title>
+		<link rel="stylesheet" href="pi.css" />
+	</head>
+	<body>
+		<div class="item">
+			<span class="label">Filter</span>
+			<input class="field" type="search" id="search" placeholder="Preset or folder name" autocomplete="off" />
+		</div>
+		<div class="item">
+			<span class="label">Preset</span>
+			<select class="field" id="preset">
+				<option value="">Loading presets…</option>
+			</select>
+		</div>
+		<div class="item">
+			<span class="label"></span>
+			<button type="button" id="refresh">Refresh</button>
+			<span class="status" id="status"></span>
+		</div>
+		<p class="hint">Applies to every selected photo. For a film simulation, use a profile-only preset: one saved with only Profile ticked.</p>
+		<script src="common.js"></script>
+		<script src="preset.js"></script>
+	</body>
+</html>

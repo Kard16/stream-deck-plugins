@@ -1,0 +1,4 @@
+{"note":"Deliberately wrong, for the runner's own tests: Lightroom clamps 7.5 to 5, so this ack never comes."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","values":{"Exposure":0.35}}]}}
+{"deck":{"t":"set","p":"Exposure","v":7.5,"g":1}}
+{"lr":{"t":"ack","p":"Exposure","v":7.5,"g":1}}

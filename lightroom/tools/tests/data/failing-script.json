@@ -1,0 +1,9 @@
+{
+  "name": "failing",
+  "about": "For the fake deck's own tests: a pong with the wrong id never comes.",
+  "timeoutMs": 500,
+  "steps": [
+    {"send": {"t": "ping", "id": 7}},
+    {"expect": {"t": "pong", "id": 8}}
+  ]
+}

@@ -10,12 +10,10 @@ return {
   LrShutdownPlugin = 'Shutdown.lua', -- disable, remove and Reload Plug-in
   LrShutdownApp = 'ShutdownApp.lua', -- quit
 
-  -- File > Plug-in Extras, available in every module. Force-init needs at least one menu item.
-  -- Spike-only items: Track A replaces them.
+  -- File > Plug-in Extras, in every module. Force-init needs at least one menu item.
   LrExportMenuItems = {
-    { title = 'Deck Spike: Run tests', file = 'SpikeMenuTests.lua' },
-    { title = 'Deck Spike: Auto Sync test', file = 'SpikeMenuAutoSync.lua' },
+    { title = 'Deck Bridge: Status', file = 'MenuStatus.lua' },
   },
 
-  VERSION = { major = 0, minor = 1, revision = 0, build = 1 },
+  VERSION = { major = 1, minor = 0, revision = 0, build = 1 }, -- Config.VERSION matches
 }

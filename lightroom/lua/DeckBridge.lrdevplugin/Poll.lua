@@ -1,6 +1,11 @@
--- The 200 ms state poll. Lightroom has no selection, module, flag or rating events,
--- so this reads them and sends `state` when anything changed. It also keeps the
--- adjustment observer registered while in Develop.
+-- The 200 ms poll. Lightroom has no events for the module, the target photo, flags,
+-- ratings or labels, so this reads them and sends state when something changed. On
+-- entering Develop or a new photo it sends ranges and every watched value, retrying any
+-- Lightroom couldn't read yet; otherwise, in Develop, it polls the watched values for
+-- edits the observer didn't report. It also ends gestures that went quiet, and stops
+-- this instance if a newer one started.
+--
+-- Reloadable: all state lives in State.lua, and nothing runs at load time.
 local LrApplication = import 'LrApplication'
 local LrApplicationView = import 'LrApplicationView'
 local LrDate = import 'LrDate'
@@ -14,33 +19,44 @@ local State = require 'State'
 local Server = require 'Server'
 local Develop = require 'Develop'
 
-local Poll = {
-  extraTick = nil, -- optional function run at the end of every tick
-}
+local Poll = {}
 
-local FIELDS = { 'module', 'photo', 'file', 'flag', 'rating', 'label', 'sel' }
+Poll.FIELDS = { 'module', 'photo', 'file', 'flag', 'rating', 'label', 'sel' }
 
-local lastSentState = nil
-local lastModule, lastPhoto = nil, nil
-local ticks = 0
+local LABELS = { red = true, yellow = true, green = true, blue = true, purple = true }
 
+-- colorNameForLabel says "gray" for an unlabelled photo on 15.3 (spike run 2), and may
+-- say "" or nil.
+function Poll.label(name)
+  if type(name) == 'string' then
+    local lower = string.lower(name)
+    if LABELS[lower] then
+      return lower
+    end
+  end
+  return 'none'
+end
+
+-- Photo metadata reads fail outside a task on 15.3, so this must run in one.
 function Poll.readState()
-  local st = { module = LrApplicationView.getCurrentModuleName(), flag = 0, rating = 0, label = 'none', sel = 0 }
   local catalog = LrApplication.activeCatalog()
+  local st = {
+    module = LrApplicationView.getCurrentModuleName() or 'unknown',
+    flag = 0,
+    rating = 0,
+    label = 'none',
+    sel = 0, -- with no target photo, commands act on nothing
+  }
   local photo = catalog:getTargetPhoto()
   if photo then
     st.photo = tostring(photo.localIdentifier)
     st.file = photo:getFormattedMetadata('fileName')
     st.flag = tonumber(photo:getRawMetadata('pickStatus')) or 0
     st.rating = tonumber(photo:getRawMetadata('rating')) or 0
-    local label = photo:getRawMetadata('colorNameForLabel')
-    if type(label) ~= 'string' or label == '' then
-      label = 'none'
-    end
-    st.label = label
+    st.label = Poll.label(photo:getRawMetadata('colorNameForLabel'))
+    local targets = catalog:getTargetPhotos()
+    st.sel = type(targets) == 'table' and #targets or 1
   end
-  local targets = catalog:getTargetPhotos()
-  st.sel = type(targets) == 'table' and #targets or 0
   return st
 end
 
@@ -48,7 +64,7 @@ local function differs(a, b)
   if not (a and b) then
     return true
   end
-  for _, k in ipairs(FIELDS) do
+  for _, k in ipairs(Poll.FIELDS) do
     if a[k] ~= b[k] then
       return true
     end
@@ -56,32 +72,67 @@ local function differs(a, b)
   return false
 end
 
-local function stateMessage(st)
+function Poll.stateMessage(st)
   return {
     t = 'state',
-    module = st.module or json.null,
+    module = st.module,
     photo = st.photo or json.null,
     file = st.file or json.null,
     flag = st.flag,
     rating = st.rating,
     label = st.label,
     sel = st.sel,
-    lt = LrDate.currentTime(),
   }
 end
 
--- Sends `state` if it changed, or always when forced. Returns the state read.
-function Poll.sendState(force)
+-- Reads the state and tells the deck what changed, in this order:
+-- * state, when a field changed, or always with opts.state;
+-- * in Develop with a target photo: the ranges the deck is owed, then the values it is
+--   owed or that changed. Entering Develop, a new photo and opts.vals owe it every
+--   watched range and value (Develop.owe); what Lightroom can't read yet, say while
+--   Develop is still loading the photo, goes out on a later sync.
+-- Leaving Develop, or a photo other than the one an open gesture started on, ends that
+-- gesture first. Must run in a task.
+function Poll.sync(opts)
+  opts = opts or {}
   local ok, st = LrTasks.pcall(Poll.readState)
   if not ok then
-    Log.warn('state read failed: %s', tostring(st))
+    Log.every('state', 60, 'warn', 'state read failed: %s', tostring(st))
     return nil
   end
-  -- Only a state that went out counts as sent; a dropped one is retried next tick.
-  if (force or differs(st, lastSentState)) and Server.send(stateMessage(st)) then
-    lastSentState = st
+  local inDevelop = st.module == 'develop'
+  local entered = inDevelop and State.lastModule ~= 'develop'
+  local left = State.lastModule == 'develop' and not inDevelop
+  local newPhoto = st.photo ~= State.lastPhoto
+  State.lastModule, State.lastPhoto = st.module, st.photo
+  if left or Develop.gestureElsewhere(st.photo, newPhoto) then
+    Develop.endGesture(left and 'left Develop' or 'new photo')
+  end
+  if opts.vals or entered or newPhoto then
+    Develop.owe()
+  end
+  -- Only a state that went out counts as sent; a dropped one goes again next time.
+  if (opts.state or differs(st, State.lastState)) and Server.send(Poll.stateMessage(st)) then
+    State.lastState = st
+  end
+  if inDevelop and st.photo then
+    Develop.ensureObserver()
+    Develop.catchUp()
   end
   return st
+end
+
+function Poll.tick()
+  State.ticks = State.ticks + 1
+  Server.tick()
+  Develop.checkGesture()
+  if State.flushAt and LrDate.currentTime() - State.flushAt > 1 then
+    State.flushAt = nil -- its task never ran; let the next push schedule another
+  end
+  Poll.sync()
+  if State.ticks % 5 == 0 then
+    Poll.checkInstance()
+  end
 end
 
 -- Instance file: each load writes its id here, and Shutdown writes a marker. A running
@@ -127,40 +178,6 @@ function Poll.checkInstance()
   end
   Log.warn('instance %s: newer instance %s is running; stopping', tostring(State.inst), content)
   State.running = false
-end
-
-function Poll.tick()
-  ticks = ticks + 1
-  Server.tick()
-
-  local st = Poll.sendState(false)
-  if st then
-    if st.module == 'develop' and st.photo then
-      if not State.observer then
-        Develop.ensureObserver(false)
-      elseif lastModule ~= nil and lastModule ~= 'develop' then
-        -- Back in Develop: watch for the observer having gone quiet (Develop.checkObserver).
-        State.observerSuspect = true
-        State.lastSetAt = nil
-      end
-      if st.photo ~= lastPhoto or lastModule ~= 'develop' then
-        Develop.pushValues(true)
-      end
-    end
-    lastModule, lastPhoto = st.module, st.photo
-  end
-
-  Develop.checkObserver()
-  Develop.flushPending()
-  if ticks % 5 == 0 then
-    Poll.checkInstance()
-  end
-  if Poll.extraTick then
-    local ok, err = LrTasks.pcall(Poll.extraTick)
-    if not ok then
-      Log.warn('extra tick failed: %s', tostring(err))
-    end
-  end
 end
 
 return Poll

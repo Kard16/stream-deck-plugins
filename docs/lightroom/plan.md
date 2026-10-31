@@ -366,13 +366,48 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - `reload` hot-swaps handler modules (S3).
   - Error codes for the deck to act on.
   - The fixture format and matching rules that the Lua tests, the mock Lightroom and the deck tests all share.
+- 2026-10-31, Phase 3 started as the workflow `lightroom-tracks` (run `wf_50e3a891-197`). Each track gets a builder, then an independent reviewer that re-runs the checks against PROTOCOL.md, the fixtures and CLAUDE.md, then a fixer for blocker and major findings. Each track owns its directory, and none touches ports 58780/58781, Lightroom or the Stream Deck app. Tests use ephemeral ports.
+  - Track A, `lightroom/lua/`: protocol v1, hot reload, Status menu, spike files removed, Lua fixture runner.
+  - Track B, `lightroom/deck/`: client, value model, banks.json, Develop Dial, the Pick/Reject/Unflag, Next/Previous, Before/After and Apply Preset keys, plain-HTML Property Inspectors, `npm test`.
+  - Track C, `lightroom/tools/`: shared client and matcher, mock Lightroom with 15.3's quirks, fixture runner, fake deck with `smoke.json`, v1 latency harness.
+- 2026-10-31, Phase 3 built: 9 agents, about 2 h. All three reviews passed with no blockers. Track A had 1 major and Track C had 3; the fixers fixed all of them and most minors. The main thread then re-ran every check:
+  - **Track A** (`lightroom/lua/`). `bash lightroom/lua/tests/run.sh`: luac on 19 files, 73/73 unit tests, 18/18 fixtures.
+    - The spike files and their menu items are gone. The one menu item left is File ▸ Plug-in Extras ▸ "Deck Bridge: Status".
+    - `reload` hot-swaps nine handler modules, and only while writes may go through. Guard, Server, State, Init, Config, Log and json still need Reload Plug-in.
+    - Review fixes:
+      - ranges and vals Lightroom couldn't read are retried until they're sent;
+      - full vals pushes keep to 20/s;
+      - noPhoto for set and reset when there's no target photo;
+      - a gesture belongs to the photo it started on;
+      - the observer callback runs under pcall;
+      - an idle Lightroom no longer logs "listening" every 10 s;
+      - reload is refused outside the test catalog.
+  - **Track B** (`lightroom/deck/`). Build, typecheck, 169/169 tests and validate all pass. `npm run smoke` passes 26/26: the real bundle against a fake Stream Deck app and a fake Lightroom on ephemeral ports.
+    - New keys: Pick, Reject, Unflag, Next Photo, Previous Photo, Before/After and Apply Preset. Banks now live in `banks.json`.
+    - Review fixes:
+      - a lost `ok` no longer makes "busy" flap;
+      - Next, Previous and flag-advance end the open gesture first and hold turns for the new photo;
+      - a dial-up without a press the plugin saw no longer resets;
+      - turns wait for the param's range;
+      - a monotonic clock;
+      - set at most 30/s per param;
+      - half-away rounding;
+      - a replay of the deck's own fixture lines.
+  - **Track C** (`lightroom/tools/`). `node --test lightroom/tools/`: 124/124. Fixtures: 18/18 on both the manual and the real clock.
+    - Review fixes for `smoke.json` and `latency.mjs`:
+      - they refuse any catalog but the test catalog, even with the guard off;
+      - they require exactly one selected photo, because of Auto Sync;
+      - they stop before writing if Lightroom's own Auto Advance moves the photo.
+  - The build replaced `bin/plugin.js`. Until integration, the Stream Deck app still runs the S4 spike process and Lightroom still runs the spike Lua plugin.
+  - The tracks raised protocol ambiguities, settled next. The main thread owns `PROTOCOL.md`.
 
 ## Progress
 
 - [x] Phase 0: kickoff (test catalog recorded, open questions answered), 2026-10-31
 - [x] S1 sockets · [x] S2 latency (numbers; the visual check moves to Phase 4) · [x] S3 hot reload · [x] S4 deck basics · [x] S5 15.3 checks, all 2026-10-31. The user approved building on these results.
 - [x] Phase 2: protocol frozen, 2026-10-31
-- [ ] Track A: Lua plugin · [ ] Track B: deck plugin · [ ] Track C: tools
+- [x] Track A: Lua plugin · [x] Track B: deck plugin · [x] Track C: tools, all built and verified offline, 2026-10-31 (workflow `wf_50e3a891-197`)
+- [ ] Integration: protocol amendments from the tracks; the fake deck against the real Lightroom (ladder step 4); the deck plugin against the mock (step 5)
 - [ ] Phase 4: integration on hardware
 - [ ] Phase 5: presets and tools
 - [ ] Phase 6: hardening

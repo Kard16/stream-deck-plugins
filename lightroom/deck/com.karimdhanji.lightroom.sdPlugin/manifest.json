@@ -2,7 +2,7 @@
 	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 	"UUID": "com.karimdhanji.lightroom",
 	"Name": "Lightroom",
-	"Version": "0.1.0.0",
+	"Version": "0.2.0.0",
 	"Author": "Karim Dhanji",
 	"Description": "Lightroom Classic Develop sliders on the dials, plus culling and preset keys, through the DeckBridge Lua plugin.",
 	"Category": "Lightroom",
@@ -48,6 +48,109 @@
 					"LongTouch": "Reset slider"
 				}
 			}
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.pick",
+			"Name": "Pick",
+			"Tooltip": "Flags the current photo as a pick, then moves to the next photo unless that's turned off.",
+			"Icon": "imgs/actions/pick/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"PropertyInspectorPath": "pi/flag.html",
+			"States": [
+				{
+					"Image": "imgs/actions/pick/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.reject",
+			"Name": "Reject",
+			"Tooltip": "Flags the current photo as rejected, then moves to the next photo unless that's turned off.",
+			"Icon": "imgs/actions/reject/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"PropertyInspectorPath": "pi/flag.html",
+			"States": [
+				{
+					"Image": "imgs/actions/reject/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.unflag",
+			"Name": "Unflag",
+			"Tooltip": "Removes the current photo's flag, then moves to the next photo unless that's turned off.",
+			"Icon": "imgs/actions/unflag/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"PropertyInspectorPath": "pi/flag.html",
+			"States": [
+				{
+					"Image": "imgs/actions/unflag/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.next",
+			"Name": "Next Photo",
+			"Tooltip": "Moves to the next photo.",
+			"Icon": "imgs/actions/next/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/next/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.prev",
+			"Name": "Previous Photo",
+			"Tooltip": "Moves to the previous photo.",
+			"Icon": "imgs/actions/prev/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/prev/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.before-after",
+			"Name": "Before/After",
+			"Tooltip": "Hold to see the photo before your edits; let go to see it after.",
+			"Icon": "imgs/actions/before-after/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"SupportedInMultiActions": false,
+			"States": [
+				{
+					"Image": "imgs/actions/before-after/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.lightroom.preset",
+			"Name": "Apply Preset",
+			"Tooltip": "Applies a Develop preset, chosen in the key's settings, to the selected photos.",
+			"Icon": "imgs/actions/preset/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"PropertyInspectorPath": "pi/preset.html",
+			"States": [
+				{
+					"Image": "imgs/actions/preset/key"
+				}
+			]
 		}
 	]
 }

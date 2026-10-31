@@ -1,6 +1,15 @@
--- Develop control: set/get/range/done/reset/watch, and the adjustment observer that
--- pushes watched params to the deck. LrDevelopController works only in Develop, on the
--- active photo. Ranges differ by file type, so nothing here assumes one.
+-- Develop control: watch, set, done and reset, gestures, the adjustment observer, and
+-- the ranges and vals pushed to the deck. LrDevelopController works only in Develop, on
+-- the active photo, and ranges differ by file type, so every range comes from getRange.
+--
+-- Gestures (PROTOCOL.md, Gestures; spike S2): a gesture must be tracked to become one
+-- history step, and Lightroom's observer stays silent while it is tracked. A set whose
+-- p or g differs from the open gesture ends it and starts another. Two seconds without
+-- a set, or the client leaving, ends it too. While a gesture tracks p, vals leave p out:
+-- the deck owns that value. A gesture also belongs to the photo it started on.
+--
+-- Reloadable: all state lives in State.lua, and nothing runs at load time.
+local LrApplication = import 'LrApplication'
 local LrApplicationView = import 'LrApplicationView'
 local LrDate = import 'LrDate'
 local LrDevelopController = import 'LrDevelopController'
@@ -11,270 +20,462 @@ local Config = require 'Config'
 local Log = require 'Log'
 local State = require 'State'
 local Server = require 'Server'
+local Proto = require 'Proto'
 local Guard = require 'Guard'
 
 local Develop = {}
 
-local applied = {} -- param -> arrival number of the last command that wrote it
-local lastPushAt = 0
-local pendingPush = false
-
-for i, p in ipairs(Config.BANK_PARAMS) do
-  State.watched[i] = p
-end
+local EPSILON = 1e-9
 
 local function now()
   return LrDate.currentTime()
 end
 
-local function msSince(t0)
-  return (now() - t0) * 1000
-end
-
-local function numOrNull(v)
-  if type(v) == 'number' and v == v then
-    return v
-  end
-  return json.null
-end
-
 function Develop.inDevelop()
-  return LrApplicationView.getCurrentModuleName() == 'develop'
+  local ok, name = LrTasks.pcall(LrApplicationView.getCurrentModuleName)
+  return ok and name == 'develop'
 end
 
--- Switches to Develop and waits up to 1 s for it. Waiting needs a task that can yield.
+function Develop.targetPhoto()
+  local ok, photo = LrTasks.pcall(function() return LrApplication.activeCatalog():getTargetPhoto() end)
+  if ok then
+    return photo
+  end
+  return nil
+end
+
+-- Switches to Develop and waits up to Config.MODULE_SECS for it. Waiting needs a task;
+-- outside one this can only ask for the switch.
 function Develop.ensureDevelop()
   if Develop.inDevelop() then
     return true
   end
-  LrApplicationView.switchToModule('develop')
+  if not LrTasks.pcall(LrApplicationView.switchToModule, 'develop') then
+    return false
+  end
   if not Log.canYield() then
-    Log.warn('switched to Develop without being able to wait for it')
     return Develop.inDevelop()
   end
   local t0 = now()
-  repeat
+  while not Develop.inDevelop() and now() - t0 < Config.MODULE_SECS do
     LrTasks.sleep(0.05)
-  until Develop.inDevelop() or now() - t0 > 1
+  end
   LrTasks.yield() -- let Develop finish loading the photo, as MIDI2LR does
   return Develop.inDevelop()
 end
 
--- Sends watched params that changed since the last push. force sends them all, and
--- outside Develop sends the last values read (marked cached).
-function Develop.pushValues(force)
-  local t = now()
-  if not force and State.pushHz and State.pushHz > 0 and t - lastPushAt < 1 / State.pushHz then
-    pendingPush = true
+-- A call that failed only for want of a task re-raises, so the dispatcher can run the
+-- command again from its queue (Dispatch.run) instead of answering for the wrong reason.
+local function rethrowTaskError(err)
+  if string.find(tostring(err), 'within a task', 1, true) then
+    error(err, 0)
+  end
+end
+
+-- getRange(p) as two numbers, or nil when Lightroom rejects p.
+function Develop.range(p)
+  local ok, lo, hi = LrTasks.pcall(LrDevelopController.getRange, p)
+  if ok and Proto.isNumber(lo) and Proto.isNumber(hi) then
+    return lo, hi
+  end
+  if not ok then
+    rethrowTaskError(lo)
+  end
+  return nil
+end
+
+-- getValue(p) as a number, or nil.
+function Develop.value(p)
+  local ok, v = LrTasks.pcall(LrDevelopController.getValue, p)
+  if ok and Proto.isNumber(v) then
+    return v
+  end
+  if not ok then
+    rethrowTaskError(v)
+  end
+  return nil
+end
+
+-- The target photo's localIdentifier as a string, as state carries it, or nil when there
+-- is no target photo. Unlike targetPhoto, a read that fails for want of a task re-raises,
+-- so a command run straight from onMessage moves to the task queue; any other failure
+-- returns false, for "can't tell".
+function Develop.photoId()
+  local ok, id = LrTasks.pcall(function()
+    local photo = LrApplication.activeCatalog():getTargetPhoto()
+    return photo and tostring(photo.localIdentifier) or nil
+  end)
+  if ok then
+    return id
+  end
+  rethrowTaskError(id)
+  return false
+end
+
+-- For a set or reset whose getRange(p) failed: noPhoto when that is because Lightroom has
+-- no target photo, otherwise bad, since p is no param Lightroom knows.
+local function rangeFailed(m, p)
+  if Develop.photoId() == nil then
+    return Proto.err(m, 'noPhoto', 'no target photo')
+  end
+  return Proto.err(m, 'bad', 'unknown param ' .. p)
+end
+
+-- Gestures ------------------------------------------------------------------------
+
+-- Ends the open gesture, if any. stopTracking makes it one history step, and the
+-- observer then fires, so vals carry the final value.
+function Develop.endGesture(why)
+  local g = State.gesture
+  if not g then
     return false
   end
-  local inDev = Develop.inDevelop()
-  local changed, n = json.object({}), 0
+  State.gesture = nil
+  local ok, err = LrTasks.pcall(LrDevelopController.stopTracking)
+  if not ok then
+    Log.debug('stopTracking failed (%s): %s', tostring(why), tostring(err))
+  end
+  Log.debug('gesture %s on %s ended: %s', tostring(g.g), tostring(g.p), tostring(why))
+  return true
+end
+
+-- Ends a gesture with no set for Config.GESTURE_SECS, as if done had arrived. Called
+-- from the poll.
+function Develop.checkGesture()
+  local g = State.gesture
+  if g and now() - g.at >= Config.GESTURE_SECS then
+    Develop.endGesture('no set for ' .. Config.GESTURE_SECS .. ' s')
+  end
+end
+
+-- Whether the open gesture started on a photo other than photo, the target the poll
+-- just read. A set can arrive after the user changed photo but before the poll noticed:
+-- its gesture started on the new photo and carries on. Without the photo it started on,
+-- any photo change counts (newPhoto).
+function Develop.gestureElsewhere(photo, newPhoto)
+  local g = State.gesture
+  if not g then
+    return false
+  end
+  if g.photo == nil then
+    return newPhoto
+  end
+  return g.photo ~= photo
+end
+
+-- vals and ranges -------------------------------------------------------------------
+
+-- The deck needs every watched range and value after hello and watch, on entering
+-- Develop and on every photo change (PROTOCOL.md, Events). This marks them all owed:
+-- the next push sends whatever Lightroom can read, and later pushes the rest.
+function Develop.owe()
+  for p in pairs(State.lastSent) do
+    State.lastSent[p] = nil
+  end
+  for p in pairs(State.rangesOwed) do
+    State.rangesOwed[p] = nil
+  end
   for _, p in ipairs(State.watched) do
-    local v
-    if inDev then
-      local ok, val = LrTasks.pcall(LrDevelopController.getValue, p)
-      if ok and type(val) == 'number' and val == val then
-        v = val
-        State.lastValues[p] = val
-      end
-    elseif force then
-      v = State.lastValues[p]
-    end
-    if v ~= nil then
+    State.rangesOwed[p] = true
+  end
+end
+
+-- Sends the watched values the deck doesn't have: those it is owed (no lastSent value)
+-- and those that changed since they were last sent, leaving out the param an open
+-- gesture tracks. Develop only. At most one push every Config.VALS_SECS, owed ones
+-- included; one held back follows when the limit allows (flushing is that push). Values
+-- count as sent only once the send succeeded, so a dropped push is diffed again later.
+function Develop.pushValues(flushing)
+  if #State.watched == 0 or not Develop.inDevelop() then
+    return false
+  end
+  local t = now()
+  -- 1 ms of slack, so a push timed for exactly the limit isn't held back again.
+  if not flushing and State.lastValsAt and t - State.lastValsAt < Config.VALS_SECS - 0.001 then
+    Develop.flushLater()
+    return false
+  end
+  local skip = State.gesture and State.gesture.p
+  local vals, n = json.object({}), 0
+  for _, p in ipairs(State.watched) do
+    if p ~= skip then
+      local v = Develop.value(p)
       local last = State.lastSent[p]
-      if force or last == nil or math.abs(v - last) > 1e-9 then
-        changed[p] = v
+      if v ~= nil and (last == nil or math.abs(v - last) > EPSILON) then
+        vals[p] = v
         n = n + 1
       end
     end
   end
-  pendingPush = false
-  if n == 0 and not force then
+  if n == 0 then
     return false
   end
-  lastPushAt = t
-  local msg = { t = 'vals', vals = changed, lt = t }
-  if not inDev then
-    msg.cached = true
-  end
-  -- Only values that went out count as sent, so a dropped push is diffed again later.
-  if not Server.send(msg) then
+  if not Server.send({ t = 'vals', vals = vals }) then
     return false
   end
-  for p, v in pairs(changed) do
+  for p, v in pairs(vals) do
     State.lastSent[p] = v
+  end
+  State.lastValsAt = t
+  return true
+end
+
+-- Sends a push the rate limit held back once the limit allows it.
+function Develop.flushLater()
+  if State.flushAt then
+    return
+  end
+  local at = (State.lastValsAt or now()) + Config.VALS_SECS
+  State.flushAt = at
+  local ok = LrTasks.pcall(LrTasks.startAsyncTask, function()
+    LrTasks.pcall(function()
+      local wait = at - now()
+      if wait > 0 then
+        LrTasks.sleep(wait)
+      end
+    end)
+    State.flushAt = nil
+    LrTasks.pcall(function() require('Develop').pushValues(true) end) -- flushing: the limit allows it now
+  end, 'DeckBridge vals')
+  if not ok then
+    State.flushAt = nil
+  end
+end
+
+-- Sends the ranges the deck is owed for the watched params, as far as getRange gives
+-- them. Develop only. A range counts as sent only once the send succeeded.
+function Develop.sendRanges()
+  if #State.watched == 0 or next(State.rangesOwed) == nil or not Develop.inDevelop() then
+    return false
+  end
+  local ranges, n = json.object({}), 0
+  for _, p in ipairs(State.watched) do
+    if State.rangesOwed[p] then
+      local lo, hi = Develop.range(p)
+      if lo then
+        ranges[p] = { lo, hi }
+        n = n + 1
+      end
+    end
+  end
+  if n == 0 or not Server.send({ t = 'ranges', ranges = ranges }) then
+    return false
+  end
+  for p in pairs(ranges) do
+    State.rangesOwed[p] = nil
   end
   return true
 end
 
--- Sends a push the throttle held back. Called from the poll loop.
-function Develop.flushPending()
-  if pendingPush then
-    Develop.pushValues(false)
+-- Drops watched params that getRange rejects, with err bad for the watch that sent
+-- them. That needs Develop and a photo, so a list sent outside Develop is checked on
+-- entering it. Exposure exists for every file type: if even its range fails, Develop
+-- isn't ready and nothing is dropped.
+function Develop.checkWatch()
+  if State.watchChecked or #State.watched == 0 then
+    return
+  end
+  if not Develop.inDevelop() or not Develop.range('Exposure') then
+    return
+  end
+  State.watchChecked = true
+  local keep, unknown = {}, {}
+  for _, p in ipairs(State.watched) do
+    if Develop.range(p) then
+      keep[#keep + 1] = p
+    else
+      unknown[#unknown + 1] = p
+      State.rangesOwed[p] = nil
+    end
+  end
+  if #unknown > 0 then
+    State.watched = keep
+    Proto.err({ t = 'watch', id = State.watchId }, 'bad',
+      'unknown param, dropped from the watch list: ' .. table.concat(unknown, ', '))
   end
 end
 
--- Registers the adjustment observer against the long-lived context. Must run in Develop.
--- Older observers can't be removed, so each one checks it is still current.
-function Develop.ensureObserver(force)
-  if State.observer and not force then
+-- In Develop with a target photo: checks the watch list once Develop can tell, then
+-- sends the ranges the deck is owed, then the values it is owed or that changed.
+function Develop.catchUp()
+  Develop.checkWatch()
+  Develop.sendRanges()
+  Develop.pushValues()
+end
+
+-- The observer ------------------------------------------------------------------------
+
+-- Registers the adjustment observer against the long-lived context, once per plugin
+-- instance. Must run in Develop. The callback looks Develop up on every call, so a hot
+-- reload takes over without registering a second observer, and it runs the handler
+-- under LrTasks.pcall, so a broken reload can't throw into Lightroom's callback.
+function Develop.ensureObserver()
+  if State.observer then
     return true
   end
-  if not Develop.inDevelop() then
+  if not State.context or not Develop.inDevelop() then
     return false
   end
-  local obs = { gen = State.observerGen + 1 }
+  local obs = {}
   local ok, err = LrTasks.pcall(LrDevelopController.addAdjustmentChangeObserver, State.context, obs, function()
-    if State.observer ~= obs then return end
-    State.obsCount = State.obsCount + 1
-    State.lastObsAt = now()
-    State.observerSuspect = false
-    local okPush, errPush = LrTasks.pcall(Develop.pushValues, false)
-    if not okPush then
-      Log.warn('observer push failed: %s', tostring(errPush))
+    local okCall, errCall = LrTasks.pcall(function() require('Develop').onAdjustment(obs) end)
+    if not okCall then
+      Log.every('observer-callback', 60, 'warn', 'adjustment observer failed: %s', tostring(errCall))
     end
   end)
   if not ok then
-    Log.error('addAdjustmentChangeObserver failed: %s', tostring(err))
+    Log.every('observer', 60, 'warn', 'addAdjustmentChangeObserver failed: %s', tostring(err))
     return false
   end
-  State.observerGen = obs.gen
   State.observer = obs
-  Log.info('adjustment observer registered (gen %d)', obs.gen)
+  Log.info('adjustment observer registered')
   return true
 end
 
--- After re-entering Develop, a set that changed a value but drew no callback within
--- 1.5 s means the observer stopped firing: register a fresh one. Called from the poll loop.
-function Develop.checkObserver()
-  if not (State.observerSuspect and State.lastSetAt and State.obsAtSet) then
+-- The observer fired. It fires in bursts (73 callbacks for one photo change on 15.3)
+-- and doesn't say what changed, so this only makes sure one task is on its way.
+function Develop.onAdjustment(obs)
+  if obs ~= State.observer then
     return
   end
-  if State.obsCount > State.obsAtSet then
-    State.observerSuspect = false
+  State.obsCount = State.obsCount + 1
+  if State.obsTask then
     return
   end
-  if now() - State.lastSetAt > 1.5 and Develop.inDevelop() then
-    Log.warn('no observer callback since re-entering Develop; registering a new observer')
-    State.observerSuspect = false
-    Develop.ensureObserver(true)
+  State.obsTask = true
+  local ok, err = LrTasks.pcall(LrTasks.startAsyncTask, function()
+    State.obsTask = false
+    local okRun, errRun = LrTasks.pcall(function() require('Develop').afterAdjustment() end)
+    if not okRun then
+      Log.every('observer-push', 60, 'warn', 'observer push failed: %s', tostring(errRun))
+    end
+  end, 'DeckBridge observer')
+  if not ok then
+    State.obsTask = false
+    Log.every('observer-task', 60, 'warn', 'could not start the observer task: %s', tostring(err))
   end
 end
 
+-- In a task, after the observer fired. A new photo or module goes through the poll's
+-- sync, so the deck gets state, ranges and vals in that order; anything else is a
+-- value change, diffed against what was last sent, and a chance to send what the deck
+-- is still owed.
+function Develop.afterAdjustment()
+  local photo = Develop.targetPhoto()
+  local id = photo and tostring(photo.localIdentifier) or nil
+  if State.lastModule ~= 'develop' or id ~= State.lastPhoto or not Develop.inDevelop() then
+    require('Poll').sync()
+  elseif id then
+    Develop.catchUp()
+  end
+end
+
+-- Commands ----------------------------------------------------------------------------
+
+-- watch {ps}: replaces the watch list. In Develop, answers ranges and every value.
+function Develop.watch(m)
+  local ps = m.ps
+  if type(ps) ~= 'table' or (#ps == 0 and next(ps) ~= nil) then
+    return Proto.err(m, 'bad', 'watch needs ps, a list of param names')
+  end
+  local list, seen, wrong = {}, {}, 0
+  for _, p in ipairs(ps) do
+    if type(p) == 'string' and p ~= '' then
+      if not seen[p] then
+        seen[p] = true
+        list[#list + 1] = p
+      end
+    else
+      wrong = wrong + 1
+    end
+  end
+  State.watched = list
+  State.watchChecked = false
+  State.watchId = Proto.id(m)
+  Develop.owe()
+  if wrong > 0 then
+    Proto.err(m, 'bad', wrong .. ' entries in ps are not param names, dropped')
+  end
+  if Develop.inDevelop() then
+    Develop.catchUp()
+  end
+end
+
+-- set {p, v, g}: guarded. Clamps v to getRange(p), sets it inside gesture g, and acks
+-- with the value read straight back.
 function Develop.set(m)
-  local t0 = now()
-  local cy = Log.canYield()
-  local p, v = m.p, m.v
-  if type(p) ~= 'string' or type(v) ~= 'number' or v ~= v then
-    error('set needs a param name p and a number v')
+  local p, v, g = m.p, m.v, m.g
+  if type(p) ~= 'string' or p == '' then
+    return Proto.err(m, 'bad', 'set needs p, a param name')
   end
-  local ok, why = Guard.writable()
-  if not ok then
-    Guard.reply(m, why)
-    return
+  if not Proto.isNumber(v) then
+    return Proto.err(m, 'bad', 'set needs v, a number')
   end
-  -- Never let an older set overwrite a newer one for the same param.
-  if m._arrival and applied[p] and applied[p] > m._arrival then
-    local okCur, cur = LrTasks.pcall(LrDevelopController.getValue, p)
-    Server.send({ t = 'ack', seq = m.seq, p = p, v = okCur and numOrNull(cur) or json.null, ms = msSince(t0), cy = cy, stale = true })
+  if not Proto.isNumber(g) then
+    return Proto.err(m, 'bad', 'set needs g, the gesture number')
+  end
+  if not Guard.check(m) then
     return
   end
   if not Develop.ensureDevelop() then
-    error('could not switch to Develop')
+    return Proto.err(m, 'noDevelop', 'could not switch to Develop')
   end
-  if m.track ~= false and State.tracked ~= p then
+  local lo, hi = Develop.range(p)
+  if not lo then
+    return rangeFailed(m, p)
+  end
+  local photo = Develop.photoId() or nil
+  local open = State.gesture
+  if open and (open.p ~= p or open.g ~= g or (photo and open.photo and open.photo ~= photo)) then
+    Develop.endGesture('next gesture')
+    open = nil
+  end
+  if not open then
     LrDevelopController.startTracking(p)
-    State.tracked = p
+    open = { p = p, g = g, photo = photo }
+    State.gesture = open
   end
-  local obsBefore = State.obsCount -- the observer may fire inside setValue
+  open.at = now()
+  if v < lo then
+    v = lo
+  elseif v > hi then
+    v = hi
+  end
   LrDevelopController.setValue(p, v)
-  applied[p] = m._arrival or applied[p]
-  local v2 = LrDevelopController.getValue(p)
-  if type(v2) == 'number' then
-    local prev = State.lastValues[p]
-    if prev == nil or math.abs(v2 - prev) > 1e-9 then
-      State.lastSetAt = now()
-      State.obsAtSet = obsBefore
-    end
-    State.lastValues[p] = v2
+  Server.send({ t = 'ack', p = p, v = Develop.value(p) or json.null, g = g })
+end
+
+-- done {g}: ends the gesture. A done for an earlier gesture than the open one is late,
+-- and ignored.
+function Develop.done(m)
+  if m.g ~= nil and not Proto.isNumber(m.g) then
+    return Proto.err(m, 'bad', 'g must be a number')
   end
-  Server.send({ t = 'ack', seq = m.seq, p = p, v = numOrNull(v2), ms = msSince(t0), cy = cy })
-end
-
-function Develop.done()
-  LrTasks.pcall(LrDevelopController.stopTracking)
-  State.tracked = nil
-end
-
-local function needsDevelop()
-  return not Develop.inDevelop()
-end
-
-local function requireParam(m)
-  if type(m.p) ~= 'string' then
-    error(tostring(m.t) .. ' needs a param name p')
+  local open = State.gesture
+  if not open or (m.g ~= nil and m.g ~= open.g) then
+    return
   end
+  Develop.endGesture('done')
 end
 
-Develop.handlers = {
-  watch = {
-    immediate = true,
-    fn = function(m)
-      if type(m.ps) ~= 'table' then
-        error('watch needs ps, a list of param names')
-      end
-      local ps = {}
-      for _, p in ipairs(m.ps) do
-        if type(p) == 'string' then
-          ps[#ps + 1] = p
-        end
-      end
-      State.watched = ps
-      State.lastSent = {}
-      Develop.pushValues(true)
-    end,
-  },
-  get = {
-    needsTask = needsDevelop,
-    fn = function(m)
-      requireParam(m)
-      if not Develop.ensureDevelop() then
-        error('could not switch to Develop')
-      end
-      local v = LrDevelopController.getValue(m.p)
-      Server.send({ t = 'val', id = m.id, p = m.p, v = numOrNull(v) })
-    end,
-  },
-  range = {
-    needsTask = needsDevelop,
-    fn = function(m)
-      requireParam(m)
-      if not Develop.ensureDevelop() then
-        error('could not switch to Develop')
-      end
-      local lo, hi = LrDevelopController.getRange(m.p)
-      Server.send({ t = 'range', id = m.id, p = m.p, min = numOrNull(lo), max = numOrNull(hi) })
-    end,
-  },
-  set = { needsTask = needsDevelop, fn = Develop.set },
-  done = { fn = Develop.done },
-  reset = {
-    needsTask = needsDevelop,
-    fn = function(m)
-      requireParam(m)
-      local ok, why = Guard.writable()
-      if not ok then
-        Guard.reply(m, why)
-        return
-      end
-      if not Develop.ensureDevelop() then
-        error('could not switch to Develop')
-      end
-      LrDevelopController.resetToDefault(m.p)
-      applied[m.p] = m._arrival or applied[m.p]
-    end,
-  },
-}
+-- reset {p}: guarded. Ends any gesture, resets p and acks the value after, without g.
+function Develop.reset(m)
+  local p = m.p
+  if type(p) ~= 'string' or p == '' then
+    return Proto.err(m, 'bad', 'reset needs p, a param name')
+  end
+  if not Guard.check(m) then
+    return
+  end
+  if not Develop.ensureDevelop() then
+    return Proto.err(m, 'noDevelop', 'could not switch to Develop')
+  end
+  if not Develop.range(p) then
+    return rangeFailed(m, p)
+  end
+  Develop.endGesture('reset')
+  LrDevelopController.resetToDefault(p)
+  Server.send({ t = 'ack', p = p, v = Develop.value(p) or json.null })
+end
 
 return Develop

@@ -1,3 +1,5 @@
 # Stream Deck build output and logs. The root .gitignore's *.sdPlugin/bin/ is anchored to the repo root.
 *.sdPlugin/bin/
 *.sdPlugin/logs/
+# Compiled tests (npm test).
+build/

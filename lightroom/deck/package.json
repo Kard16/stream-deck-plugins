@@ -1,13 +1,16 @@
 {
   "name": "lightroom-deck",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Stream Deck + plugin that drives Lightroom Classic through the DeckBridge Lua plugin",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.karimdhanji.lightroom\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "rm -rf build/test && tsc -p tsconfig.test.json && node --test --test-reporter=spec build/test/test/*.test.js",
+    "icons": "node scripts/make-icons.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@elgato/cli": "1.10.4",
@@ -19,7 +22,8 @@
     "@types/node": "~24.1.0",
     "rollup": "^4.0.2",
     "tslib": "^2.6.2",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "ws": "8.22.1"
   },
   "dependencies": {
     "@elgato/streamdeck": "3.0.4"

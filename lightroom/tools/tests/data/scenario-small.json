@@ -1,0 +1,9 @@
+{
+  "about": "For the CLI tests: two photos in Library, one preset.",
+  "module": "library",
+  "photos": [
+    {"id": "1", "file": "A.ARW", "fmt": "RAW", "flag": 0, "rating": 1, "label": "red", "values": {"Exposure": 0.5}},
+    {"id": "2", "file": "B.JPG", "fmt": "JPG", "flag": 1, "rating": 0, "label": "none", "values": {"Exposure": -0.5}}
+  ],
+  "presets": [{"uuid": "AAAABBBBCCCCDDDDEEEEFFFF00001111", "name": "Cobalt Velvia", "folder": "Deck Profiles"}]
+}

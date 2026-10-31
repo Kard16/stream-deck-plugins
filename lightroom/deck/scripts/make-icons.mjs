@@ -1,10 +1,13 @@
 // Writes the plugin's images into com.karimdhanji.lightroom.sdPlugin/imgs/.
-// Run with `node scripts/make-icons.mjs` after changing a design. No dependencies:
-// the PNG icon is rasterised here (4x supersampled) and encoded with node:zlib.
+// Run with `mise exec -- node scripts/make-icons.mjs` after changing a design. No dependencies:
+// the PNG icon is rasterised here (4x supersampled) and encoded with node:zlib. The key images come from
+// src/keys/art.ts, the same functions the plugin draws live keys with; Node 24 imports it by stripping types.
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+
+import * as art from "../src/keys/art.ts";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "com.karimdhanji.lightroom.sdPlugin", "imgs");
 
@@ -128,3 +131,21 @@ write("actions/dial/icon.svg", dialSvg(20, { background: false, mono: true }));
 // State image and dial icon (72 px).
 write("actions/dial/key.svg", dialSvg(72, { background: true, mono: false }));
 write("actions/dial/encoder.svg", dialSvg(72, { background: false, mono: false }));
+
+// Keys: the manifest's state image is the key's idle look, which the plugin replaces with live images once
+// the key appears. Action-list icons are monochrome white on transparent, 20 px.
+const idle = { active: false, dim: false };
+const keys = {
+	pick: art.flagKeySvg("pick", idle, 72),
+	reject: art.flagKeySvg("reject", idle, 72),
+	unflag: art.flagKeySvg("unflag", idle, 72),
+	next: art.navKeySvg("next", idle, 72),
+	prev: art.navKeySvg("prev", idle, 72),
+	"before-after": art.beforeAfterKeySvg(idle, 72),
+	preset: art.presetKeySvg(null, idle, 72),
+};
+const icons = { pick: "pick", reject: "reject", unflag: "unflag", next: "next", prev: "prev", "before-after": "beforeAfter", preset: "preset" };
+for (const [dir, svg] of Object.entries(keys)) {
+	write(`actions/${dir}/key.svg`, `${svg}\n`);
+	write(`actions/${dir}/icon.svg`, `${art.actionIconSvg(icons[dir])}\n`);
+}
