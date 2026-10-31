@@ -1,0 +1,9 @@
+{"note":"Lightroom clamps set values to the param's range; the ack says what it applied."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"watch":["Temperature","Tint","Exposure","Contrast"]}}
+{"deck":{"t":"set","p":"Exposure","v":7.5,"g":1}}
+{"lr":{"t":"ack","p":"Exposure","v":5,"g":1}}
+{"deck":{"t":"set","p":"Temperature","v":1200,"g":2}}
+{"lr":{"t":"ack","p":"Temperature","v":2000,"g":2}}
+{"deck":{"t":"done","g":2}}
+{"wait":400}
+{"expect":{"tracking":false,"values":{"101":{"Exposure":5,"Temperature":2000}}}}

@@ -1,0 +1,8 @@
+{"note":"If the deck never sends done (it crashed, say), Lightroom ends the gesture itself after 2 s without a set, and reports the value."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"watch":["Temperature","Tint","Exposure","Contrast"]}}
+{"deck":{"t":"set","p":"Tint","v":25,"g":7}}
+{"lr":{"t":"ack","p":"Tint","v":25,"g":7}}
+{"expect":{"tracking":true}}
+{"wait":2200}
+{"lr":{"t":"vals","vals":{"Tint":25}}}
+{"expect":{"tracking":false,"values":{"101":{"Tint":25}}}}

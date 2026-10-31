@@ -1,0 +1,6 @@
+{"note":"A new target photo brings state, its ranges (a JPEG's Temperature and Tint are -100..100) and all watched values."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}},{"id":"104","file":"IMG0104.JPG","fmt":"JPG","flag":0,"rating":0,"label":"none","values":{"Temperature":0,"Tint":0,"Exposure":0,"Contrast":5,"Highlights":0,"Shadows":0,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"target":"101","watch":["Temperature","Tint","Exposure","Contrast"]}}
+{"user":{"photo":"104"}}
+{"lr":{"t":"state","module":"develop","photo":"104","file":"IMG0104.JPG","flag":0,"rating":0,"label":"none","sel":1}}
+{"lr":{"t":"ranges","ranges":{"Temperature":[-100,100],"Tint":[-100,100],"Exposure":[-5,5],"Contrast":[-100,100]}}}
+{"lr":{"t":"vals","vals":{"Temperature":0,"Tint":0,"Exposure":0,"Contrast":5}}}

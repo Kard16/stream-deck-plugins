@@ -342,7 +342,8 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - All 124 dial and touch events reached the plugin.
     - **Tick batching:** the app sends dialRotate events at most about every 50 ms, with up to 4 ticks per event on fast spins. That's about 20–32 ticks a second typically and about 60 at peak.
     - The plugin starts without any placed action, but only with developer mode on. `validate` passes and the log shows no layout errors.
-    - The spike dials only change a fake on-strip value; they don't talk to Lightroom yet. The user's confirmation that the strip renders is still pending.
+    - The spike dials only change a fake on-strip value; they don't talk to Lightroom yet.
+    - The user confirmed the strip: slider names, a value that changed while turning, and a bar. Tapping changed the bank. **S4 passes.**
   - **S5 on 15.3.**
     - Present: `setEnhance`, `changeDenoiseAmount`, `getEnhancePanelState`, `isAvailableForEditing`, `showBezel`, and the undocumented `LrApplication.addActivePhotoChangeObserver`, `addKeyModifierObserver` and `addHapticObserver`.
     - **AI subject mask:** `createNewMask('aiSelection', 'subject')` made one in 2.0 s; `deleteMask` removed it.
@@ -354,12 +355,23 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Ranges on a raw: Temperature 2000–50000 K, Tint -150..150, Exposure -5..5, all others -100..100.
     - Timing: the whole state poll takes 0.7 ms and photo metadata reads 0.37 ms; the other getters are under 0.01 ms.
   - The test photos are Sony ARW files, so the user's Cobalt Fuji film-simulation profiles are for Sony raws.
+- 2026-10-31, Phase 2: protocol v1 frozen in `lightroom/protocol/PROTOCOL.md`, with 18 fixture conversations in `lightroom/protocol/fixtures/`. Decisions taken from the spikes:
+  - The pair rule, `ok` draining, and a heartbeat that tells a stale event socket ("reconnect") from a paused Lightroom ("busy, wait").
+  - No `bye`.
+  - Gestures numbered `g`. Lightroom starts and stops tracking per gesture, ends it itself after 2 s without a `set`, and leaves the gesture's param out of `vals` while it runs.
+  - Values come from the observer plus a 200 ms value poll, in Develop only. Outside Develop a dial turn sends `module` first and waits for `vals`.
+  - `flag` takes an `advance` flag, which Lightroom skips if its own Auto Advance already moved on.
+  - `view` before/after for hold-to-compare.
+  - `presets` and `preset`, with locked photos skipped.
+  - `reload` hot-swaps handler modules (S3).
+  - Error codes for the deck to act on.
+  - The fixture format and matching rules that the Lua tests, the mock Lightroom and the deck tests all share.
 
 ## Progress
 
 - [x] Phase 0: kickoff (test catalog recorded, open questions answered), 2026-10-31
-- [x] S1 sockets · [x] S2 latency (numbers; the visual check moves to Phase 4) · [x] S3 hot reload · [ ] S4 deck basics (waiting on the user's strip check) · [x] S5 15.3 checks, all 2026-10-31
-- [ ] Phase 2: protocol frozen
+- [x] S1 sockets · [x] S2 latency (numbers; the visual check moves to Phase 4) · [x] S3 hot reload · [x] S4 deck basics · [x] S5 15.3 checks, all 2026-10-31. The user approved building on these results.
+- [x] Phase 2: protocol frozen, 2026-10-31
 - [ ] Track A: Lua plugin · [ ] Track B: deck plugin · [ ] Track C: tools
 - [ ] Phase 4: integration on hardware
 - [ ] Phase 5: presets and tools

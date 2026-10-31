@@ -1,0 +1,15 @@
+{"note":"With another catalog open, every write is refused with err guard and nothing changes. Navigation and views still work."}
+{"setup":{"catalog":"/Users/karimdhanji/Pictures/Lightroom/Main.lrcat","module":"library","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}},{"id":"102","file":"DSC0102.ARW","fmt":"RAW","flag":0,"rating":2,"label":"red","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"target":"101","watch":["Temperature","Tint","Exposure","Contrast"],"presets":[{"uuid":"A1B2C3D4E5F60718293A4B5C6D7E8F90","name":"Classic Chrome","folder":"Cobalt Fuji"},{"uuid":"0F1E2D3C4B5A69788796A5B4C3D2E1F0","name":"Velvia","folder":"Cobalt Fuji"}]}}
+{"deck":{"t":"hello","v":1,"client":"deck","ver":"0.1.0"}}
+{"lr":{"t":"hello","v":1,"catalog":"Main.lrcat","path":"/Users/karimdhanji/Pictures/Lightroom/Main.lrcat","guard":"on","writable":false}}
+{"deck":{"t":"set","p":"Exposure","v":1,"g":1}}
+{"lr":{"t":"err","cmd":"set","code":"guard","msg":"*"}}
+{"deck":{"t":"reset","p":"Exposure"}}
+{"lr":{"t":"err","cmd":"reset","code":"guard","msg":"*"}}
+{"deck":{"t":"flag","v":"pick","advance":true}}
+{"lr":{"t":"err","cmd":"flag","code":"guard","msg":"*"}}
+{"deck":{"t":"preset","id":3,"uuid":"A1B2C3D4E5F60718293A4B5C6D7E8F90"}}
+{"lr":{"t":"err","id":3,"cmd":"preset","code":"guard","msg":"*"}}
+{"expect":{"module":"library","flags":{"101":0},"target":"101","values":{"101":{"Exposure":0.35}},"applied":{}}}
+{"deck":{"t":"nav","v":"next"}}
+{"lr":{"t":"state","module":"library","photo":"102","file":"DSC0102.ARW","flag":0,"rating":2,"label":"red","sel":1}}

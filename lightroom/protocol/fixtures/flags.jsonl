@@ -1,0 +1,16 @@
+{"note":"Pick, then Reject with advance, then Unflag. Advance moves to the next photo because Lightroom's own Auto Advance is off."}
+{"setup":{"module":"library","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}},{"id":"102","file":"DSC0102.ARW","fmt":"RAW","flag":0,"rating":2,"label":"red","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}},{"id":"103","file":"DSC0103.ARW","fmt":"RAW","flag":1,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"target":"101"}}
+{"deck":{"t":"flag","v":"pick"}}
+{"lr":{"t":"state","module":"library","photo":"101","file":"DSC0101.ARW","flag":1,"rating":0,"label":"none","sel":1}}
+{"expect":{"flags":{"101":1},"target":"101"}}
+{"deck":{"t":"flag","v":"reject","advance":true}}
+{"wait":200}
+{"lr":{"t":"state","module":"library","photo":"102","file":"DSC0102.ARW","flag":0,"rating":2,"label":"red","sel":1}}
+{"expect":{"flags":{"101":-1,"102":0},"target":"102"}}
+{"deck":{"t":"flag","v":"none"}}
+{"wait":200}
+{"expect":{"flags":{"101":-1,"102":0},"target":"102"}}
+{"deck":{"t":"flag","v":"pick","advance":true}}
+{"wait":200}
+{"lr":{"t":"state","module":"library","photo":"103","file":"DSC0103.ARW","flag":1,"rating":0,"label":"none","sel":1}}
+{"expect":{"flags":{"102":1,"103":1},"target":"103"}}

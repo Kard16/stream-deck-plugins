@@ -1,0 +1,16 @@
+{"note":"Malformed input gets err, and the plugin keeps working."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"watch":["Temperature","Tint","Exposure","Contrast"]}}
+{"raw":"this is not json"}
+{"lr":{"t":"err","code":"bad","msg":"*"}}
+{"raw":"[1, 2, 3]"}
+{"lr":{"t":"err","code":"bad","msg":"*"}}
+{"deck":{"t":"explode","id":4}}
+{"lr":{"t":"err","id":4,"cmd":"explode","code":"unknown","msg":"*"}}
+{"deck":{"t":"set","p":"Exposure","g":1}}
+{"lr":{"t":"err","cmd":"set","code":"bad","msg":"*"}}
+{"deck":{"t":"set","p":"NoSuchSlider","v":1,"g":1}}
+{"lr":{"t":"err","cmd":"set","code":"bad","msg":"*"}}
+{"deck":{"t":"flag","v":"maybe"}}
+{"lr":{"t":"err","cmd":"flag","code":"bad","msg":"*"}}
+{"deck":{"t":"ping","id":9}}
+{"lr":{"t":"pong","id":9,"lt":"*"}}

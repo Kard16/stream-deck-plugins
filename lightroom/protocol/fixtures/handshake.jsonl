@@ -1,0 +1,16 @@
+{"note":"A deck connects in Develop and watches bank 1. Lightroom answers hello with hello and state, then watch with ranges and vals."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}]}}
+{"deck":{"t":"hello","v":1,"client":"deck","ver":"0.1.0"}}
+{"lr":{"t":"hello","v":1,"lr":"*","catalog":"Plugin Test.lrcat","path":"/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat","guard":"on","writable":true,"inst":"*"}}
+{"lr":{"t":"state","module":"develop","photo":"101","file":"DSC0101.ARW","flag":0,"rating":0,"label":"none","sel":1}}
+{"deck":{"t":"watch","ps":["Temperature","Tint","Exposure","Contrast"]}}
+{"lr":{"t":"ranges","ranges":{"Temperature":[2000,50000],"Tint":[-150,150],"Exposure":[-5,5],"Contrast":[-100,100]}}}
+{"lr":{"t":"vals","vals":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0}}}
+{"deck":{"t":"ping","id":1}}
+{"lr":{"t":"pong","id":1,"lt":"*"}}
+{"note":"A second hello, as after a reconnect: the watch list belongs to the plugin instance, so ranges and vals come too."}
+{"deck":{"t":"hello","v":1,"client":"deck","ver":"0.1.0"}}
+{"lr":{"t":"hello","v":1,"lr":"*","catalog":"Plugin Test.lrcat","path":"/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat","guard":"on","writable":true,"inst":"*"}}
+{"lr":{"t":"state","module":"develop","photo":"101","file":"DSC0101.ARW","flag":0,"rating":0,"label":"none","sel":1}}
+{"lr":{"t":"ranges","ranges":{"Exposure":[-5,5]}}}
+{"lr":{"t":"vals","vals":{"Exposure":0.35}}}
