@@ -21,6 +21,9 @@ local Server = {
   evtConnected = false,
   senderBoundAt = 0,
   senderHadClient = false,
+  binding = false, -- true while LrSocket.bind runs for either listener
+  lastSenderRecreateAt = -1,
+  lastRecvReconnectAt = -1,
   rebindRecvAt = nil,
   rebindSendAt = nil,
 
@@ -51,6 +54,7 @@ function Server.bindRecv()
   Server.recv, Server.cmdConnected = nil, false
   closeQuietly(old)
 
+  Server.binding = true
   local ok, sock = LrTasks.pcall(LrSocket.bind, {
     functionContext = Server.context,
     plugin = _PLUGIN,
@@ -79,7 +83,7 @@ function Server.bindRecv()
       Server.cmdConnected = false
       Log.info('cmd: client closed (gen %d)', gen)
       if not State.running then return end
-      reconnectQuietly(s) -- listen for the next client
+      Server.relisten(s) -- listen for the next client
       -- The client is gone, so its event connection is too. Recreate the send socket
       -- rather than calling reconnect() on it: that reportedly hangs Lightroom (MIDI2LR).
       Server.recreateSender('cmd socket closed')
@@ -94,7 +98,7 @@ function Server.bindRecv()
       if not State.running then return end
       if Server.cmdConnected then
         Server.cmdConnected = false
-        reconnectQuietly(s)
+        Server.relisten(s)
         Server.recreateSender('cmd socket error')
       else
         -- Most likely the port is in use, e.g. by an instance that hasn't shut down yet.
@@ -102,6 +106,7 @@ function Server.bindRecv()
       end
     end,
   })
+  Server.binding = false
   if ok then
     Server.recv = sock
   else
@@ -119,6 +124,7 @@ function Server.bindSender()
   Server.senderBoundAt = now()
   Server.senderHadClient = false
 
+  Server.binding = true
   local ok, sock = LrTasks.pcall(LrSocket.bind, {
     functionContext = Server.context,
     plugin = _PLUGIN,
@@ -164,6 +170,7 @@ function Server.bindSender()
       end
     end,
   })
+  Server.binding = false
   if ok then
     Server.sender = sock
   else
@@ -172,16 +179,41 @@ function Server.bindSender()
   end
 end
 
+-- Spike run 2: around Lightroom's menus and Plug-in Manager, new send sockets reported
+-- closed while still being bound, and rebinding from inside that callback recursed about
+-- 200 times, until Lua's C-stack limit. So a rebind asked for during a bind, or within
+-- 0.5 s of the last one, is left to the poll loop (Server.tick), which skips it if a
+-- client has connected by then. Both sockets also report the same client leaving, and
+-- that second report lands here too.
+local PACE_SECS = 0.5
+
 function Server.recreateSender(why)
-  -- Both sockets report a client leaving. A listener bound moments ago that has never
-  -- had a client is already fresh, and binding again would only race the reconnect.
-  if Server.sender and not Server.senderHadClient and now() - Server.senderBoundAt < 0.5 then
-    Log.info('evt: %s; listener is already fresh', why)
+  local t = now()
+  if Server.binding or t - Server.lastSenderRecreateAt < PACE_SECS then
+    if not Server.rebindSendAt then
+      Server.rebindSendAt = t + PACE_SECS
+      Log.info('evt: %s; rebinding the send socket shortly', why)
+    end
     return
   end
+  Server.lastSenderRecreateAt = t
   Server.senderRecreated = Server.senderRecreated + 1
   Log.info('evt: %s; recreating the send socket', why)
   Server.bindSender()
+end
+
+-- Listens for the next client on the receive socket, paced like recreateSender.
+function Server.relisten(sock)
+  local t = now()
+  if Server.binding or t - Server.lastRecvReconnectAt < PACE_SECS then
+    if not Server.rebindRecvAt then
+      Server.rebindRecvAt = t + PACE_SECS
+      Log.info('cmd: rebinding the receive socket shortly')
+    end
+    return
+  end
+  Server.lastRecvReconnectAt = t
+  reconnectQuietly(sock)
 end
 
 function Server.start(context)
@@ -195,13 +227,23 @@ function Server.tick()
   local t = now()
   if Server.rebindRecvAt and t >= Server.rebindRecvAt then
     Server.rebindRecvAt = nil
-    Log.info('cmd: retrying bind')
-    Server.bindRecv()
+    if Server.cmdConnected then
+      Log.info('cmd: rebind skipped, a client is connected')
+    else
+      Log.info('cmd: retrying bind')
+      Server.lastRecvReconnectAt = t
+      Server.bindRecv()
+    end
   end
   if Server.rebindSendAt and t >= Server.rebindSendAt then
     Server.rebindSendAt = nil
-    Log.info('evt: retrying bind')
-    Server.bindSender()
+    if Server.evtConnected then
+      Log.info('evt: rebind skipped, a client is connected')
+    else
+      Log.info('evt: retrying bind')
+      Server.lastSenderRecreateAt = t
+      Server.bindSender()
+    end
   end
 end
 

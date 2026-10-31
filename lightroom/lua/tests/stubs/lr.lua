@@ -64,6 +64,7 @@ function Stubs.reset(opts)
     sockets = {},
     sentLog = {}, -- every line sent on any socket, in order
     bindFails = {}, -- port -> number of binds that should fail
+    closeOnBind = {}, -- port -> number of binds whose socket reports closed before bind returns
     tasks = {},
     taskErrors = {},
     deferTasks = false,
@@ -336,6 +337,14 @@ function Stubs.reset(opts)
       end
       env.sockets[#env.sockets + 1] = s
       if params.onConnecting then params.onConnecting(s, params.port) end
+      -- Spike run 2: around Lightroom's menus and Plug-in Manager, a new send socket
+      -- reported closed straight away, before bind had even returned.
+      local closing = env.closeOnBind[params.port]
+      if closing and closing > 0 then
+        env.closeOnBind[params.port] = closing - 1
+        s.closed = true
+        if params.onClosed then params.onClosed(s) end
+      end
       return s
     end,
   }

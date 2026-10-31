@@ -359,6 +359,53 @@ test('sending while disconnected drops and counts', function()
   eq(#env.sentLog, 0)
 end)
 
+test('send sockets that close as they bind are rebound from the poll loop, not recursively', function()
+  -- Spike run 2: every new send socket reported closed at once, and rebinding from inside
+  -- that callback recursed about 200 times, until Lua's C-stack limit stopped it.
+  local env = boot()
+  local Server = require 'Server'
+  local binds0 = env.bindsOf(EVT)
+  env.closeOnBind[EVT] = 1000 -- the storm: every new listener closes immediately
+  env.drop(CMD) -- Lightroom closed the client connection itself
+  ok(env.bindsOf(EVT) - binds0 <= 2, 'no recursive rebinding: ' .. (env.bindsOf(EVT) - binds0) .. ' binds')
+  ok(Server.rebindSendAt, 'a rebind is scheduled instead')
+
+  -- While the storm lasts, the poll loop rebinds at most every 0.5 s.
+  for _ = 1, 10 do
+    env.clock.t = env.clock.t + 0.1
+    Server.tick()
+  end
+  local during = env.bindsOf(EVT) - binds0
+  ok(during <= 4, 'paced rebinding while the storm lasts: ' .. during .. ' binds in 1 s')
+
+  -- Once it's over, the next rebind sticks and a client gets its greeting.
+  env.closeOnBind[EVT] = 0
+  for _ = 1, 10 do
+    env.clock.t = env.clock.t + 0.1
+    Server.tick()
+  end
+  ok(not env.latest(EVT).closed, 'a live listener again')
+  env.clearEvents()
+  env.connect(CMD)
+  env.connect(EVT)
+  eq(env.events()[1].t, 'hello', 'greeting after the storm')
+end)
+
+test('a scheduled rebind leaves a connected client alone', function()
+  local env = boot()
+  local Server = require 'Server'
+  env.drop(CMD) -- recreates the sender
+  Server.recreateSender('second report of the same drop') -- too soon: scheduled
+  ok(Server.rebindSendAt, 'scheduled')
+  env.connect(CMD)
+  env.connect(EVT)
+  local binds = env.bindsOf(EVT)
+  env.clock.t = env.clock.t + 1
+  Server.tick()
+  eq(env.bindsOf(EVT), binds, 'no rebind under a connected client')
+  ok(Server.evtConnected, 'client still connected')
+end)
+
 test('a listener that fails to open is retried after 2 s', function()
   local env = Stubs.reset({ pluginDir = PLUGIN_DIR, tmp = TMP, module = 'develop' })
   env.bindFails[EVT] = 1

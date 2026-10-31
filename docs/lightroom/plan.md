@@ -327,11 +327,38 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Menu scripts share module state with Init's task:** the trigger arrived through `State`, and the file route was a duplicate.
   - **The user doesn't see bezels** shown while the Plug-in Manager is open.
   - **Bugs fixed:** the greeting now reads state inside a task; dropped state, vals and triggers are retried instead of being marked sent; a command that fails outside a task falls back to the task queue from then on. Five regression tests now fail on the old code and pass on the new.
+- 2026-10-31, spike run 2 (`spikes/results/20261031-142013`). The user did the whole checklist. Results:
+  - **S1 sockets: pass.** 16/16 reconnect cycles, with hello about 2 ms after connecting. Reload Plug-in and a quit and relaunch both reconnected on their own. Quit wasn't slower (`LrShutdownApp` took 0.2 s).
+    - **`bye` never arrives:** Lightroom closes plugin sockets before `LrShutdownPlugin`/`LrShutdownApp` run. The deck treats any disconnect as offline, and v1 drops `bye`.
+    - **Lightroom also closes the client connection by itself**, seen 19 s before the user's Reload click, probably when a menu or the Plug-in Manager opened. Every new send socket then reported closed while still binding, and the old code rebound from inside that callback about 200 times, until Lua's C-stack limit, before recovering 2 s later. **Fixed:** rebinds asked for during a bind, or within 0.5 s of the last one, go to the poll loop, which skips them if a client has connected. Two regression tests reproduce the storm (196 binds before the fix).
+  - **S2 latency: pass on the numbers.** On the largest raw (DSC01250-2.ARW, Sony, 47.7 MB, 7008×4672), at 15, 30 and 60 sets a second, tracked and untracked:
+    - Commands reach Lightroom in 0.1–0.3 ms (LrSocket's `ok`). `setValue` runs in about 1 ms. Ack median 1.2–2 ms, p95 3 ms or less, max 8.5 ms. No backlog at any rate, and `getValue` straight after `setValue` always matched (1051/1051).
+    - **The adjustment observer doesn't fire during a tracked gesture.** It fires once, about 4 ms after `stopTracking`. Untracked bursts fired it never.
+    - **History gained 4 Exposure steps:** one per tracked burst plus the restore. Untracked bursts made no step of their own and folded into the next one.
+    - So: always track gestures, as planned, and stop on release. The deck can't use echoes of its own writes; it keeps its own value model, as planned. To follow mouse edits live, Lightroom will also poll the watched values every 200 ms, since 13 `getValue` calls cost about 0.08 ms.
+    - The user's visual check ("does the image keep up") is still to do: a caption covered the image during the bursts. Do it in Phase 4 with the real dials.
+  - **S3 hot reload: pass.** `require` caches modules. The plugin's `reload` command (`LrFileUtils.readFile` + `loadstring`, with `import` and `require` visible in the chunk) sees edits. Reload Plug-in and relaunching clear the cache. So stateless handler modules can be hot-reloaded without the user; the socket server and state still need Reload Plug-in.
+  - **S4 deck basics.**
+    - All 124 dial and touch events reached the plugin.
+    - **Tick batching:** the app sends dialRotate events at most about every 50 ms, with up to 4 ticks per event on fast spins. That's about 20–32 ticks a second typically and about 60 at peak.
+    - The plugin starts without any placed action, but only with developer mode on. `validate` passes and the log shows no layout errors.
+    - The spike dials only change a fake on-strip value; they don't talk to Lightroom yet. The user's confirmation that the strip renders is still pending.
+  - **S5 on 15.3.**
+    - Present: `setEnhance`, `changeDenoiseAmount`, `getEnhancePanelState`, `isAvailableForEditing`, `showBezel`, and the undocumented `LrApplication.addActivePhotoChangeObserver`, `addKeyModifierObserver` and `addHapticObserver`.
+    - **AI subject mask:** `createNewMask('aiSelection', 'subject')` made one in 2.0 s; `deleteMask` removed it.
+    - **Auto Sync carries `setValue`:** with 3 photos selected and Auto Sync on, +0.5 EV on the active photo reached the other two. Multi-photo dial edits need no code of ours: the user turns on Auto Sync.
+    - The observer fires on a photo change (73 callbacks) and still fires after a Library ↔ Develop round trip.
+    - `LrApplicationView` has no getter for the current primary view, which confirms hold-to-compare for Before/After. `showView('develop_before')` and `'develop_loupe'` ran without errors; the user's visual check is pending.
+    - SDK `flagAsPick()` didn't trigger Lightroom's Auto Advance with the user's current setting, so the deck's own "advance after flagging" option is needed.
+    - Presets: 393 in 40 folders, listed in 17 ms.
+    - Ranges on a raw: Temperature 2000–50000 K, Tint -150..150, Exposure -5..5, all others -100..100.
+    - Timing: the whole state poll takes 0.7 ms and photo metadata reads 0.37 ms; the other getters are under 0.01 ms.
+  - The test photos are Sony ARW files, so the user's Cobalt Fuji film-simulation profiles are for Sony raws.
 
 ## Progress
 
 - [x] Phase 0: kickoff (test catalog recorded, open questions answered), 2026-10-31
-- [ ] S1 sockets · [ ] S2 latency · [ ] S3 hot reload · [ ] S4 deck basics · [ ] S5 15.3 checks
+- [x] S1 sockets · [x] S2 latency (numbers; the visual check moves to Phase 4) · [x] S3 hot reload · [ ] S4 deck basics (waiting on the user's strip check) · [x] S5 15.3 checks, all 2026-10-31
 - [ ] Phase 2: protocol frozen
 - [ ] Track A: Lua plugin · [ ] Track B: deck plugin · [ ] Track C: tools
 - [ ] Phase 4: integration on hardware
