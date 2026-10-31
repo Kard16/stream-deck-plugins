@@ -82,12 +82,22 @@ Work in this folder, not a worktree. Lightroom and the Stream Deck app load the 
 
 - Lua plugin: `~/Library/Logs/Adobe/Lightroom/LrClassicLogs/DeckBridge.log`
 - Deck plugin: `lightroom/deck/com.karimdhanji.lightroom.sdPlugin/logs/com.karimdhanji.lightroom.0.log` (0 is newest)
-- Stream Deck app: `~/Library/Logs/ElgatoStreamDeck/StreamDeck0.log`
+- Stream Deck app: `~/Library/Logs/ElgatoStreamDeck/StreamDeck.log` (on 7.6 it's `StreamDeck.log`, older files are `StreamDeck.1.log`)
 
 ## Commands
 
-The build session fills this in as it scaffolds. Expected:
+Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and `lua`/`luac` aren't on its PATH.
 
-- `cd lightroom/deck && npm run watch`: rebuild and restart the deck plugin on save
-- `npx streamdeck validate lightroom/deck/com.karimdhanji.lightroom.sdPlugin`
-- `luac -p lightroom/lua/DeckBridge.lrdevplugin/*.lua`
+**Lua plugin**
+- `bash lightroom/lua/tests/run.sh`: `luac -p` on every plugin file, then the unit tests under Lua 5.1.5
+
+**Deck plugin** (from `lightroom/deck`)
+- `npm run watch`: rebuild and restart the plugin on save
+- `npm run build`, `npm run typecheck`
+- `npx streamdeck validate com.karimdhanji.lightroom.sdPlugin`
+- The plugin is linked, and Stream Deck's developer mode is on (`npx streamdeck dev`). A linked plugin doesn't start without developer mode.
+
+**Spikes**
+- `node spikes/lr-harness/test.mjs`: harness self-test against the fake Lightroom, about 100 s
+- `node spikes/lr-harness/harness.mjs`: the live spike harness; results go to `spikes/results/<timestamp>/summary.md`
+- `node spikes/s4-ticks/analyze.mjs` (from `lightroom/deck`): tick statistics from the deck plugin's log

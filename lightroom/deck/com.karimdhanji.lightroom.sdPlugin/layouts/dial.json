@@ -1,0 +1,45 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+	"id": "com.karimdhanji.lightroom.dial",
+	"items": [
+		{
+			"key": "label",
+			"type": "text",
+			"rect": [12, 6, 124, 24],
+			"value": "",
+			"alignment": "left",
+			"color": "#E6E6E6",
+			"font": { "size": 17, "weight": 600 },
+			"text-overflow": "ellipsis"
+		},
+		{
+			"key": "bank",
+			"type": "text",
+			"rect": [140, 6, 48, 24],
+			"value": "",
+			"alignment": "right",
+			"color": "#8A8F99",
+			"font": { "size": 13, "weight": 500 }
+		},
+		{
+			"key": "value",
+			"type": "text",
+			"rect": [12, 32, 176, 40],
+			"value": "",
+			"alignment": "center",
+			"color": "#FFFFFF",
+			"font": { "size": 30, "weight": 700 }
+		},
+		{
+			"key": "bar",
+			"type": "bar",
+			"rect": [12, 78, 176, 14],
+			"value": 0,
+			"range": { "min": -100, "max": 100 },
+			"subtype": 1,
+			"bar_bg_c": "#33383F",
+			"bar_fill_c": "#4A9EFF",
+			"border_w": 0
+		}
+	]
+}

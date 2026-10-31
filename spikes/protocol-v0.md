@@ -53,11 +53,25 @@ Writes are `set`, `reset` and the probes that change photos (`mask`, `flagAdvanc
 |---|---|
 | `features` | Reports which newer functions exist: `LrDevelopController.setEnhance`, `getEnhancePanelState`, `changeDenoiseAmount`, `createNewMask`, `LrApplication.shutdown`, `addActivePhotoChangeObserver`, `addHapticObserver`, `LrSelection.removeFromCatalog`, `photo.isAvailableForEditing`, `catalog.getPhotosAvailableForEditing`, `LrDialogs.showBezel`, `loadstring`, `loadfile`, `dofile`. Also lists function names in `LrDevelopController`, `LrApplicationView`, `LrSelection` and `LrApplication`, if `pairs` works on them. |
 | `ranges` | `getRange` and `getValue` for the 13 bank params, trying the `2012`-suffixed name too when the plain one fails. Also the active photo's file format. |
-| `observerPhotoChange` | Counts adjustment-observer callbacks, calls `LrSelection.nextPhoto()`, waits 1.5 s, reports whether the count rose, then goes back with `previousPhoto()`. |
+| `observerPhotoChange` | Counts adjustment-observer callbacks, calls `LrSelection.nextPhoto()`, waits 1.5 s, reports whether the count rose, then goes back with `previousPhoto()`. Then switches to Library and back to Develop, nudges Exposure by +0.01 and back, and reports whether callbacks still fire after the round trip. |
 | `mask` | Guarded. `goToMasking()`, then `createNewMask('aiSelection', 'subject')`. Waits up to 15 s for `getAllMasks()` to grow, removes the mask again, returns to the loupe tool. Reports success, timing and errors. |
 | `beforeAfter` | `showView('develop_before')`, waits `args.secs` (default 2), then `showView('develop_loupe')`. Reports errors. The user watches. |
 | `presets` | Counts Develop preset folders and presets, lists the first 50 as `{folder, name, uuid}`, and times the call. |
 | `timing` | Times 20 runs each of the state poll, `getTargetPhotos()` and the flag, rating and label getters. |
 | `flagAdvance` | Guarded. Remembers the photo and its flag, calls `flagAsPick()`, waits 400 ms, reports whether the target photo changed (Lightroom's Auto Advance), then restores the flag and the photo. |
 | `autoSync` | Guarded. Needs 2 or more selected photos. Reads `Exposure2012` from each selected photo's `getDevelopSettings()`, sets Exposure on the active photo to its value + 0.5, waits 2 s, `stopTracking()`, waits 1 s, reads them all again, restores the active photo's value. Reports which photos changed. |
-| `requireVersion` | Returns `require('SpikeVersion').v` plus whether the require cache is in play. |
+| `requireVersion` | Returns `require('SpikeVersion').v`, plus `importOk` and `requireOk` from the module. |
+
+## S3 reload target
+
+`SpikeVersion.lua` has exactly this shape. The harness rewrites only the quoted string on the `local V = '…'` line, using a regex, and restores the file afterwards.
+
+```lua
+-- Spike S3: the harness rewrites the next line to test module reloading.
+local V = 'v1'
+local LrDate = import 'LrDate'
+local json = require 'json'
+return { v = V, importOk = LrDate ~= nil, requireOk = json ~= nil }
+```
+
+`reload` re-reads that file with `LrFileUtils.readFile`, compiles it with `loadstring` (falling back to `loadfile`, then `dofile`), runs it and returns the fresh table's fields. It must not touch the `require` cache, so `requireVersion` after a `reload` shows whether `require` still caches.

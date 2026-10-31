@@ -1,0 +1,53 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+	"UUID": "com.karimdhanji.lightroom",
+	"Name": "Lightroom",
+	"Version": "0.1.0.0",
+	"Author": "Karim Dhanji",
+	"Description": "Lightroom Classic Develop sliders on the dials, plus culling and preset keys, through the DeckBridge Lua plugin.",
+	"Category": "Lightroom",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"Icon": "imgs/plugin/icon",
+	"CodePath": "bin/plugin.js",
+	"SDKVersion": 3,
+	"Software": {
+		"MinimumVersion": "7.1"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "13"
+		}
+	],
+	"Nodejs": {
+		"Version": "24",
+		"Debug": "enabled"
+	},
+	"Actions": [
+		{
+			"UUID": "com.karimdhanji.lightroom.dial",
+			"Name": "Develop Dial",
+			"Tooltip": "Adjusts a Lightroom Develop slider. Tap the strip for the next bank of sliders.",
+			"Icon": "imgs/actions/dial/icon",
+			"Controllers": [
+				"Encoder"
+			],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/dial/key"
+				}
+			],
+			"Encoder": {
+				"layout": "layouts/dial.json",
+				"Icon": "imgs/actions/dial/encoder",
+				"TriggerDescription": {
+					"Rotate": "Adjust (push + turn: fine)",
+					"Push": "Reset slider",
+					"Touch": "Next bank",
+					"LongTouch": "Reset slider"
+				}
+			}
+		}
+	]
+}
