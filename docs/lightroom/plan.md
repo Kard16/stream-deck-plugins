@@ -269,6 +269,7 @@ Optional later: a histogram or thumbnail on the strip (`requestJpegThumbnail`, r
   - Open the test catalog.
   - Add or enable the plugin in File ▸ Plug-in Manager.
   - Click Reload Plug-in, until S3 removes the need.
+  - Quit and relaunch Lightroom after a plugin file is added, because Reload Plug-in doesn't see new files.
   - Switch modules when asked.
   - Close menus and the Plug-in Manager afterwards, because they pause plugin tasks.
 - Looking at the deck: strip rendering, key images, how the dials feel.
@@ -417,6 +418,21 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Diagnosis:** `Init.lua` now catches a load failure and logs it in full. It logged `init failed: Could not load toolkit script: Reload`.
   - **Likely cause:** Lightroom only sees plugin files that existed when it launched. `Reload.lua`, `Proto.lua`, `Library.lua`, `Presets.lua` and `MenuStatus.lua` all came after the 14:28 launch, while files that existed then load fine.
   - **Fix to try:** quit and relaunch Lightroom.
+- 2026-10-31, v1 is live in Lightroom (ladder step 4).
+  - The relaunch fixed the load, which confirms the diagnosis. Deck Bridge 1.0.0 started as inst 6ae6743e-93a1, and CLAUDE.md now has the new-files rule.
+  - Everything below ran in the test catalog on photo 573 (`DSC01268-2.ARW`), from a snapshot of the committed tools:
+    - **`smoke.json` passed:** 57 steps in 3.8 s, with nothing left to clean up.
+      - Acks took 4–14 ms; Next and Previous about 125 ms each.
+      - It listed 398 presets, including the user's "Cobalt Fuji" folder: Classic Chrome, Classic Neg, Nostalgic Neg, Provia and Reala Ace.
+    - **`set` ran straight from `onMessage`**, with no "needs a task" fallback, so reading the target photo there works on 15.3.
+    - **Hot reload:** `reload {mods: [Library]}` answered ok.
+    - **Latency**, 3 s bursts at 15, 30 and 60 sets a second:
+      - ack median 2.3, 1.6 and 1.2 ms;
+      - p95 4.1, 2.0 and 1.5 ms, with a max of 7.4 ms;
+      - `done` to `vals`: 10–20 ms;
+      - no backlog, no leaks, no errors, and Exposure was put back afterwards.
+    - **Lightroom's log** has no warnings or errors.
+  - **The deck plugin** was restarted on the v1 build (0.2.0.0). It connected and said hello, and Lightroom shows it online.
 
 ## Progress
 
@@ -424,7 +440,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] S1 sockets · [x] S2 latency (numbers; the visual check moves to Phase 4) · [x] S3 hot reload · [x] S4 deck basics · [x] S5 15.3 checks, all 2026-10-31. The user approved building on these results.
 - [x] Phase 2: protocol frozen, 2026-10-31
 - [x] Track A: Lua plugin · [x] Track B: deck plugin · [x] Track C: tools, all built and verified offline, 2026-10-31 (workflow `wf_50e3a891-197`)
-- [ ] Integration: protocol amendments from the tracks; the fake deck against the real Lightroom (ladder step 4); the deck plugin against the mock (step 5)
+- [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [ ] the deck plugin against the mock (step 5), in progress
 - [ ] Phase 4: integration on hardware
 - [ ] Phase 5: presets and tools
 - [ ] Phase 6: hardening

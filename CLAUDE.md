@@ -37,6 +37,7 @@ Work in this folder, not a worktree. Lightroom and the Stream Deck app load the 
 - Lightroom Classic 15.3 (SDK 15.3) runs Lua 5.1.5. That rules out `goto`, `//`, bitwise operators, `utf8` and `table.unpack`.
 - Check every file with `luac -p`; 5.1.5 is pinned in `mise.toml`.
 - Load SDK modules with `local LrTasks = import 'LrTasks'` and plugin modules with `require 'Dispatch'`.
+- Lightroom only sees plugin files that existed when it launched. A new `.lua` file needs a quit and relaunch: Reload Plug-in fails with "Could not load toolkit script: <name>" and disables the plugin. Edits to existing files need only Reload Plug-in, or the `reload` command for handler modules.
 - The SDK has no JSON library; use the vendored `json.lua`.
 - Keep Lightroom calls behind thin adapters, so logic can be unit-tested with stubbed `Lr*` modules outside Lightroom.
 
