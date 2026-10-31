@@ -2,17 +2,11 @@
 
 ## Before you start
 
-1. Install the Stream Deck app. The installer asks for your Mac password, and after that the app keeps itself up to date.
+Make a test catalog in Lightroom Classic with File ▸ New Catalog, saved outside this repo (for example in `~/Pictures/Deck Test/`).
+- Import 20–50 copies of real photos, including a few of your largest raws.
+- Keep this catalog open while the build session works.
 
-   ```bash
-   brew install --cask elgato-stream-deck
-   ```
-
-   Open the app once, then plug the Stream Deck + straight into the Mac, not through a dock or hub.
-
-2. Make a test catalog in Lightroom Classic with File ▸ New Catalog, saved outside this repo (for example in `~/Pictures/Deck Test/`).
-   - Import 20–50 copies of real photos, including a few of your largest raws.
-   - Keep this catalog open while the build session works.
+Already done on 2026-10-31: the Stream Deck app 7.6.0 is installed, and the Stream Deck + is on your dock. Some docks drop dial events, so if the dials misbehave, try one of the Mac's own ports first.
 
 ## Start the session
 

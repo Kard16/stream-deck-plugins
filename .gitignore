@@ -29,3 +29,6 @@ dist/
 # Claude Code local state
 .claude/settings.local.json
 .claude/worktrees/
+
+# Spike run output
+spikes/results/

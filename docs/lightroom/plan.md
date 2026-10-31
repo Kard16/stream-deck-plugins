@@ -23,12 +23,14 @@ Done means two things:
 
 ## Prerequisites
 
-The user does these before kickoff:
+The user does this before kickoff:
 
-- Installs the Stream Deck app (7.1 or later; 7.6 is current) and plugs the Stream Deck + straight into the Mac.
-- Creates a test catalog with 20–50 copies of real photos, including a few of the largest raws. Path: _recorded at kickoff_.
+- Creates a test catalog with 20–50 copies of real photos, including a few of the largest raws. Path: `/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat` (recorded at kickoff, 2026-10-31).
 
-Already done: Node 24 and Lua 5.1.5 from `mise.toml` were installed on 2026-10-31.
+Already done on 2026-10-31:
+- Node 24 and Lua 5.1.5 from `mise.toml` installed.
+- Stream Deck app 7.6.0 (build 23012) installed. SDK 3 needs 7.1 or later.
+- The Stream Deck + is plugged into the user's dock, not the Mac, and stays there by the user's choice (see Risks).
 
 Check these at kickoff and ask for anything missing.
 
@@ -293,6 +295,7 @@ Agents report what they ran and its output. The main thread re-runs the checks b
   - Lightroom 16 may arrive at Adobe MAX (10–12 November).
 - **Parameter quirks:** Temperature's range depends on the file type. Some parameters ignore `resetToDefault` (LR research §2.2).
 - **macOS 26:** localhost connections can fail after a reboot, and dials can lag after a cold boot (SD research §0).
+- **The deck is on a dock.** Elgato's maintainers say some docks cause erratic or missing events (SD research §0, §7). If S4 or Phase 4 shows dropped or late ticks, retest with the deck on one of the Mac's own ports before debugging code. Otherwise don't ask the user to move it.
 - **Agents can't see the deck.** Anything visual needs the user, so batch those checks.
 
 ## Log
@@ -300,10 +303,26 @@ Agents report what they ran and its output. The main thread re-runs the checks b
 Record kickoff answers, spike results and decisions here, newest last, with dates.
 
 - 2026-10-31: Plan written. Node 24 and Lua 5.1.5 pinned in `mise.toml` and installed.
+- 2026-10-31: Stream Deck app 7.6.0 installed. The deck stays on the user's dock, their choice after hearing that some docks drop events.
+- 2026-10-31, kickoff: Test catalog is `/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat`. Checked: LrC 15.3 (`com.adobe.LightroomClassicCC7`) running with it open, Stream Deck 7.6.0 running, Node 24.22.2 and Lua 5.1.5 through `mise exec --` (the shell's bare `node` is 22), ports 58780/58781 and 58763/58764 free.
+- 2026-10-31, kickoff: The user's feature list for this build:
+  - Keys: Pick, Reject, Unflag; 4 keys for their Cobalt Fuji film-simulation profiles; Before/After.
+  - Dials: Temperature, Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Texture, Clarity, Vibrance, Saturation, PostCropVignetteAmount.
+  - More may come later.
+- 2026-10-31, kickoff answers (open questions 1–7):
+  1. **Banks**, in Basic-panel order: (1) Temperature, Tint, Exposure, Contrast; (2) Highlights, Shadows, Whites, Blacks; (3) Texture, Clarity, Vibrance, Saturation; (4) PostCropVignetteAmount plus 3 empty slots. No mask bank for now.
+  2. **Gestures** (default accepted): turn = adjust with acceleration; push + turn = fine; press = reset that slider; tap the strip = next bank; long-touch = reset, as the touch alternative CLAUDE.md asks for. No previous-bank gesture: tap round the 4 banks.
+  3. **Dial outside Develop:** switch to Develop first.
+  4. **Keys:** Pick, Reject and Unflag, each with an "advance after flagging" option; Next and Previous photo; Before/After. No rating or label keys yet, but the Lua side still reports flag, rating and label in `state`.
+  5. **Presets:** the 4 profile keys are a generic "Apply preset" key. The user makes 4 profile-only Develop presets (only "Profile" ticked), and each key picks one from a Property Inspector list fed by `presets`. Other one-click tools wait for a later phase.
+  6. **Several photos selected:** dials edit the active photo only, and S5 checks whether Lightroom's Auto Sync carries them. Flag keys follow `LrSelection`'s own rule. Preset keys apply to all of `getTargetPhotos()`, and do nothing when there's no target photo.
+  7. **Strip histogram or thumbnail:** later, not in this build.
+  - **Before/After:** hold to compare. Key down = `showView('develop_before')`, key up = `showView('develop_loupe')`. The user preferred it if it wasn't harder, and it isn't: it needs no toggle state.
+- 2026-10-31, process: The spikes are built where Lightroom and the Stream Deck app will load the real plugins from: `lightroom/lua/DeckBridge.lrdevplugin` (real id and ports) and `lightroom/deck/` (real plugin and dial-action UUIDs). That way the user adds the Lua plugin and places the dial actions once. Spike-only code stays in clearly named files (`Spike*.lua`, the spike menu items), which Track A deletes. The harness and analysis scripts live in `spikes/`, and the temporary wire format is `spikes/protocol-v0.md`.
 
 ## Progress
 
-- [ ] Phase 0: kickoff (test catalog recorded, open questions answered)
+- [x] Phase 0: kickoff (test catalog recorded, open questions answered), 2026-10-31
 - [ ] S1 sockets · [ ] S2 latency · [ ] S3 hot reload · [ ] S4 deck basics · [ ] S5 15.3 checks
 - [ ] Phase 2: protocol frozen
 - [ ] Track A: Lua plugin · [ ] Track B: deck plugin · [ ] Track C: tools
