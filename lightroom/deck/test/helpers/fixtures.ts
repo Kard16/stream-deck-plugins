@@ -59,9 +59,18 @@ export function loadFixtures(): Fixture[] {
 		});
 }
 
-function target(setup: Setup): Photo | undefined {
+/** PROTOCOL.md's setup defaults: `target` is the first id in `selected`, or else the first photo. */
+export function targetPhoto(setup: Setup): Photo | undefined {
 	const photos = setup.photos ?? [];
-	return photos.find((p) => p.id === setup.target) ?? photos[0];
+	const id = setup.target ?? setup.selected?.[0];
+	return photos.find((p) => p.id === id) ?? photos[0];
+}
+
+/** `selected` defaults to `[target]`, and a target missing from it is added. */
+function selectedIds(setup: Setup): string[] {
+	const photo = targetPhoto(setup);
+	const ids = setup.selected ?? (photo ? [photo.id] : []);
+	return photo && !ids.includes(photo.id) ? [...ids, photo.id] : ids;
 }
 
 /** setup.ranges, or PROTOCOL.md's defaults: the measured raw ranges for RAW and DNG, and -100..100 Temperature and Tint for JPG. */
@@ -94,8 +103,7 @@ export function connectHello(setup: Setup, inst: string): Obj {
 }
 
 export function connectState(setup: Setup): Obj {
-	const photo = target(setup);
-	const selected = setup.selected ?? (photo ? [photo.id] : []);
+	const photo = targetPhoto(setup);
 	return {
 		t: "state",
 		module: setup.module ?? "develop",
@@ -104,13 +112,16 @@ export function connectState(setup: Setup): Obj {
 		flag: photo?.flag ?? 0,
 		rating: photo?.rating ?? 0,
 		label: photo?.label ?? "none",
-		sel: selected.length,
+		sel: selectedIds(setup).length,
 	};
 }
 
-/** ranges and vals for `params`, as Lightroom sends them in Develop after a watch. Empty outside Develop. */
+/**
+ * ranges and vals for `params`, as Lightroom sends them in Develop after a watch, on entering Develop and
+ * on every photo change. Empty outside Develop.
+ */
 export function watchedValues(setup: Setup, params: readonly string[]): Obj[] {
-	const photo = target(setup);
+	const photo = targetPhoto(setup);
 	if ((setup.module ?? "develop") !== "develop" || !photo) return [];
 	const ranges = rangesFor(setup, photo);
 	const r: Record<string, [number, number]> = {};

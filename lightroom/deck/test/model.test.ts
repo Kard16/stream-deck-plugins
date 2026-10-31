@@ -315,6 +315,20 @@ describe("value model: outside Develop", () => {
 		noProblems(link);
 	});
 
+	test("after a photo change a turn waits for the new photo's range, which can come after its vals", () => {
+		const { link, model } = setup();
+		link.lr({ t: "state", photo: "104", file: "IMG0104.JPG" });
+		// Develop is still loading the JPEG: Lightroom can't read Temperature's range yet and sends it later.
+		link.lr({ t: "ranges", ranges: { Tint: [-100, 100], Exposure: [-5, 5], Contrast: [-100, 100] } });
+		link.lr({ t: "vals", vals: { Temperature: 0, Tint: 0, Exposure: 0, Contrast: 5 } });
+		assert.equal(model.turn("Temperature", 1, false, slot("Temperature"), DIAL), "held", "the raw file's Kelvin range would step 50 K and clamp to 2000");
+		assert.deepEqual(link.take(), []);
+		link.lr({ t: "ranges", ranges: { Temperature: [-100, 100] } });
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Temperature", v: 1, g: 1 }]);
+		assert.equal(model.turn("Contrast", 1, false, slot("Contrast"), DIAL), "applied", "Contrast had its new range all along");
+		noProblems(link);
+	});
+
 	test("Next during a gesture: its final set and done go before nav, and turns wait for the new photo's values", () => {
 		const { clock, link, model } = setup();
 		model.turn("Exposure", 1, false, slot("Exposure"), DIAL); // set 0.38 goes at once
@@ -377,6 +391,128 @@ describe("value model: outside Develop", () => {
 		assert.equal(model.view("Exposure").value, 0.35);
 		assert.equal(model.view("Exposure").fresh, false);
 		assert.equal(model.inDevelop, false);
+	});
+});
+
+describe("value model: stale gestures (err stale, PROTOCOL.md Gestures)", () => {
+	const STATE_102 = { t: "state", module: "develop", photo: "102", file: "DSC0102.ARW", flag: 0, rating: 2, label: "red", sel: 1 };
+
+	/** Three turns of Exposure 40 ms apart: gesture 1 sends 0.38, which Lightroom acks, then 0.42 and 0.45. */
+	function threeSets(clock: FakeClock, link: FakeLink, model: LrModel): [SetCmd, SetCmd] {
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		link.lr({ t: "ack", p: "Exposure", v: 0.38, g: 1 });
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		const out = sets(link.take());
+		assert.deepEqual(
+			out.map((s) => [s.v, s.g]),
+			[
+				[0.38, 1],
+				[0.42, 1],
+				[0.45, 1],
+			],
+		);
+		const [, second, third] = out;
+		assert.ok(second && third);
+		return [second, third];
+	}
+
+	test("err before the new photo's state: the gesture ends with no final set or done, turns wait, then a new g starts from the new photo", () => {
+		const { clock, link, model, alerts } = setup();
+		const [second, third] = threeSets(clock, link, model);
+		clock.advance(10);
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL); // 0.48 waits for the set interval
+		// The user moved to photo 102 in Lightroom, which caught it as `second` arrived, before its poll did.
+		link.err(second, "stale");
+		link.err(third, "stale");
+		assert.equal(model.gesture, null);
+		assert.equal(model.view("Exposure").value, 0.38, "back to the value Lightroom last confirmed");
+		clock.advance(100);
+		assert.deepEqual(link.take(), [], "the pending 0.48 is dropped, and no done");
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held", "turns wait for the new photo");
+		link.lr(STATE_102);
+		link.lr({ t: "ranges", ranges: RAW_RANGES });
+		assert.deepEqual(link.take(), [], "no done when the state comes either, and still waiting for 102's vals");
+		assert.equal(model.view("Exposure").fresh, false);
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2 }], "the held turn applies to 102's value");
+		clock.advance(1000);
+		assert.deepEqual(link.take(), [{ t: "done", g: 2 }]);
+		assert.deepEqual(alerts, [], "a stale set raises no alert");
+		noProblems(link);
+	});
+
+	test("err after the new photo's state and vals: no wait, the value stays the new photo's, and the next gesture starts from it", () => {
+		const { clock, link, model, alerts } = setup();
+		const [second, third] = threeSets(clock, link, model);
+		// Lightroom's poll saw photo 102 before `second` arrived: the state, ranges and vals for 102 come first.
+		link.lr(STATE_102);
+		assert.deepEqual(link.take(), [{ t: "done", g: 1 }], "the state ends gesture 1; Lightroom ignores this late done");
+		link.lr({ t: "ranges", ranges: RAW_RANGES });
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+		link.err(second, "stale");
+		assert.deepEqual(model.view("Exposure"), { value: -1, range: [-5, 5], fresh: true, adjusting: false });
+		clock.advance(40);
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "applied", "no wait: the deck already has 102's values");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2 }]);
+		// The err for gesture 1's last set can come after gesture 2 began: it leaves gesture 2 alone.
+		link.err(third, "stale");
+		assert.equal(model.gesture?.g, 2);
+		assert.ok(Math.abs((model.view("Exposure").value ?? 0) - (-1 + 1 / 30)) < 1e-9);
+		clock.advance(1000);
+		assert.deepEqual(link.take(), [{ t: "done", g: 2 }]);
+		assert.deepEqual(alerts, []);
+		noProblems(link);
+	});
+
+	test("several stale errs act once: turns wait photoChangeMs from the first, then go on from the value Lightroom confirmed", () => {
+		const { clock, link, model, alerts } = setup();
+		const [second, third] = threeSets(clock, link, model);
+		// The user went to another photo and straight back between two polls, so no state follows.
+		link.err(second, "stale");
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held");
+		clock.advance(100);
+		link.err(third, "stale");
+		clock.advance(399);
+		assert.deepEqual(link.take(), [], "500 ms from the first err; the second doesn't restart the wait");
+		clock.advance(1);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.41, g: 2 }], "from the acked 0.38, not the refused 0.45");
+		assert.deepEqual(alerts, []);
+		noProblems(link);
+	});
+
+	test("a stale err while another dial's gesture is open ends that one too, with done: it began on the old photo's values", () => {
+		const { clock, link, model, alerts } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		link.lr({ t: "ack", p: "Exposure", v: 0.38, g: 1 });
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		clock.advance(40);
+		model.turn("Contrast", 1, false, slot("Contrast"), "dial-3"); // ends gesture 1 first
+		const sent = link.take();
+		assert.deepEqual(strip(sent), [
+			{ t: "set", p: "Exposure", v: 0.38, g: 1 },
+			{ t: "set", p: "Exposure", v: 0.42, g: 1 },
+			{ t: "done", g: 1 },
+			{ t: "set", p: "Contrast", v: 1, g: 2 },
+		]);
+		const [, second] = sent;
+		assert.ok(second);
+		// Lightroom was on photo 102 when 0.42 arrived. It refused that, then took Contrast 1 as a new gesture there.
+		link.err(second, "stale");
+		assert.equal(model.gesture, null);
+		assert.deepEqual(link.take(), [{ t: "done", g: 2 }]);
+		assert.equal(model.turn("Contrast", 1, false, slot("Contrast"), "dial-3"), "held");
+		clock.advance(40);
+		link.lr(STATE_102);
+		link.lr({ t: "ranges", ranges: RAW_RANGES });
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1, Contrast: 1 } });
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 2, g: 3 }], "a new gesture from Lightroom's value for 102");
+		assert.equal(model.view("Exposure").value, -1);
+		assert.deepEqual(alerts, []);
+		noProblems(link);
 	});
 });
 

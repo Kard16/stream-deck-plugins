@@ -94,7 +94,12 @@ export type PresetsEvt = { t: "presets"; id?: number; items: PresetItem[] };
 export type AppliedEvt = { t: "applied"; id?: number; uuid?: string; n: number; locked: number };
 export type ReloadedEvt = { t: "reloaded"; id?: number; mods?: string[]; ok: boolean; msg?: string };
 export type PongEvt = { t: "pong"; id?: number; lt?: number };
-export type ErrCode = "guard" | "bad" | "unknown" | "noDevelop" | "noPhoto" | "notFound" | "busy" | "failed";
+/**
+ * PROTOCOL.md's Errors table. `stale` answers a `set` whose gesture ended when the photo or module changed;
+ * the deck goes on with a new gesture and raises no alert (see LrModel). The parser takes any non-empty
+ * code, so a code added later still reaches the err callbacks.
+ */
+export type ErrCode = "guard" | "bad" | "unknown" | "noDevelop" | "noPhoto" | "stale" | "notFound" | "busy" | "failed";
 export type ErrEvt = { t: "err"; id?: number; cmd?: string; code: string; msg?: string };
 
 export type LrEvent =

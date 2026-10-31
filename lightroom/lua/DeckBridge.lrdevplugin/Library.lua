@@ -55,7 +55,7 @@ function Library.module(m)
     return Proto.err(m, 'bad', 'module v must be "develop" or "library"')
   end
   if v ~= 'develop' then
-    Develop.endGesture('leaving Develop')
+    Develop.endGesture('leaving Develop', true)
   end
   if not switchTo(v) then
     if v == 'develop' then
@@ -91,7 +91,7 @@ function Library.flag(m)
   if m.advance then
     LrTasks.sleep(Config.ADVANCE_SECS)
     if targetId() == before then
-      Develop.endGesture('next photo')
+      Develop.endGesture('next photo', true)
       LrSelection.nextPhoto()
     end
     Poll.sync({ state = true })
@@ -104,7 +104,7 @@ function Library.nav(m)
   if not fn then
     return Proto.err(m, 'bad', 'nav v must be "next" or "prev"')
   end
-  Develop.endGesture('photo change')
+  Develop.endGesture('photo change', true)
   LrSelection[fn]()
   Poll.sync({ state = true })
 end

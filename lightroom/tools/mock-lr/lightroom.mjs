@@ -5,6 +5,9 @@
 // - ranges depend on the file format (Temperature is Kelvin on raw, -100..100 on JPEG);
 // - writes go through only while the test catalog is open (the guard), compared without case;
 // - while a menu is open (pause), plugin tasks and socket callbacks wait until it closes.
+// Like the plugin (Poll.sync), it learns of the user's photo and module changes only from its poll; a set can
+// reach one first. A gesture belongs to the photo it started on: once the photo or module changes under it,
+// its later sets get err stale (PROTOCOL.md, Gestures).
 // Sockets live in index.mjs; this file talks to them through `transport`.
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -165,6 +168,9 @@ export class MockLightroom extends EventEmitter {
       if (!this.isParamName(p)) throw new SetupError(`watch: unknown param ${p}`);
       if (!this.watch.includes(p)) this.watch.push(p);
     }
+    this.watchId = undefined; // the id of the watch that set the list, for its late err bad
+    this.watchChecked = true; // whether unknown params have been dropped from the list yet
+    this.staleG = null; // g of a gesture that ended when the photo or module changed
     this.history = [];
     this.busyUntil = -Infinity;
     this.lastBezelAt = -Infinity;
@@ -178,7 +184,6 @@ export class MockLightroom extends EventEmitter {
     this.lastValsAt = -Infinity;
     this.lastPhoto = undefined;
     this.lastModule = undefined;
-    this.forced = new Set();
     this.cancel(this.observerTimer);
     this.observerTimer = null;
   }
@@ -209,8 +214,10 @@ export class MockLightroom extends EventEmitter {
     }, TIMING.pollMs);
   }
 
-  // Lightroom quits or the plugin unloads: every task stops, nothing more is sent.
+  // Lightroom quits or the plugin unloads: every task stops, nothing more is sent. An open gesture ends
+  // as if done had arrived, so it is still one history step (Shutdown.lua).
   shutdown() {
+    if (this.gesture) this.endGesture('shutdown');
     if (this.pollTimer != null) this.clock.clearInterval(this.pollTimer);
     this.pollTimer = null;
     for (const h of this.timers) this.clock.clearTimeout(h);
@@ -226,11 +233,14 @@ export class MockLightroom extends EventEmitter {
     this.observerTimer = null;
   }
 
-  // A new plugin instance: new inst, and the watch list (plugin state) starts empty again.
+  // A new plugin instance: new inst, and the plugin's state (the watch list, a stale g) starts empty again.
   boot({ catalog } = {}) {
     if (catalog) this.catalog = catalog;
     this.inst = newInst();
     this.watch = [];
+    this.watchId = undefined;
+    this.watchChecked = true;
+    this.staleG = null;
     this.resetBaselines();
     this.start();
   }
@@ -403,16 +413,29 @@ export class MockLightroom extends EventEmitter {
     };
   }
 
-  // hello, state, then ranges and vals when in Develop with watched params.
+  // hello, state, then ranges and vals when in Develop with watched params. A restarted deck numbers its
+  // gestures from 1 again, so the greeting forgets a stale g (Core.greeting).
   greet() {
+    this.staleG = null;
     this.send(this.helloMsg());
     this.lastStateKey = null;
     this.refresh({ forceState: true, forceDevelop: true });
   }
 
-  // Sends state if it changed (or forceState), then on a photo change or on entering Develop
-  // (or forceDevelop) ranges and all watched vals. Always in that order.
+  // Ends an open gesture the target photo or the module moved away from, as stale: the plugin's poll does
+  // this (Poll.sync), so a change the user or Lightroom's own Auto Advance made ends the gesture here.
+  noticeMoves() {
+    const gs = this.gesture;
+    if (!gs) return;
+    if (this.module !== 'develop') this.endGesture('left Develop', true);
+    else if (gs.photo !== this.target) this.endGesture('the photo changed', true);
+  }
+
+  // Ends a gesture the target photo or module moved away from, then sends state if it changed (or
+  // forceState), then on a photo change or on entering Develop (or forceDevelop) ranges and all
+  // watched vals. Always in that order.
   refresh({ forceState = false, forceDevelop = false } = {}) {
+    this.noticeMoves();
     if (!this.transport.connected()) return;
     const st = this.stateMsg();
     const key = JSON.stringify(st);
@@ -424,12 +447,25 @@ export class MockLightroom extends EventEmitter {
       this.lastPhoto = this.target;
       this.lastModule = this.module;
       this.lastVals = {};
-      this.forced.clear();
-      if (this.inDevelopWithPhoto() && this.watch.length > 0) {
-        this.send({ t: 'ranges', ranges: this.rangesFor(this.watch) });
-        this.sendOwedVals();
+      if (this.inDevelopWithPhoto()) {
+        this.checkWatch();
+        if (this.watch.length > 0) {
+          this.send({ t: 'ranges', ranges: this.rangesFor(this.watch) });
+          this.sendOwedVals();
+        }
       }
     }
+  }
+
+  // getRange works only in Develop with a photo, so the plugin drops unknown watched params once it's there:
+  // at once for a watch sent there, otherwise on entering it. Their err bad carries the watch's id.
+  checkWatch() {
+    if (this.watchChecked || !this.inDevelopWithPhoto()) return;
+    this.watchChecked = true;
+    const unknown = this.watch.filter((p) => !this.isParamName(p));
+    if (unknown.length === 0) return;
+    this.watch = this.watch.filter((p) => this.isParamName(p));
+    this.err({ t: 'watch', id: this.watchId }, 'bad', `unknown params dropped from the watch list: ${unknown.map((p) => short(p)).join(', ')}`);
   }
 
   // vals for every watched param, which the deck is owed after hello, watch, entering Develop and a
@@ -456,13 +492,13 @@ export class MockLightroom extends EventEmitter {
     if (Object.keys(vals).length === 0) return false;
     if (!this.send({ t: 'vals', vals })) return false;
     Object.assign(this.lastVals, vals);
-    for (const p of Object.keys(vals)) this.forced.delete(p);
     this.lastValsAt = this.clock.now();
     return true;
   }
 
   // The observer's callback and the 200 ms value poll: send the watched params that changed since
-  // they were last sent, leaving out the tracked one.
+  // they were last sent, leaving out the tracked one. So after a gesture, vals carry its final value
+  // only if it differs from the last value sent for its param (PROTOCOL.md, Commands: done).
   flushVals() {
     if (!this.transport.connected()) return;
     if (this.lastPhoto !== this.target || this.lastModule !== this.module) {
@@ -470,14 +506,12 @@ export class MockLightroom extends EventEmitter {
       return;
     }
     if (!this.inDevelopWithPhoto()) return;
+    this.checkWatch();
     const ph = this.targetPhoto();
     const changed = [];
     for (const p of this.watch) {
-      if (this.gesture && this.gesture.p === p) {
-        this.forced.delete(p);
-        continue;
-      }
-      if (this.forced.has(p) || this.lastVals[p] !== this.getValue(ph, p)) changed.push(p);
+      if (this.gesture && this.gesture.p === p) continue;
+      if (this.lastVals[p] !== this.getValue(ph, p)) changed.push(p);
     }
     if (changed.length === 0) return;
     if (this.clock.now() - this.lastValsAt < TIMING.valsGapMs) {
@@ -496,7 +530,9 @@ export class MockLightroom extends EventEmitter {
     });
   }
 
+  // Like the plugin's, the poll ends gestures the photo or module moved away from even with no client.
   poll() {
+    this.noticeMoves();
     if (!this.transport.connected()) return;
     this.refresh();
     this.flushVals();
@@ -540,42 +576,63 @@ export class MockLightroom extends EventEmitter {
     return isNum(ph.values[p]) ? ph.values[p] : this.defaultOf(ph, p);
   }
 
+  // Why writes are refused, in Guard.writable's words, or null when they go through.
+  whyNotWritable() {
+    if (!this.guardOn || String(this.catalog).toLowerCase() === this.testCatalog.toLowerCase()) return null;
+    return "the test catalog isn't open";
+  }
+
   writable() {
-    return !this.guardOn || String(this.catalog).toLowerCase() === this.testCatalog.toLowerCase();
+    return this.whyNotWritable() == null;
   }
 
   guardOk(m) {
-    if (this.writable()) return true;
-    this.err(m, 'guard', 'writes are off: the test catalog is not open');
+    const why = this.whyNotWritable();
+    if (why == null) return true;
+    this.err(m, 'guard', `writes are off: ${why}`);
     const t = this.clock.now();
     if (t - this.lastBezelAt >= TIMING.bezelGapMs) {
       this.lastBezelAt = t;
       this.bezels += 1;
-      this.log('bezel', 'Deck Bridge: writes are off (not the test catalog)');
+      this.log('bezel', `Deck Bridge: writes are off (${why})`);
     }
     return false;
   }
 
+  // The target photo changes in Lightroom. An open gesture ends when the poll, or a set for it, notices.
   setTarget(id, selected = id == null ? [] : [id]) {
-    if (this.gesture && id !== this.target) this.endGesture('the photo changed');
     this.target = id;
     this.selected = selected;
   }
 
+  // The photo LrSelection.nextPhoto() / previousPhoto() moves to, or null at either end of the filmstrip.
+  neighbour(dir) {
+    const i = this.photos.findIndex((p) => p.id === this.target);
+    const j = i + dir;
+    return i >= 0 && j >= 0 && j < this.photos.length ? this.photos[j].id : null;
+  }
+
   // LrSelection.nextPhoto() / previousPhoto(): the neighbour becomes the only selected photo.
   navigate(dir) {
-    const i = this.photos.findIndex((p) => p.id === this.target);
-    if (i < 0) return false;
-    const j = i + dir;
-    if (j < 0 || j >= this.photos.length) return false;
-    this.setTarget(this.photos[j].id);
+    const id = this.neighbour(dir);
+    if (id == null) return false;
+    this.setTarget(id);
     this.log('lr', `${dir > 0 ? 'nextPhoto' : 'previousPhoto'} → ${this.target}`);
     return true;
   }
 
+  // The deck's nav and a flag's advance end the open gesture first, as stale (Library.nav and Library.flag),
+  // even at an end of the filmstrip where nothing moves: refusing the deck's later sets for it is safer than
+  // applying them to the wrong photo.
+  navigateForDeck(dir, why) {
+    this.endGesture(why, true);
+    return this.navigate(dir);
+  }
+
+  // The module changes. An open gesture ends when the poll notices it left Develop; the module command
+  // ends it itself.
   switchModule(name) {
     if (this.module === name) return false;
-    if (this.module === 'develop' && this.gesture) this.endGesture('left Develop');
     this.module = name;
     this.log('lr', `module → ${name}`);
     return true;
@@ -608,10 +665,12 @@ export class MockLightroom extends EventEmitter {
 
   // ---------- gestures (PROTOCOL.md, Gestures) ----------
 
+  // A gesture belongs to the photo it started on. A new gesture means the deck has moved on, so a stale g
+  // is forgotten.
   startGesture(p, g) {
     const ph = this.targetPhoto();
     this.gesture = { p, g, photo: ph.id, from: this.getValue(ph, p), sets: 0, timer: null };
-    this.forced.delete(p);
+    this.staleG = null;
     this.log('dev', `startTracking ${p} (g ${g})`);
   }
 
@@ -623,17 +682,19 @@ export class MockLightroom extends EventEmitter {
     });
   }
 
-  // stopTracking(): one history step, then the observer fires once.
-  endGesture(why) {
+  // stopTracking(): one history step, then the observer fires once. stale is true when the gesture ends
+  // because the target photo or the module changed: its g is remembered, and later sets with it get
+  // err stale (Develop.endGesture).
+  endGesture(why, stale = false) {
     const gs = this.gesture;
     if (!gs) return;
     this.cancel(gs.timer);
     this.gesture = null;
+    if (stale) this.staleG = gs.g;
     const ph = this.byId.get(gs.photo);
     const to = ph ? this.getValue(ph, gs.p) : null;
-    this.history.push({ kind: 'gesture', p: gs.p, g: gs.g, photo: gs.photo, from: gs.from, to, sets: gs.sets, why });
-    this.log('dev', `stopTracking ${gs.p} (g ${gs.g}: ${why})`);
-    if (ph && ph.id === this.target) this.forced.add(gs.p);
+    this.history.push({ kind: 'gesture', p: gs.p, g: gs.g, photo: gs.photo, from: gs.from, to, sets: gs.sets, why, stale });
+    this.log('dev', `stopTracking ${gs.p} (g ${gs.g}: ${why}${stale ? '; its later sets are stale' : ''})`);
     this.scheduleObserver();
   }
 
@@ -781,6 +842,7 @@ export class MockLightroom extends EventEmitter {
       watch: [...this.watch],
       tracking: !!this.gesture,
       gesture: this.gesture ? { p: this.gesture.p, g: this.gesture.g, photo: this.gesture.photo } : null,
+      staleG: this.staleG,
       photos,
       presets: this.presets.map((p) => ({ ...p, values: p.values ? { ...p.values } : null })),
       history: clone(this.history),
@@ -795,7 +857,9 @@ export class MockLightroom extends EventEmitter {
 // ---------- command handlers (PROTOCOL.md, Commands) ----------
 
 const HANDLERS = {
-  hello() {
+  // A deck speaking another v still gets the v1 greeting, and the plugin logs it.
+  hello(m) {
+    if (m.v !== PROTOCOL_VERSION) this.log('warn', `the deck speaks protocol v${short(m.v)}; this plugin speaks v${PROTOCOL_VERSION}`);
     this.greet();
   },
 
@@ -803,31 +867,37 @@ const HANDLERS = {
     this.send({ t: 'pong', id: m.id, lt: lrTime(this.clock.wall()) });
   },
 
+  // Entries that aren't param names are dropped with err bad at once. Unknown params need getRange, so
+  // they are dropped once Lightroom is in Develop with a photo (checkWatch).
   watch(m) {
     if (!Array.isArray(m.ps)) {
       this.bad(m, 'watch needs ps, a list of params');
       return;
     }
     const keep = [];
-    const dropped = [];
+    let wrong = 0;
     for (const p of m.ps) {
-      if (this.isParamName(p)) {
-        if (!keep.includes(p)) keep.push(p);
-      } else {
-        dropped.push(p);
-      }
+      if (typeof p !== 'string' || p === '') wrong += 1;
+      else if (!keep.includes(p)) keep.push(p);
     }
-    if (dropped.length > 0) this.bad(m, `unknown params dropped from the watch list: ${dropped.map((p) => short(p)).join(', ')}`);
     this.watch = keep;
-    if (this.inDevelopWithPhoto() && keep.length > 0) {
-      this.send({ t: 'ranges', ranges: this.rangesFor(keep) });
+    this.watchId = m.id;
+    this.watchChecked = false;
+    if (wrong > 0) this.bad(m, `${wrong} entries in ps are not param names, dropped`);
+    if (!this.inDevelopWithPhoto()) return;
+    this.checkWatch();
+    if (this.watch.length > 0) {
+      this.send({ t: 'ranges', ranges: this.rangesFor(this.watch) });
       this.sendOwedVals();
     }
   },
 
+  // Checks in the order PROTOCOL.md's Guard section gives for writes: fields, the guard, a stale gesture,
+  // the switch to Develop, then the target photo and the param. Like the plugin, it can check the param
+  // only once in Develop, where getRange works.
   set(m) {
-    if (!this.isParamName(m.p)) {
-      this.bad(m, `set needs p, a Develop param; got ${short(m.p)}`);
+    if (typeof m.p !== 'string' || m.p === '') {
+      this.bad(m, `set needs p, a param name; got ${short(m.p)}`);
       return;
     }
     if (!isNum(m.v)) {
@@ -839,15 +909,26 @@ const HANDLERS = {
       return;
     }
     if (!this.guardOk(m)) return;
-    if (!this.targetPhoto()) {
-      this.err(m, 'noPhoto', 'no target photo');
+    // A set can reach a photo change before the poll does: it ends its gesture as the poll would have.
+    const open = this.gesture;
+    if (open && open.g === m.g && this.target != null && open.photo !== this.target) this.endGesture('the photo changed', true);
+    if (m.g === this.staleG) {
+      this.err(m, 'stale', `gesture ${m.g} ended when the photo or module changed`);
       return;
     }
     this.ensureDevelop();
+    const ph = this.targetPhoto();
+    if (!ph) {
+      this.err(m, 'noPhoto', 'no target photo');
+      return;
+    }
+    if (!this.isParamName(m.p)) {
+      this.bad(m, `unknown param ${short(m.p)}`);
+      return;
+    }
     if (this.gesture && (this.gesture.p !== m.p || this.gesture.g !== m.g)) this.endGesture(`a set for ${m.p}, g ${m.g}`);
     if (!this.gesture) this.startGesture(m.p, m.g);
     this.touchGesture();
-    const ph = this.targetPhoto();
     const [lo, hi] = this.range(ph, m.p);
     ph.values[m.p] = Math.min(hi, Math.max(lo, m.v)); // setValue clamps nothing, so Lightroom clamps first
     this.gesture.sets += 1;
@@ -864,18 +945,23 @@ const HANDLERS = {
     this.endGesture('done');
   },
 
+  // The order of checks for writes, as for set.
   reset(m) {
-    if (!this.isParamName(m.p)) {
-      this.bad(m, `reset needs p, a Develop param; got ${short(m.p)}`);
+    if (typeof m.p !== 'string' || m.p === '') {
+      this.bad(m, `reset needs p, a param name; got ${short(m.p)}`);
       return;
     }
     if (!this.guardOk(m)) return;
+    this.ensureDevelop();
     const ph = this.targetPhoto();
     if (!ph) {
       this.err(m, 'noPhoto', 'no target photo');
       return;
     }
-    this.ensureDevelop();
+    if (!this.isParamName(m.p)) {
+      this.bad(m, `unknown param ${short(m.p)}`);
+      return;
+    }
     if (this.gesture) this.endGesture('reset');
     const from = this.getValue(ph, m.p);
     ph.values[m.p] = this.defaultOf(ph, m.p);
@@ -889,6 +975,7 @@ const HANDLERS = {
       this.bad(m, 'module v must be "develop" or "library"');
       return;
     }
+    if (m.v !== 'develop') this.endGesture('left Develop', true); // Library.module
     this.switchModule(m.v);
     this.refresh({ forceState: true, forceDevelop: m.v === 'develop' });
   },
@@ -915,7 +1002,7 @@ const HANDLERS = {
     this.lrAutoAdvance(flagged);
     if (m.advance) {
       this.timer(TIMING.advanceMs, () => {
-        if (this.target === flagged) this.navigate(1);
+        if (this.target === flagged) this.navigateForDeck(1, 'flag advance');
         else this.log('lr', 'advance skipped: the target photo already changed (Auto Advance)');
         this.refresh({ forceState: true });
       });
@@ -927,7 +1014,7 @@ const HANDLERS = {
       this.bad(m, 'nav v must be "next" or "prev"');
       return;
     }
-    this.navigate(m.v === 'next' ? 1 : -1);
+    this.navigateForDeck(m.v === 'next' ? 1 : -1, `nav ${m.v}`);
     this.refresh({ forceState: true });
   },
 
@@ -945,19 +1032,20 @@ const HANDLERS = {
     this.send({ t: 'presets', id: m.id, items: this.presets.map(({ uuid, name, folder }) => ({ uuid, name, folder })) });
   },
 
+  // The order of checks for writes: fields, the guard, the target photo, then the preset (Presets.apply).
   preset(m) {
     if (typeof m.uuid !== 'string' || m.uuid === '') {
       this.bad(m, 'preset needs uuid');
       return;
     }
     if (!this.guardOk(m)) return;
+    if (!this.targetPhoto()) {
+      this.err(m, 'noPhoto', 'no target photo');
+      return;
+    }
     const preset = this.presets.find((p) => p.uuid === m.uuid);
     if (!preset) {
       this.err(m, 'notFound', `no preset with uuid ${m.uuid}`);
-      return;
-    }
-    if (!this.targetPhoto()) {
-      this.err(m, 'noPhoto', 'no target photo');
       return;
     }
     const wait = this.busyUntil - this.clock.now();
@@ -977,12 +1065,22 @@ const HANDLERS = {
       this.bad(m, 'reload mods must be a list of module names');
       return;
     }
-    // Like the plugin: every name must be reloadable, or nothing reloads. (The mock reloads nothing.)
+    // Like the plugin (Reload.reload): no reload while writes would be refused, since it can swap the write
+    // handlers; and every name must be reloadable, or nothing reloads. (The mock reloads nothing.)
     const mods = m.mods ?? [...RELOADABLE];
+    const reply = (ok, msg) => this.send({ t: 'reloaded', id: m.id, mods, ok, msg });
+    const why = this.whyNotWritable();
+    if (why != null) {
+      this.log('lr', `reload refused: ${why}`);
+      reply(false, `reload is off while writes are: ${why}`);
+      return;
+    }
     const refused = mods.find((x) => !RELOADABLE.includes(x));
-    const ok = refused === undefined;
-    const msg = ok ? `reloaded ${mods.join(', ')}` : `${refused} doesn't hot-reload; use Reload Plug-in`;
-    this.send({ t: 'reloaded', id: m.id, mods, ok, msg });
+    if (refused !== undefined) {
+      reply(false, `${refused} doesn't hot-reload; use Reload Plug-in`);
+      return;
+    }
+    reply(true, `reloaded ${mods.join(', ')}`);
   },
 };
 

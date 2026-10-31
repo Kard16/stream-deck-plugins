@@ -106,7 +106,7 @@ function Poll.sync(opts)
   local newPhoto = st.photo ~= State.lastPhoto
   State.lastModule, State.lastPhoto = st.module, st.photo
   if left or Develop.gestureElsewhere(st.photo, newPhoto) then
-    Develop.endGesture(left and 'left Develop' or 'new photo')
+    Develop.endGesture(left and 'left Develop' or 'new photo', true)
   end
   if opts.vals or entered or newPhoto then
     Develop.owe()

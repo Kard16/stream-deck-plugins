@@ -400,6 +400,23 @@ Record kickoff answers, spike results and decisions here, newest last, with date
       - they stop before writing if Lightroom's own Auto Advance moves the photo.
   - The build replaced `bin/plugin.js`. Until integration, the Stream Deck app still runs the S4 spike process and Lightroom still runs the spike Lua plugin.
   - The tracks raised protocol ambiguities, settled next. The main thread owns `PROTOCOL.md`.
+- 2026-10-31, protocol amendments after Phase 3, listed under Amendments in `PROTOCOL.md`. The tracks' ambiguities are now settled in the text; most amendments write down what both sides already did. One changes behaviour, for **stale gestures**:
+  - The bug: if the user changes photo in Lightroom while a dial gesture is open (arrow key, filmstrip, Lightroom's own Auto Advance), the deck's next sets carry values worked out for the old photo, and they landed on the new one.
+  - The fix: Lightroom now ends that gesture and refuses its later sets with `err stale`, changing nothing. The deck holds turns until it has the new photo's values. New fixture: `stale-gesture.jsonl`.
+  - Track A is done: 76 unit tests and 19/19 fixtures pass, and each of 8 deliberate breaks of the fix fails a test. Two agents are bringing the deck and the mock in line.
+- 2026-10-31, the stale-gesture amendment is now in all three tracks. The main thread re-ran every check:
+  - Lua: 76/76 unit tests, 19/19 fixtures.
+  - Deck: build, typecheck and validate pass; 177/177 tests; smoke 26/26.
+  - Tools: 149/149 tests; 19/19 fixtures on both clocks.
+  - On `stale`, the deck ends the gesture without `done` and raises no alert. It holds turns only if it hasn't seen the new photo's `state` yet. After any photo change, turns also wait for that photo's `ranges`.
+  - The latency harness stops writing, and skips its restore, if the photo changes mid-run.
+  - The mock follows the Lua plugin at the ends of the filmstrip: `nav` there ends a gesture as stale.
+  - **Still open, documented in `PROTOCOL.md`:** a new gesture that starts within a few ms of a photo change made in Lightroom. Its first `set` uses the old photo's value. Lightroom's observer reports photo changes within milliseconds in Develop, so this needs a very fast hand. Phase 6 fix: `set` carries the photo the deck worked from.
+- 2026-10-31, the first live load of v1 failed.
+  - **What happened:** Reload Plug-in shut down the spike instance, which took 9.7 s; that was the user's "long wait". Then `Init.lua` failed before logging anything, and Lightroom disabled the plugin. Enable failed the same way.
+  - **Diagnosis:** `Init.lua` now catches a load failure and logs it in full. It logged `init failed: Could not load toolkit script: Reload`.
+  - **Likely cause:** Lightroom only sees plugin files that existed when it launched. `Reload.lua`, `Proto.lua`, `Library.lua`, `Presets.lua` and `MenuStatus.lua` all came after the 14:28 launch, while files that existed then load fine.
+  - **Fix to try:** quit and relaunch Lightroom.
 
 ## Progress
 

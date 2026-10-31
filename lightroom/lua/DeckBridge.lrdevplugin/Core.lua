@@ -47,7 +47,9 @@ function Core.helloMessage()
 end
 
 -- hello, state, then in Develop ranges and vals for the watch list. Runs in a task.
+-- A restarted deck numbers its gestures from 1 again, so a stale g is forgotten here.
 function Core.greeting()
+  State.staleG = nil
   Server.send(Core.helloMessage())
   Poll.sync({ state = true, vals = true })
 end

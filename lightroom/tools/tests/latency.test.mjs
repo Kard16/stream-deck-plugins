@@ -35,6 +35,41 @@ describe('latency harness against the mock', () => {
     });
   });
 
+  // Before each burst the harness asks for a fresh state with hello, and the greeting pushes every watched value
+  // too. Lightroom reads ranges and values between the greeting's state and its vals, so the vals can reach the
+  // harness after it started the burst; they still arrive before the burst's first ack, because Lightroom
+  // finishes the greeting before it takes the burst's first set.
+  test('the greeting\'s vals that arrive after a burst began, but before its first ack, are no leak', async () => {
+    await withMock({}, async (mock) => {
+      // Hold back everything after a greeting's state for 20 ms, in order, as Lightroom's reads would.
+      const send = mock.server.send.bind(mock.server);
+      let afterHello = false;
+      let held = null;
+      mock.server.send = (obj) => {
+        if (held) {
+          held.push(obj);
+          return true;
+        }
+        const ok = send(obj);
+        if (obj.t === 'hello') afterHello = true;
+        else if (obj.t === 'state' && afterHello) {
+          afterHello = false;
+          held = [];
+          setTimeout(() => {
+            const list = held;
+            held = null;
+            for (const o of list) send(o);
+          }, 20);
+        }
+        return ok;
+      };
+      const r = await runLatency({ cmdPort: mock.cmdPort, evtPort: mock.evtPort, rates: [30, 30], burstMs: 600, gapMs: 400 });
+      for (const b of r.bursts) assert.equal(b.valsDuring, 0, `${b.hz}/s, g ${b.g}: ${JSON.stringify(b)}`);
+      assert.equal(r.restored, true);
+      assert.ok(!reportFailed(r), formatReport(r));
+    });
+  });
+
   test('a slow Lightroom shows up as a growing backlog', async () => {
     await withMock({ setCostMs: 30 }, async (mock) => {
       const r = await runLatency({ cmdPort: mock.cmdPort, evtPort: mock.evtPort, rates: [10, 60], burstMs: 900, gapMs: 200 });
@@ -132,5 +167,120 @@ describe('latency harness against the mock', () => {
     assert.equal(reportFailed({ bursts: [burst], restored: true }), false);
     for (const k of Object.keys(burst)) assert.equal(reportFailed({ bursts: [{ ...burst, [k]: 1 }], restored: true }), true, k);
     assert.equal(reportFailed({ bursts: [burst], restored: false }), true);
+  });
+});
+
+// The harness writes only to the photo it started on. Each burst starts a new gesture, and Lightroom puts a new
+// gesture on whatever photo is the target, so a photo change mid-run must stop it, and the restore must not
+// follow Lightroom to the new photo.
+describe('latency harness: the photo changes mid-run', () => {
+  const FILES = Object.fromEntries(loadScenario().photos.map((p) => [p.id, p.file]));
+  const CANT = `can't put back Exposure 0.35 on 101 (${FILES[101]}): Lightroom is on 102 (${FILES[102]}) now`;
+  const MOVED = `Lightroom moved from 101 (${FILES[101]}) to 102 (${FILES[102]}) mid-run: stopped writing`;
+  const STALE = 'Lightroom refused a set as stale, so the photo or module changed mid-run: stopped writing';
+
+  // Once when(m) is true for a command Lightroom takes, runs then() just after it, and collects every later
+  // command but the heartbeat's pings.
+  function after(mock, when, then) {
+    const later = [];
+    let hit = false;
+    mock.control.on('command', (m) => {
+      if (hit) {
+        if (m.t !== 'ping') later.push(m);
+      } else if (when(m)) {
+        hit = true;
+        setImmediate(then);
+      }
+    });
+    return later;
+  }
+  const third = () => {
+    let n = 0;
+    return (m) => m.t === 'set' && m.g === 1 && ++n === 3;
+  };
+  const run = (mock, opts) => runLatency({ cmdPort: mock.cmdPort, evtPort: mock.evtPort, gapMs: 100, ...opts });
+
+  test('the CLI: a photo change mid-burst writes nothing to the new photo, skips the restore, and exits 1', async () => {
+    await withMock({}, async (mock) => {
+      const before = mock.control.state().photos;
+      after(mock, third(), () => mock.control.user({ photo: '102' }));
+      const r = await runNode(['latency/latency.mjs', '--ports', `${mock.cmdPort},${mock.evtPort}`, '--rates', '10', '--burst-ms', '3000', '--gap-ms', '200'], { timeoutMs: 30000 });
+      assert.equal(r.code, 1, r.stdout + r.stderr);
+      assert.ok([MOVED, STALE].some((why) => r.stderr.includes(`latency: ${why}\n`)), r.stderr);
+      assert.ok(r.stdout.includes(`${CANT}\n`), r.stdout);
+      const s = mock.control.state();
+      assert.deepEqual(s.photos[102].values, before[102].values, 'nothing landed on 102');
+      assert.deepEqual(s.history.map((h) => [h.kind, h.g, h.photo]), [['gesture', 1, '101']], 'only the burst, on 101');
+    });
+  });
+
+  test('the CLI: a run that stays on its photo puts the value back there, and exits 0', async () => {
+    await withMock({}, async (mock) => {
+      const r = await runNode(['latency/latency.mjs', '--ports', `${mock.cmdPort},${mock.evtPort}`, '--rates', '30', '--burst-ms', '400', '--gap-ms', '200'], { timeoutMs: 30000 });
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.ok(r.stdout.includes(`Exposure put back to 0.35 on 101 (${FILES[101]})\n`), r.stdout);
+      assert.ok(!r.stdout.includes("can't put back"), r.stdout);
+      const s = mock.control.state();
+      assert.equal(s.photos[101].values.Exposure, 0.35);
+      assert.deepEqual(s.history.map((h) => [h.kind, h.g, h.photo]), [['gesture', 1, '101'], ['gesture', 2, '101']], 'the burst and the restore, both on 101');
+      assert.equal(s.history[1].to, 0.35);
+    });
+  });
+
+  // The manual clock: Lightroom's poll never runs, so no state says the photo changed, and only the next set
+  // finds out. The latest state still names 101, so only a fresh one keeps the restore off 102.
+  test('a set refused as stale stops the bursts at once, and the restore is not written onto the new photo', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const before = mock.control.state().photos;
+      const later = after(mock, third(), () => mock.control.user({ photo: '102' }));
+      const logs = [];
+      await assert.rejects(run(mock, { rates: [10], burstMs: 2000, log: (l) => logs.push(l) }),
+        (err) => err instanceof LatencyError && err.message === STALE && err.report.restoreError === CANT);
+      assert.deepEqual(later.map((m) => m.t), ['set', 'hello'], 'the set that found the photo changed, then only the fresh state before the restore');
+      const s = mock.control.state();
+      assert.deepEqual(s.photos[102].values, before[102].values, 'nothing landed on 102, the restore included');
+      assert.deepEqual(s.history.map((h) => [h.kind, h.g, h.photo, h.stale]), [['gesture', 1, '101', true]]);
+      assert.ok(logs.includes(CANT), logs.join('\n'));
+    });
+  });
+
+  test('a state naming another photo stops the bursts before the next set', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const before = mock.control.state().photos;
+      // The poll sees the new photo, ends the gesture, and says so in a state before the next set is due.
+      const later = after(mock, third(), () => {
+        mock.control.user({ photo: '102' });
+        mock.control.step();
+      });
+      await assert.rejects(run(mock, { rates: [10], burstMs: 2000 }),
+        (err) => err instanceof LatencyError && err.message === MOVED && err.report.restoreError === CANT);
+      assert.deepEqual(later.map((m) => m.t), ['hello'], 'no set after the state');
+      assert.deepEqual(mock.control.state().photos[102].values, before[102].values);
+    });
+  });
+
+  test('a photo change between bursts, before any state says so: the next burst never starts', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const before = mock.control.state().photos;
+      const later = after(mock, (m) => m.t === 'done' && m.g === 1, () => mock.control.user({ photo: '102' }));
+      await assert.rejects(run(mock, { rates: [10, 10], burstMs: 300 }),
+        (err) => err instanceof LatencyError && err.message === MOVED && err.report.restoreError === CANT);
+      assert.deepEqual(later.map((m) => m.t), ['hello', 'hello'], 'only the fresh states, before the next burst and before the restore');
+      const s = mock.control.state();
+      assert.deepEqual(s.photos[102].values, before[102].values);
+      assert.deepEqual(s.history.map((h) => [h.kind, h.g, h.photo, h.why]), [['gesture', 1, '101', 'done']]);
+    });
+  });
+
+  test('a photo change before the first set: nothing was written, so nothing needs putting back', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const later = after(mock, (m) => m.t === 'watch', () => mock.control.user({ photo: '102' }));
+      const logs = [];
+      await assert.rejects(run(mock, { rates: [10], burstMs: 300, log: (l) => logs.push(l) }),
+        (err) => err instanceof LatencyError && err.message === MOVED && err.report.restoreError === null);
+      assert.deepEqual(later.map((m) => m.t), ['hello'], 'only the fresh state before the first burst');
+      assert.deepEqual(mock.control.state().history, []);
+      assert.ok(!logs.some((l) => l.startsWith("can't put back")), logs.join('\n'));
+    });
   });
 });

@@ -7,7 +7,7 @@ Run every command from the repo root through `mise exec --`, because the shell's
 | Tool | What it does |
 |---|---|
 | `mock-lr/` | A mock Lightroom that speaks v1 over real sockets and copies the quirks measured on 15.3 |
-| `fixtures/run.mjs` | Runs the 18 fixture conversations against the mock |
+| `fixtures/run.mjs` | Runs the 19 fixture conversations against the mock |
 | `fake-deck/` | A scriptable fake deck, for driving the real Lua plugin (verification ladder step 4) |
 | `latency/latency.mjs` | The S2 latency harness, ported to v1 |
 | `lib/` | The shared client, fixture reader, matcher, clocks and constants |
@@ -18,13 +18,21 @@ Run every command from the repo root through `mise exec --`, because the shell's
 mise exec -- node --test lightroom/tools/
 ```
 
-This runs about 125 tests in roughly 45 s, all on ephemeral ports:
+This runs about 150 tests in roughly 50 s, all on ephemeral ports:
 - the matcher;
-- all 18 fixtures, on the manual clock and the real clock;
+- all 19 fixtures, on the manual clock and the real clock;
 - `smoke.json` against the mock, including the main catalog with the guard off, several photos selected and Auto Advance on;
-- a short latency run, and its refusals;
+- a short latency run, its refusals, and photo changes mid-run;
 - the mock's quirks, recovered from by the pair rule and the heartbeat;
-- the protocol rules the fixtures can't check: no `vals` outside Develop, gestures ending on a photo change and on leaving Develop, no `g` in a reset's `ack`, and `vals` at most 20 a second;
+- the protocol rules the fixtures can't check:
+  - no `vals` outside Develop;
+  - gestures ending on a photo change, on leaving Develop and at shutdown;
+  - stale gestures, including a `set` that reaches a photo change before the poll, and a stale g forgotten on a new gesture or a greeting;
+  - the order of checks for writes, and `reload` refused outside the test catalog;
+  - unknown watched params found on entering Develop;
+  - `vals` after a gesture only when its value changed;
+  - no `g` in a reset's `ack`;
+  - `vals` at most 20 a second;
 - the CLIs.
 
 A test fails if the mock logs an error, that is, an exception it caught in its poll, observer, timers or socket hooks.
@@ -64,11 +72,15 @@ mise exec -- node lightroom/tools/mock-lr/cli.mjs --ports 59780,59781 [--scenari
   - A 200 ms poll diffs state and the watched values, leaving out the tracked param.
   - `vals` go out at most 20 a second, like the plugin's. That includes the full set owed after `hello`, `watch`, entering Develop and a photo change, which waits until 50 ms after the last `vals`.
   - Ranges depend on the file format.
-  - Gestures end on `done`, on another `p` or `g`, after 2 s without a `set`, on a disconnect, on a photo change and on leaving Develop.
+  - Gestures end on `done`, on another `p` or `g`, after 2 s without a `set`, on a disconnect, on a photo change, on leaving Develop and at shutdown. After one ends, `vals` carry its final value only if that changed.
+  - Like the plugin, the mock learns of the user's photo and module changes, and of Lightroom's own Auto Advance, only from its poll. A `set` can reach such a change first.
+  - A gesture belongs to the photo it started on. Once the photo or module changes under it, its later `set`s get `err stale` and change nothing. The deck's `nav` and a flag's `advance` end it as stale too, even at an end of the filmstrip where nothing moves, as the plugin does. The stale g is forgotten when the next gesture starts or a client is greeted.
+  - Writes are checked in PROTOCOL.md's order: fields, the guard, a stale gesture, the switch to Develop, then the photo and the param.
+  - `watch` drops unknown params once Lightroom is in Develop with a photo, since that's where `getRange` works. The `err bad` carries the watch's `id`.
   - `set` values are clamped.
   - The guard compares the catalog path without case.
   - Presets skip locked photos. A busy catalog answers `err busy` after 3 s.
-  - `reload` takes the modules the plugin hot-reloads (`Reload.MODULES` in `Reload.lua`). Any other name gets `ok` false, as in the plugin.
+  - `reload` takes the modules the plugin hot-reloads (`Reload.MODULES` in `Reload.lua`). It answers `ok` false for any other name, and outside the test catalog while the guard is on, as the plugin does.
 
 **From code**, the way Track B's tests can use it:
 
@@ -91,7 +103,7 @@ const { cmdPort, evtPort, control, stop } = await startMock({ cmdPort: 0, evtPor
 | `setup(s)` | Replaces Lightroom's whole state from a fixture setup |
 | `user(a)` | Applies a fixture user line: `photo`, `selected`, `module` or `edit`. The mock also takes `flag`, `rating` and `label`. |
 | `expect(e)` | Checks a fixture expect line and returns `{ ok, errors }` |
-| `state()` | A snapshot: photos, values, gesture, history (one entry per history step), clients |
+| `state()` | A snapshot: photos, values, gesture, `staleG`, history (one entry per history step), clients |
 | `step()` | One 200 ms poll step |
 | `advance(ms)` | Lets time pass. The manual clock moves in 200 ms poll steps; the real clock just waits. |
 | `pause(ms)`, `stale()`, `close(which)` | The socket quirks above |
@@ -188,3 +200,9 @@ For each rate it reports:
 It reads the value first and puts it back at the end. `--mock-set-ms 30` makes a slow Lightroom, to see a backlog grow.
 
 It writes only to the test catalog, with exactly one photo selected, whatever the guard says, and it stops writing if a `hello` from another plugin instance or catalog arrives mid-run. Against the real Lightroom (`--ports`), rates go up to 60 a second, the most spike S2 measured; faster ones need `--mock`. It exits 1 on missing or mismatched acks, errors, leaks, or a value not put back, and 2 on bad arguments.
+
+It also writes only to the photo it started on:
+- A `state` naming another photo, or a `set` refused as stale, stops the bursts at once.
+- Before each burst, and before putting the value back, it asks for a fresh `state` with `hello`. Each burst starts a new gesture, and Lightroom puts a new gesture on whatever photo is the target. The states Lightroom pushes come from its 200 ms poll, so they can be behind.
+- If Lightroom is on another photo by then, it skips the restore, prints "can't put back Exposure 0.35 on 101 (DSC01241.ARW): Lightroom is on 102 (DSC01242.ARW) now", and exits 1.
+- Leaks count from a burst's first `ack`. The fresh greeting's `vals` arrive before it, and Lightroom sent them before the gesture began.

@@ -6,7 +6,8 @@
 -- history step, and Lightroom's observer stays silent while it is tracked. A set whose
 -- p or g differs from the open gesture ends it and starts another. Two seconds without
 -- a set, or the client leaving, ends it too. While a gesture tracks p, vals leave p out:
--- the deck owns that value. A gesture also belongs to the photo it started on.
+-- the deck owns that value. A gesture also belongs to the photo it started on: once the
+-- photo or module changes under it, its later sets are refused with err stale.
 --
 -- Reloadable: all state lives in State.lua, and nothing runs at load time.
 local LrApplication = import 'LrApplication'
@@ -124,13 +125,18 @@ end
 -- Gestures ------------------------------------------------------------------------
 
 -- Ends the open gesture, if any. stopTracking makes it one history step, and the
--- observer then fires, so vals carry the final value.
-function Develop.endGesture(why)
+-- observer then fires, so vals carry the final value. stale is true when it ends because
+-- the target photo or module changed: the deck's later sets for it carry values worked
+-- out for the old photo, so set refuses them.
+function Develop.endGesture(why, stale)
   local g = State.gesture
   if not g then
     return false
   end
   State.gesture = nil
+  if stale then
+    State.staleG = g.g
+  end
   local ok, err = LrTasks.pcall(LrDevelopController.stopTracking)
   if not ok then
     Log.debug('stopTracking failed (%s): %s', tostring(why), tostring(err))
@@ -402,7 +408,8 @@ function Develop.watch(m)
 end
 
 -- set {p, v, g}: guarded. Clamps v to getRange(p), sets it inside gesture g, and acks
--- with the value read straight back.
+-- with the value read straight back. A set for a gesture that ended when the photo or
+-- module changed gets err stale and changes nothing, not even the module.
 function Develop.set(m)
   local p, v, g = m.p, m.v, m.g
   if type(p) ~= 'string' or p == '' then
@@ -417,6 +424,15 @@ function Develop.set(m)
   if not Guard.check(m) then
     return
   end
+  local photo = Develop.photoId() or nil
+  local open = State.gesture
+  if open and open.g == g and photo and open.photo and open.photo ~= photo then
+    Develop.endGesture('the photo changed', true) -- before the poll noticed
+    open = nil
+  end
+  if g == State.staleG then
+    return Proto.err(m, 'stale', 'gesture ' .. tostring(g) .. ' ended when the photo or module changed')
+  end
   if not Develop.ensureDevelop() then
     return Proto.err(m, 'noDevelop', 'could not switch to Develop')
   end
@@ -424,9 +440,7 @@ function Develop.set(m)
   if not lo then
     return rangeFailed(m, p)
   end
-  local photo = Develop.photoId() or nil
-  local open = State.gesture
-  if open and (open.p ~= p or open.g ~= g or (photo and open.photo and open.photo ~= photo)) then
+  if open and (open.p ~= p or open.g ~= g) then
     Develop.endGesture('next gesture')
     open = nil
   end
@@ -434,6 +448,7 @@ function Develop.set(m)
     LrDevelopController.startTracking(p)
     open = { p = p, g = g, photo = photo }
     State.gesture = open
+    State.staleG = nil -- the deck has moved on to a new gesture
   end
   open.at = now()
   if v < lo then

@@ -1,5 +1,5 @@
 import type { ConnState, LrLink } from "../lr/client.js";
-import { type AckEvt, type ErrEvt, type HelloEvt, type LrEvent, type Range, roundForSend, type StateEvt, type ValsEvt } from "../lr/protocol.js";
+import { type AckEvt, type ErrCode, type ErrEvt, type HelloEvt, type LrEvent, type Range, roundForSend, type StateEvt, type ValsEvt } from "../lr/protocol.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { Emitter } from "../util/emitter.js";
 import { nullLog, type Log } from "../util/log.js";
@@ -20,8 +20,9 @@ export type ModelTiming = {
 	/** At most one alert per origin in this window, so a fast spin while offline doesn't flash the strip continuously. */
 	alertGapMs: number;
 	/**
-	 * After the deck asks for a photo change (see {@link LrModel.beforePhotoChange}), turns wait this long for
-	 * the new photo, and then apply to the photo Lightroom stayed on. Flag keys advance 150 ms after flagging.
+	 * After the deck asks for a photo change (see {@link LrModel.beforePhotoChange}), or Lightroom refuses a set
+	 * as stale before the deck has seen the new photo, turns wait this long for the new photo, and then apply to
+	 * the photo Lightroom stayed on. Flag keys advance 150 ms after flagging.
 	 */
 	photoChangeMs: number;
 };
@@ -61,6 +62,11 @@ type Param = {
 	value: number | null;
 	range: Range | null;
 	fresh: boolean;
+	/**
+	 * The range came after the last photo or module change. The old range stays for the strip until then, but
+	 * turns wait: Lightroom sends a range it can't read yet in a later `ranges`, and ranges differ by file type.
+	 */
+	rangeFresh: boolean;
 	echoUntil: number;
 	echoTimer: TimerHandle | null;
 	/** The latest `vals` value that arrived during the echo window; applied when it closes. */
@@ -92,6 +98,10 @@ type Gesture = {
 	open: boolean;
 	/** Ended, but its final `set` is waiting for the rate limit; `done` follows it. */
 	ending: boolean;
+	/** The photo epoch it began in (see LrModel's #photoEpoch): which photo its values were worked out from. */
+	epoch: number;
+	/** Lightroom refused one of its sets with err stale; the errs for its other in-flight sets change nothing. */
+	stale: boolean;
 };
 
 type Held = { coarse: number; fine: number; spec: StepSpec; origin: Origin; origins: Set<Origin> };
@@ -112,6 +122,10 @@ const EMPTY_STATE: LrState = { module: null, photo: null, file: null, flag: null
  *   the latest one applies when that window closes. The deck owns the value until then.
  * - Outside Develop a turn sends `module develop` and holds the ticks until `vals` arrive, or drops them after 2 s.
  *   Turns also wait for a range, and for a photo change the deck itself asked for ({@link beforePhotoChange}).
+ * - A gesture belongs to the photo it started on. When the user changes photo in Lightroom mid-gesture,
+ *   Lightroom refuses the gesture's later sets with `err stale`. The deck ends the gesture without a final set
+ *   or `done`, raises no alert, and, if it hasn't seen the new photo yet, holds turns for it as after
+ *   beforePhotoChange. The next turn is a new gesture from the new photo's value.
  */
 export class LrModel {
 	readonly #link: LrLink;
@@ -125,9 +139,11 @@ export class LrModel {
 	readonly #lastAlert = new Map<Origin, number>();
 	#holdTimer: TimerHandle | null = null;
 	#moduleAsked = false;
-	/** Turns wait until then: a photo change the deck asked for may still be landing (see beforePhotoChange). 0 when none is. */
+	/** Turns wait until then: a photo change the deck asked for, or one a stale err revealed, may still be landing (see beforePhotoChange). 0 when none is. */
 	#photoChangeUntil = 0;
 	#photoChangeTimer: TimerHandle | null = null;
+	/** Bumped whenever `state` shows another photo or module: values from an older epoch belong to another photo. */
+	#photoEpoch = 0;
 	#active: Gesture | null = null;
 	#gseq = 0;
 	#conn: ConnState;
@@ -274,6 +290,15 @@ export class LrModel {
 	beforePhotoChange(): void {
 		const g = this.#active;
 		if (g && g.open) this.#endNow(g);
+		this.#holdForPhotoChange();
+		this.#changed();
+	}
+
+	/**
+	 * Turns wait for at most photoChangeMs: a `state` with another photo or module ends the wait (#onState), and
+	 * turns then wait for that photo's `vals`; otherwise held turns apply when the wait ends.
+	 */
+	#holdForPhotoChange(): void {
 		this.#clearPhotoChange();
 		this.#photoChangeUntil = this.#clock.now() + this.#timing.photoChangeMs;
 		this.#photoChangeTimer = this.#clock.setTimeout(() => {
@@ -282,7 +307,6 @@ export class LrModel {
 			this.#applyHeld();
 			this.#changed();
 		}, this.#timing.photoChangeMs);
-		this.#changed();
 	}
 
 	#clearPhotoChange(): void {
@@ -294,12 +318,19 @@ export class LrModel {
 	// ---- gestures ----
 
 	/**
-	 * A turn applies only to a value Lightroom reported for the current photo in Develop, with its range: the
-	 * range picks the steps (Kelvin or not) and bounds the clamp. Until then turns are held.
+	 * A turn applies only to a value Lightroom reported for the current photo in Develop, with that photo's range:
+	 * the range picks the steps (Kelvin or not) and bounds the clamp. Until then turns are held.
 	 */
 	#usable(param: Param): boolean {
 		const now = this.#clock.now();
-		return param.fresh && param.value !== null && param.range !== null && now >= param.resetPendingUntil && now >= this.#photoChangeUntil;
+		return (
+			param.fresh &&
+			param.value !== null &&
+			param.range !== null &&
+			param.rangeFresh &&
+			now >= param.resetPendingUntil &&
+			now >= this.#photoChangeUntil
+		);
 	}
 
 	#apply(p: string, ticks: number, fine: boolean, spec: StepSpec, origin: Origin): void {
@@ -342,6 +373,8 @@ export class LrModel {
 			pressed: false,
 			open: true,
 			ending: false,
+			epoch: this.#photoEpoch,
+			stale: false,
 		};
 		this.#active = g;
 		param.last = g;
@@ -451,6 +484,10 @@ export class LrModel {
 	}
 
 	#onSetErr(g: Gesture, err: ErrEvt): void {
+		if (err.code === ("stale" satisfies ErrCode)) {
+			this.#onStale(g);
+			return;
+		}
 		this.#alert(g.origin, `Lightroom refused set ${g.p}: ${err.code}`);
 		if (g.open) this.#abort(g, true);
 		// Show what Lightroom last confirmed, unless a newer gesture owns the param.
@@ -459,6 +496,41 @@ export class LrModel {
 			param.value = g.ackValue ?? g.baseRaw;
 			this.#clearEcho(param);
 		}
+		this.#changed();
+	}
+
+	/**
+	 * Lightroom refused a set of `g` with err stale: the photo or module changed under the gesture, and its
+	 * values, worked out from the old photo, changed nothing (PROTOCOL.md, Gestures). Each of g's sets still in
+	 * flight gets its own err; only the first does anything. None raises an alert.
+	 *
+	 * - If a `state` with another photo or module arrived after `g` began, the deck already knows. That state
+	 *   ended `g`, and the model has the new photo's values or is waiting for them, so nothing more happens. In
+	 *   particular there's no extra wait: the next turn already starts from the new photo's value.
+	 * - Otherwise Lightroom caught the change first. `g` ends with no final set and no `done`, since Lightroom
+	 *   ended it. Any other open gesture also began on the old photo's values; Lightroom tracks it on the new
+	 *   photo, so it ends too, with its `done`. `p` goes back to the value Lightroom last confirmed. Turns wait
+	 *   as after beforePhotoChange: for the new photo's state and vals, or photoChangeMs if Lightroom ends up on
+	 *   the same photo.
+	 */
+	#onStale(g: Gesture): void {
+		if (g.stale) return;
+		g.stale = true;
+		this.#abort(g, false);
+		if (g.epoch !== this.#photoEpoch) {
+			this.#log.debug(`Lightroom refused gesture ${g.g} on ${g.p} as stale; the deck had already seen the new photo or module`);
+			this.#changed();
+			return;
+		}
+		this.#log.debug(`Lightroom refused gesture ${g.g} on ${g.p} as stale: the photo or module changed; holding turns for the new photo`);
+		const other = this.#active;
+		if (other && other.open) this.#abort(other, true);
+		const param = this.#param(g.p);
+		if (param.last === g) {
+			param.value = g.ackValue ?? g.baseRaw;
+			this.#clearEcho(param);
+		}
+		this.#holdForPhotoChange();
 		this.#changed();
 	}
 
@@ -575,7 +647,9 @@ export class LrModel {
 				break;
 			case "ranges":
 				for (const [p, range] of Object.entries(evt.ranges)) {
-					this.#param(p).range = range;
+					const param = this.#param(p);
+					param.range = range;
+					param.rangeFresh = true;
 					const g = this.#active;
 					if (g && g.open && g.p === p) g.value = clampToRange(g.value, range);
 				}
@@ -605,14 +679,17 @@ export class LrModel {
 		if (evt.sel !== undefined) next.sel = evt.sel;
 		this.#state = next;
 		if (next.photo !== prev.photo || next.module !== prev.module) {
-			// The values belong to the old photo or module now; new ones arrive as vals in Develop. A photo change
-			// the deck asked for has landed, so turns now wait for those vals rather than for photoChangeMs.
+			// The values and ranges belong to the old photo or module now; new ones arrive as vals and ranges in
+			// Develop. A photo change the deck asked for, or one a stale err revealed, has landed, so turns now wait
+			// for those rather than for photoChangeMs.
+			this.#photoEpoch += 1;
 			const open = this.#active;
 			if (open) this.#log.debug(`ending gesture ${open.g} on ${open.p}: the photo or module changed`);
 			this.#abortAll(true);
 			this.#clearPhotoChange();
 			for (const param of this.#params.values()) {
 				param.fresh = false;
+				param.rangeFresh = false;
 				this.#clearEcho(param);
 			}
 		}
@@ -680,6 +757,7 @@ export class LrModel {
 			param.value = null;
 			param.range = null;
 			param.fresh = false;
+			param.rangeFresh = false;
 			param.last = null;
 			param.resetPendingUntil = 0;
 		}
@@ -710,6 +788,7 @@ export class LrModel {
 				value: null,
 				range: null,
 				fresh: false,
+				rangeFresh: false,
 				echoUntil: 0,
 				echoTimer: null,
 				deferred: null,

@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 
 import { LineSplitter } from "../src/lr/framing.js";
 import { portsFromEnv } from "../src/lr/ports.js";
-import { parseEvent, roundForSend } from "../src/lr/protocol.js";
+import { type ErrCode, parseEvent, roundForSend } from "../src/lr/protocol.js";
 import { validateCommand } from "../src/lr/validate.js";
 import { loadFixtures } from "./helpers/fixtures.js";
 
@@ -104,6 +104,20 @@ describe("event parsing (PROTOCOL.md, Events)", () => {
 			{ t: "err", code: "bad", msg: "bad JSON" },
 		];
 		for (const evt of events) assert.equal(parseEvent(evt).kind, "event", JSON.stringify(evt));
+	});
+
+	test("err stale: a set whose gesture ended when the photo or module changed (Amendments)", () => {
+		const code: ErrCode = "stale";
+		const errs = [
+			{ t: "err", id: 7, cmd: "set", code, msg: "gesture 1 ended when the photo or module changed" },
+			{ t: "err", cmd: "set", code },
+		];
+		for (const raw of errs) {
+			const parsed = parseEvent(raw);
+			assert.ok(parsed.kind === "event", JSON.stringify(raw));
+			assert.deepEqual(parsed.evt, raw);
+			assert.deepEqual(parsed.dropped, []);
+		}
 	});
 
 	test("rejects malformed events, ignores unknown types, and drops badly typed optional fields", () => {

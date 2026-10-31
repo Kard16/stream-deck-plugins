@@ -1,0 +1,16 @@
+{"note":"A gesture belongs to the photo it started on. The user moves to another photo in Lightroom while a dial gesture is open, and Lightroom's poll ends the gesture. The deck's later sets for it carry values worked out for the old photo, so Lightroom refuses each one with stale and changes nothing. The deck's next gesture goes to the new photo."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}},{"id":"102","file":"DSC0102.ARW","fmt":"RAW","flag":0,"rating":2,"label":"red","values":{"Temperature":5200,"Tint":4,"Exposure":-0.4,"Contrast":0,"Highlights":0,"Shadows":0,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"target":"101","watch":["Exposure"]}}
+{"deck":{"t":"set","p":"Exposure","v":0.5,"g":1}}
+{"lr":{"t":"ack","p":"Exposure","v":0.5,"g":1}}
+{"user":{"photo":"102"}}
+{"lr":{"t":"state","module":"develop","photo":"102","file":"DSC0102.ARW","flag":0,"rating":2,"label":"red","sel":1}}
+{"deck":{"t":"set","p":"Exposure","v":0.6,"g":1,"id":7}}
+{"lr":{"t":"err","id":7,"cmd":"set","code":"stale"}}
+{"deck":{"t":"set","p":"Exposure","v":0.7,"g":1}}
+{"lr":{"t":"err","cmd":"set","code":"stale"}}
+{"expect":{"tracking":false,"values":{"101":{"Exposure":0.5},"102":{"Exposure":-0.4}}}}
+{"deck":{"t":"set","p":"Exposure","v":-0.3,"g":2}}
+{"lr":{"t":"ack","p":"Exposure","v":-0.3,"g":2}}
+{"deck":{"t":"done","g":2}}
+{"wait":400}
+{"expect":{"tracking":false,"values":{"101":{"Exposure":0.5},"102":{"Exposure":-0.3}}}}

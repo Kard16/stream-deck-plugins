@@ -106,7 +106,7 @@ function describeState() {
   return [
     `module ${s.module}, view ${s.view}, target ${s.target ?? 'none'}${ph ? ` (${ph.file}, flag ${ph.flag}, rating ${ph.rating}, ${ph.label})` : ''}, selected ${s.selected.join(',') || 'none'}`,
     ph ? `values ${Object.entries(ph.values).map(([k, v]) => `${k} ${v}`).join(', ')}` : 'no values',
-    `gesture ${s.gesture ? `${s.gesture.p} g ${s.gesture.g}` : 'none'}, watch ${s.watch.join(',') || 'nothing'}, autoAdvance ${s.autoAdvance}, guard ${s.guard ? 'on' : 'off'}${s.writable ? '' : ' (refusing writes)'}`,
+    `gesture ${s.gesture ? `${s.gesture.p} g ${s.gesture.g} on ${s.gesture.photo}` : 'none'}${s.staleG != null ? ` (sets with g ${s.staleG} are stale)` : ''}, watch ${s.watch.join(',') || 'nothing'}, autoAdvance ${s.autoAdvance}, guard ${s.guard ? 'on' : 'off'}${s.writable ? '' : ' (refusing writes)'}`,
     `clients: cmd ${c.cmd ? 'yes' : 'no'}, evt ${c.evt ? (c.stale ? 'stale' : 'yes') : 'no'}${c.backlog ? `, ${c.backlog} waiting unserved` : ''}; events written ${c.written}, lost ${c.lost}${s.paused ? '; PAUSED' : ''}, inst ${s.inst}`,
   ].join('\n');
 }

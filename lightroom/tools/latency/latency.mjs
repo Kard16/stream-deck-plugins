@@ -8,6 +8,10 @@
 // It writes only with the test catalog open and exactly one photo selected, whatever Lightroom's guard
 // says (with Auto Sync on, every set reaches all the selected photos), and stops writing if a hello from
 // another plugin instance or catalog arrives mid-run. Against the real Lightroom, rates go up to 60.
+// It writes only to the photo it started on. A state naming another photo, or a set refused as stale,
+// stops the bursts at once. Before each burst, and before putting the value back, it asks for a fresh
+// state (hello), because Lightroom puts a new gesture on whatever photo is the target. When Lightroom is on
+// another photo by then, it skips the restore, says so, and the run fails.
 //
 //   mise exec -- node lightroom/tools/latency/latency.mjs --mock [--mock-set-ms N] [--rates 15,30,60] [--burst-ms 5000]
 //   mise exec -- node lightroom/tools/latency/latency.mjs --ports 58780,58781 ...   (the real Lightroom, later)
@@ -39,8 +43,8 @@ async function expectMsg(client, pred, timeoutMs, what) {
 }
 
 // One burst: one gesture g on `param`, sets at `hz` for `burstMs`, then done. writeCheck() says
-// whether a set may go out now ({ ok }), or that writing must stop ({ stop }).
-async function runBurst(client, { hz, g, param, base, amplitude, dir, lo, hi, burstMs, gapMs, writeCheck }) {
+// whether a set may go out now ({ ok }), or that writing must stop ({ stop }). onSet() runs for every set sent.
+async function runBurst(client, { hz, g, param, base, amplitude, dir, lo, hi, burstMs, gapMs, writeCheck, onSet = () => {} }) {
   const period = 1000 / hz;
   const sets = [];
   const awaiting = []; // sets not yet acked, in send order
@@ -69,8 +73,13 @@ async function runBurst(client, { hz, g, param, base, amplitude, dir, lo, hi, bu
   };
   const onVals = (m, t) => {
     if (!m.vals || !Object.prototype.hasOwnProperty.call(m.vals, param)) return;
-    if (tDone == null) valsDuring += 1; // Lightroom must leave the tracked param out while the gesture runs
-    else if (tVals == null) tVals = t;
+    // Lightroom must leave the tracked param out while the gesture runs. Its events arrive in order, so vals
+    // before the gesture's first ack went out before the gesture began, like the fresh greeting's push.
+    if (tDone == null) {
+      if (tLastAck != null) valsDuring += 1;
+    } else if (tVals == null) {
+      tVals = t;
+    }
   };
   const onOk = ({ t, sent }) => {
     if (sent && sent.burst === g && sent.set) sent.set.tOk = t;
@@ -104,6 +113,7 @@ async function runBurst(client, { hz, g, param, base, amplitude, dir, lo, hi, bu
       if (rec == null) {
         sendFailures += 1;
       } else {
+        onSet();
         s.tSent = rec.t;
         sets.push(s);
         awaiting.push(s);
@@ -182,26 +192,98 @@ export async function runLatency({
   if (!Number.isFinite(gapMs) || gapMs < 0) throw new LatencyError('gapMs must be a number of ms, 0 or more');
   if (amplitude !== undefined && !(Number.isFinite(amplitude) && amplitude > 0)) throw new LatencyError('amplitude must be a number above 0');
   const client = new LrClient({ host, cmdPort, evtPort, autoHello: false, clientName: 'latency', firstId: 800000 });
-  const report = { param, host, cmdPort, evtPort, rates, burstMs, gapMs, startedAt: new Date().toISOString(), base: null, range: null, bursts: [], restored: false };
+  const report = {
+    param, host, cmdPort, evtPort, rates, burstMs, gapMs, startedAt: new Date().toISOString(),
+    base: null, range: null, photo: null, file: null, bursts: [], restored: false, restoreError: null,
+  };
   let inst0 = null;
-  // A set may go out only to the plugin instance and catalog checked at the start, and after a
-  // reconnect only once that Lightroom's greeting has arrived. Any other hello stops the writing.
-  const writeCheck = () => {
+  let wrote = false; // a set went out, so there is a value to put back
+  // The photo the run writes to (from the state before the first burst), and the latest state's photo.
+  let photo0 = null;
+  let photoNow = null;
+  let fileNow = null;
+  let staleErr = null; // the first set Lightroom refused as stale: the photo or module changed under its gesture
+  client.on('m:state', (m) => {
+    photoNow = m.photo;
+    fileNow = m.file;
+  });
+  client.on('m:err', (m) => {
+    if (m.cmd === 'set' && m.code === 'stale' && !staleErr) staleErr = m;
+  });
+  // Why the Lightroom on the other end isn't the plugin instance and catalog checked at the start, or null.
+  const otherLightroom = () => {
     const h = client.lastHello;
-    if (h && h.inst !== inst0) return { stop: `Lightroom reloaded or relaunched mid-run (inst ${inst0}, now ${h.inst}): stopped writing; check ${param} on the photo` };
-    if (h && !sameCatalog(h.path, TEST_CATALOG)) return { stop: `Lightroom has ${h.path ?? h.catalog} open now, not the test catalog: stopped writing` };
+    if (h && h.inst !== inst0) return `Lightroom reloaded or relaunched mid-run (inst ${inst0}, now ${h.inst}): stopped writing; check ${param} on the photo`;
+    if (h && !sameCatalog(h.path, TEST_CATALOG)) return `Lightroom has ${h.path ?? h.catalog} open now, not the test catalog: stopped writing`;
+    return null;
+  };
+  // A set may go out only to that Lightroom, after a reconnect only once its greeting has arrived, and only
+  // while it is on the run's photo: a state naming another photo, or a set refused as stale, stops the writing.
+  const writeCheck = () => {
+    const why = otherLightroom();
+    if (why) return { stop: why };
+    if (photo0 != null && photoNow !== photo0) {
+      return { stop: `Lightroom moved from ${photoName(photo0, report.file)} to ${photoName(photoNow, fileNow)} mid-run: stopped writing` };
+    }
+    if (staleErr) return { stop: 'Lightroom refused a set as stale, so the photo or module changed mid-run: stopped writing' };
     return { ok: client.greeted() };
   };
-  // Waits up to 5 s until a set may go out.
+  // Lightroom's state now. hello makes it greet again, and the greeting's state reads the target photo
+  // straight from the catalog, while the states it pushes come from its 200 ms poll. Null if none comes.
+  const freshState = async () => {
+    if (!(await client.waitUp(5000))) return null;
+    return new Promise((resolve) => {
+      let sawHello = false;
+      const finish = (st) => {
+        clearTimeout(timer);
+        client.off('msg', onMsg);
+        resolve(st);
+      };
+      const onMsg = (m) => {
+        if (m.t === 'hello') sawHello = true;
+        else if (sawHello && m.t === 'state') finish(m);
+      };
+      const timer = setTimeout(() => finish(null), 3000);
+      client.on('msg', onMsg);
+      if (!client.hello()) finish(null);
+    });
+  };
+  // Waits up to 5 s until a set may go out, then checks a fresh state: each burst starts a new gesture,
+  // and Lightroom puts a new gesture on whatever photo is the target.
   const ready = async () => {
     const end = now() + 5000;
     for (;;) {
       const w = writeCheck();
       if (w.stop) throw new LatencyError(w.stop);
-      if (w.ok) return;
+      if (w.ok) break;
       if (now() >= end) throw new LatencyError('lost the connection');
       await sleep(20);
     }
+    if (!(await freshState())) throw new LatencyError('Lightroom did not answer hello with its state');
+    const w = writeCheck();
+    if (w.stop) throw new LatencyError(w.stop);
+  };
+  // Puts the value back as one more gesture g, but only onto the photo the run started on, by a fresh
+  // state; anywhere else it would land on another photo. Sets report.restored, or report.restoreError.
+  const restore = async (g) => {
+    let why = otherLightroom();
+    if (!why) {
+      const st = await freshState();
+      why = otherLightroom();
+      if (!why && !st) why = 'Lightroom did not say which photo it is on';
+      else if (!why && st.photo !== photo0) why = `Lightroom is on ${photoName(st.photo, st.file)} now`;
+    }
+    if (why) {
+      report.restoreError = `can't put back ${param} ${report.base} on ${photoName(photo0, report.file)}: ${why}`;
+      log(report.restoreError);
+      return;
+    }
+    const t = now();
+    client.send({ t: 'set', p: param, v: report.base, g });
+    const back = await client.waitFor((m) => m.t === 'ack' && m.p === param && m.g === g, 3000, t);
+    client.send({ t: 'done', g });
+    report.restored = !!back && typeof back.msg.v === 'number' && Math.abs(back.msg.v - report.base) <= 1e-6;
+    await sleep(100);
   };
   try {
     client.start();
@@ -224,6 +306,9 @@ export async function runLatency({
     client.send({ t: 'module', v: 'develop' });
     const st = await expectMsg(client, (m) => m.t === 'state' && m.module === 'develop', 6000, 'state in Develop');
     if (st.sel !== 1) throw new LatencyError(`${st.sel ?? 0} photos are selected: select exactly one. With Auto Sync on, Lightroom copies every set to all the selected photos`);
+    photo0 = st.photo;
+    report.photo = st.photo;
+    report.file = st.file;
     const tWatch = now();
     client.send({ t: 'watch', ps: [param] });
     const ranges = await client.waitFor((m) => m.t === 'ranges' && m.ranges && Array.isArray(m.ranges[param]), 3000, tWatch);
@@ -240,29 +325,21 @@ export async function runLatency({
     for (let i = 0; i < rates.length; i += 1) {
       const hz = rates[i];
       await ready();
-      const b = await runBurst(client, { hz, g: i + 1, param, base, amplitude: amp, dir, lo, hi, burstMs, gapMs, writeCheck });
+      const b = await runBurst(client, { hz, g: i + 1, param, base, amplitude: amp, dir, lo, hi, burstMs, gapMs, writeCheck, onSet: () => { wrote = true; } });
       report.bursts.push(b);
       log(formatBurst(b));
     }
 
     // Put the value back as one more gesture.
-    const g = rates.length + 1;
-    await ready();
-    const tBack = now();
-    client.send({ t: 'set', p: param, v: base, g });
-    const back = await client.waitFor((m) => m.t === 'ack' && m.p === param && m.g === g, 3000, tBack);
-    client.send({ t: 'done', g });
-    report.restored = !!back && typeof back.msg.v === 'number' && Math.abs(back.msg.v - base) <= 1e-6;
-    await sleep(100);
+    await restore(rates.length + 1);
   } catch (err) {
     // Best effort: put the value back before giving up, so the photo isn't left changed. Never into a
-    // Lightroom that reloaded, relaunched or opened another catalog since the start.
-    if (report.base != null && !report.restored && writeCheck().ok) {
-      client.send({ t: 'set', p: param, v: report.base, g: 999 });
-      client.send({ t: 'done', g: 999 });
-      await sleep(200);
-      log(`${param} set back to ${report.base} after the error`);
+    // Lightroom that reloaded, relaunched or opened another catalog since the start, nor onto another photo.
+    if (wrote && !report.restored && !report.restoreError) {
+      await restore(999);
+      if (report.restored) log(`${param} set back to ${report.base} after the error`);
     }
+    err.report = report;
     throw err;
   } finally {
     client.stop();
@@ -274,6 +351,9 @@ export async function runLatency({
 // Whether a run should exit 1: acks missing or not carrying the value sent, errors, leaks (the tracked
 // param in vals mid-gesture, which v1 forbids), or the value not put back.
 export const reportFailed = (r) => r.bursts.some((b) => b.missingAcks > 0 || b.errs > 0 || b.valsDuring > 0 || b.ackMismatches > 0) || !r.restored;
+
+// A photo as a state names it, "101 (DSC01241.ARW)", or "no photo".
+const photoName = (id, file) => (id == null ? 'no photo' : file ? `${id} (${file})` : String(id));
 
 const cell = (x, w) => String(x ?? '-').padStart(w);
 
@@ -296,7 +376,8 @@ export function formatReport(r) {
   const missing = r.bursts.reduce((n, b) => n + b.missingAcks, 0);
   const mismatched = r.bursts.reduce((n, b) => n + b.ackMismatches, 0);
   const growing = r.bursts.filter((b) => b.backlog.growing).map((b) => `${b.hz}/s`);
-  lines.push(`acks missing ${missing}, acks not matching the value sent ${mismatched}; backlog ${growing.length ? `growing at ${growing.join(', ')}` : 'none'}; ${r.param} ${r.restored ? 'put back' : 'NOT put back'} to ${r.base}`);
+  lines.push(`acks missing ${missing}, acks not matching the value sent ${mismatched}; backlog ${growing.length ? `growing at ${growing.join(', ')}` : 'none'}; ${r.param} ${r.restored ? 'put back' : 'NOT put back'} to ${r.base}${r.photo != null ? ` on ${photoName(r.photo, r.file)}` : ''}`);
+  if (r.restoreError) lines.push(r.restoreError);
   return lines.join('\n');
 }
 

@@ -15,6 +15,8 @@ export class FakeLink implements LrLink {
 	readonly sent: Sent[] = [];
 	/** Shape problems in sent commands; tests assert it stays empty. */
 	readonly problems: string[] = [];
+	/** The `err` events {@link lr} handed to a command's onErr callback. */
+	readonly routedErrs: ErrEvt[] = [];
 	readonly #events = new Emitter<ClientEvents>();
 	readonly #errRoutes = new Map<number, (err: ErrEvt) => void>();
 	readonly #clock: FakeClock | undefined;
@@ -57,11 +59,23 @@ export class FakeLink implements LrLink {
 
 	// ---- playing Lightroom ----
 
-	/** Delivers an event, after checking it parses the way the real client would parse it. */
+	/**
+	 * Delivers an event, after checking it parses the way the real client would parse it. Like the real client,
+	 * an `err` carrying the id of a command sent with onErr goes to that callback first.
+	 */
 	lr(raw: Record<string, unknown>): void {
 		const parsed = parseEvent(raw);
 		if (parsed.kind !== "event") throw new Error(`test event doesn't parse: ${JSON.stringify(raw)} (${parsed.kind}: ${parsed.why})`);
-		this.#events.emit("event", parsed.evt);
+		const evt = parsed.evt;
+		if (evt.t === "err" && evt.id !== undefined) {
+			const route = this.#errRoutes.get(evt.id);
+			this.#errRoutes.delete(evt.id);
+			if (route) {
+				this.routedErrs.push(evt);
+				route(evt);
+			}
+		}
+		this.#events.emit("event", evt);
 	}
 
 	setState(state: ConnState): void {

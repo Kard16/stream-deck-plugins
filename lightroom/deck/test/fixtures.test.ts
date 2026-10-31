@@ -82,13 +82,18 @@ const EXPECT: Record<string, (model: LrModel) => void> = {
 	"reload.jsonl": (m) => assert.equal(m.conn, "online"),
 	"reset.jsonl": (m) => assert.equal(value(m, "Exposure"), 0),
 	"set-from-library.jsonl": (m) => assert.equal(value(m, "Shadows"), 30),
+	"stale-gesture.jsonl": (m) => {
+		assert.deepEqual([m.state.photo, m.state.file, m.state.rating], ["102", "DSC0102.ARW", 2]);
+		// Both errs answer sets this deck never sent, so they change nothing; the last ack is photo 102's -0.3.
+		assert.deepEqual(m.view("Exposure"), { value: -0.3, range: [-5, 5], fresh: true, adjusting: false });
+	},
 };
 
 describe("protocol fixtures (lightroom/protocol/fixtures)", () => {
 	const fixtures = loadFixtures();
 
 	test("every fixture has a check here", () => {
-		assert.ok(fixtures.length >= 18, `found ${fixtures.length} fixtures`);
+		assert.ok(fixtures.length >= 19, `found ${fixtures.length} fixtures`);
 		assert.deepEqual(
 			fixtures.map((f) => f.name).filter((name) => !EXPECT[name]),
 			[],
@@ -114,6 +119,8 @@ describe("protocol fixtures (lightroom/protocol/fixtures)", () => {
 			});
 			const client = new LrClient({ cmdPort: lr.cmdPort, evtPort: lr.evtPort, ver: "fixture-test", watch: WATCH, timing: { backoffMinMs: 20, backoffMaxMs: 100 } });
 			const model = new LrModel(client);
+			const alerts: string[] = [];
+			model.onAlert((_origin, why) => alerts.push(why));
 			const handled = (): number => client.stats.events + client.stats.invalidEvents + client.stats.ignoredEvents + client.stats.badLines;
 			try {
 				client.start();
@@ -140,6 +147,7 @@ describe("protocol fixtures (lightroom/protocol/fixtures)", () => {
 				for (const [p, v] of Object.entries(ref.values)) assert.equal(model.view(p).value, v, `value of ${p}`);
 				assert.equal(model.gesture, null);
 				assert.deepEqual(model.held, []);
+				assert.deepEqual(alerts, [], "Lightroom's messages alone raise no alert");
 				EXPECT[fixture.name]?.(model);
 
 				// Lightroom's messages alone never make the deck send anything but the handshake and heartbeat,

@@ -612,7 +612,8 @@ export class LrClient implements LrLink {
 
 	#logErr(evt: ErrEvt): void {
 		const what = `Lightroom refused ${evt.cmd ?? "a command"}${evt.id !== undefined ? ` (id ${evt.id})` : ""}: ${evt.code}${evt.msg ? ` (${evt.msg})` : ""}`;
-		if (evt.code === "guard") this.#log.info(what);
+		// Refusals that are part of normal use: the guard, and a set that crossed a photo change (stale).
+		if (evt.code === "guard" || evt.code === "stale") this.#log.info(what);
 		else this.#log.warn(what);
 	}
 

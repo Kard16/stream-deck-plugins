@@ -34,6 +34,7 @@ return {
   lastValsAt = nil, -- when vals last went out
   flushAt = nil, -- when a vals push the rate limit held back is due
   gesture = nil, -- the open gesture: { p, g, photo = id it started on, at = time of its last set }
+  staleG = nil, -- g of a gesture that ended because the photo or module changed: its later sets get err stale
   observer = nil, -- the registered adjustment observer
   obsCount = 0, -- adjustment-observer callbacks so far
   obsTask = false, -- an observer task is on its way
