@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+*.tsbuildinfo
+coverage/
+dist/
+
+# Stream Deck build output and logs
+*.sdPlugin/bin/
+*.sdPlugin/logs/
+*.streamDeckPlugin
+
+# Lightroom catalogs and previews never belong in the repo
+*.lrcat
+*.lrcat-data/
+*.lrcat-wal
+*.lrcat-shm
+*.lrcat.lock
+*.lrdata/
+
+# Logs and local secrets
+*.log
+.env
+.env.*
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/

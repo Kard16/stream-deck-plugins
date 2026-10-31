@@ -1,0 +1,93 @@
+# Stream Deck + plugins
+
+Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and, later, Claude Code. One user, one Mac (macOS 26). No Marketplace, Windows support or distribution polish. Keystroke automation and undocumented APIs are fine when they're the only route.
+
+- **Now building:** the Lightroom Classic side. Plan, decisions and progress: `docs/lightroom/plan.md`.
+- **Later:** the Claude Code side. Design notes: `docs/research/claude-code-extensibility.md`.
+- **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
+
+## Rules
+
+- Never touch the user's main Lightroom catalog. Work only in the test catalog named in `docs/lightroom/plan.md`. The Lua plugin refuses writes unless that catalog is open, and only the user lifts that guard.
+- Lightroom, the Stream Deck app and the physical deck are shared. One agent drives them at a time, and the main thread decides which.
+- Steps only the user can do go back to the main thread, which batches them into one numbered checklist. That means Lightroom's Plug-in Manager, macOS permission prompts, looking at the deck, and design choices.
+- Stay inside this repo. Outside it, these are fine without asking:
+  - `streamdeck link`, `restart`, `validate` and `dev`.
+  - Installing the tools pinned in `mise.toml`.
+  - Reading the logs listed below.
+- Verification means commands you ran and their output. "Should work" isn't verification.
+- Never push. Commit only when the user's instructions say to.
+
+## Layout
+
+| Path | What | Owner when tracks run in parallel |
+|---|---|---|
+| `lightroom/lua/DeckBridge.lrdevplugin/` | Lua plugin. Lightroom loads it from this path. | Lua track |
+| `lightroom/deck/` | Stream Deck plugin: an npm project with `com.karimdhanji.lightroom.sdPlugin/` inside | Deck track |
+| `lightroom/tools/` | Mock Lightroom, fake deck client, latency harness | Tools track |
+| `lightroom/protocol/` | Wire protocol spec, plus fixture streams both sides test against | Main thread |
+| `spikes/` | Phase 1 experiments | Whoever runs the spike |
+| `docs/` | Research, plans, progress | Main thread |
+
+Work in this folder, not a worktree. Lightroom and the Stream Deck app load the plugins from these paths.
+
+## Lightroom Classic (Lua)
+
+**Language and modules**
+- Lightroom Classic 15.3 (SDK 15.3) runs Lua 5.1.5. That rules out `goto`, `//`, bitwise operators, `utf8` and `table.unpack`.
+- Check every file with `luac -p`; 5.1.5 is pinned in `mise.toml`.
+- Load SDK modules with `local LrTasks = import 'LrTasks'` and plugin modules with `require 'Dispatch'`.
+- The SDK has no JSON library; use the vendored `json.lua`.
+- Keep Lightroom calls behind thin adapters, so logic can be unit-tested with stubbed `Lr*` modules outside Lightroom.
+
+**Develop control**
+- `LrDevelopController` works only in Develop, on the active photo. Switch with `LrApplicationView.switchToModule('develop')`, then call `LrTasks.yield()`.
+- `setValue` takes numbers only.
+- Ranges vary by file type (Temperature is Kelvin on raw but -100..100 on JPEG), so always call `getRange`.
+- Call `startTracking(param)` while a dial turns and `stopTracking()` on release. That makes one history step per gesture.
+- The adjustment observer doesn't say what changed, so diff the watched params.
+- There's no photo-change event, so poll `catalog:getTargetPhoto()`.
+
+**Tasks, writes and sockets**
+- Catalog writes run in an async task inside `catalog:withWriteAccessDo(name, fn, {timeout = 3})`.
+- Wrap every handler in `LrTasks.pcall`.
+- Each `LrSocket` is one-way. After a client drops, recreate the send socket instead of reconnecting it.
+- The plugin starts only after Lightroom's window is first activated. Its tasks pause while a menu or the Plug-in Manager is open.
+- Feature-detect calls newer than 14.0, e.g. `if LrDevelopController.setEnhance then`.
+
+**Not in the SDK:** menu commands, the Sync dialog, Auto Sync, brushes, Generative Remove and the histogram. Use the Stream Deck Hotkey action, or skip them.
+
+## Stream Deck plugin (TypeScript)
+
+**Versions:** `@elgato/streamdeck` 3.0.4 and `@elgato/cli` 1.10.4, with manifest `SDKVersion` 3 and `Nodejs.Version` "24". Node 24 is pinned in `mise.toml`.
+
+**SDK 3 settings**
+- Settings events fire only when the user edits in the Property Inspector. Read settings from event payloads or `await getSettings()`.
+- Declare a settings type per action.
+- There's no secrets API.
+
+**Dials and the touch strip**
+- Each dial owns a 200×100 strip segment.
+- Put live data in custom layout keys, never `title`/`icon`.
+- One item out of bounds, or overlapping another at the same `zOrder`, makes the whole layout fail silently. Run `streamdeck validate` after every layout change.
+- Coalesce dial ticks (~40 ms) and apply our own acceleration.
+- Send at most 10–15 strip updates per second per dial, with only the changed keys.
+- Dial stacks steal the press, so every press action needs a touch alternative.
+
+**System**
+- `streamDeck.system.openUrl` can't open custom URL schemes; run `open` through `child_process`.
+- macOS 26 can refuse localhost connections for minutes after a reboot. Retry with backoff, and resync on `onSystemDidWakeUp`.
+
+## Logs agents can read
+
+- Lua plugin: `~/Library/Logs/Adobe/Lightroom/LrClassicLogs/DeckBridge.log`
+- Deck plugin: `lightroom/deck/com.karimdhanji.lightroom.sdPlugin/logs/com.karimdhanji.lightroom.0.log` (0 is newest)
+- Stream Deck app: `~/Library/Logs/ElgatoStreamDeck/StreamDeck0.log`
+
+## Commands
+
+The build session fills this in as it scaffolds. Expected:
+
+- `cd lightroom/deck && npm run watch`: rebuild and restart the deck plugin on save
+- `npx streamdeck validate lightroom/deck/com.karimdhanji.lightroom.sdPlugin`
+- `luac -p lightroom/lua/DeckBridge.lrdevplugin/*.lua`
