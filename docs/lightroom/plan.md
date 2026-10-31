@@ -433,6 +433,20 @@ Record kickoff answers, spike results and decisions here, newest last, with date
       - no backlog, no leaks, no errors, and Exposure was put back afterwards.
     - **Lightroom's log** has no warnings or errors.
   - **The deck plugin** was restarted on the v1 build (0.2.0.0). It connected and said hello, and Lightroom shows it online.
+- 2026-10-31, ladder step 5: the real deck bundle against Track C's mock. The script is `lightroom/tools/integration/deck-vs-mock.mjs`, run with `mise exec -- node lightroom/tools/integration/deck-vs-mock.mjs`.
+  - **93 checks:**
+    - setup, gestures, fine adjust, resets and banks;
+    - every key, and a mouse edit;
+    - both stale orders, and Library;
+    - recovery after a relaunch, a stale socket, a busy Lightroom and going offline;
+    - rules over the whole session: every command valid, rates kept, no alerts.
+  - **Result:** 93/93 on four runs, three by the agent and one by the main thread. The two sides never disagree. As a negative control, removing the mock's stale refusal makes step 6 fail.
+  - **Doc fixes:** `PROTOCOL.md`'s `state` row now mentions the observer path. The tools README says the mock notices photo changes later than Lightroom does.
+  - **Not covered yet:**
+    - read-only mode and a version mismatch;
+    - two dials at once, and clamping at the ends of a range;
+    - presets that change sliders;
+    - ticks dropped after 2 s.
 
 ## Progress
 
@@ -440,7 +454,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] S1 sockets · [x] S2 latency (numbers; the visual check moves to Phase 4) · [x] S3 hot reload · [x] S4 deck basics · [x] S5 15.3 checks, all 2026-10-31. The user approved building on these results.
 - [x] Phase 2: protocol frozen, 2026-10-31
 - [x] Track A: Lua plugin · [x] Track B: deck plugin · [x] Track C: tools, all built and verified offline, 2026-10-31 (workflow `wf_50e3a891-197`)
-- [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [ ] the deck plugin against the mock (step 5), in progress
+- [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [x] the deck plugin against the mock (step 5), 2026-10-31
 - [ ] Phase 4: integration on hardware
 - [ ] Phase 5: presets and tools
 - [ ] Phase 6: hardening

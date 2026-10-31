@@ -10,6 +10,7 @@ Run every command from the repo root through `mise exec --`, because the shell's
 | `fixtures/run.mjs` | Runs the 19 fixture conversations against the mock |
 | `fake-deck/` | A scriptable fake deck, for driving the real Lua plugin (verification ladder step 4) |
 | `latency/latency.mjs` | The S2 latency harness, ported to v1 |
+| `integration/deck-vs-mock.mjs` | The real Stream Deck plugin bundle against the mock (verification ladder step 5) |
 | `lib/` | The shared client, fixture reader, matcher, clocks and constants |
 
 ## Tests
@@ -73,7 +74,7 @@ mise exec -- node lightroom/tools/mock-lr/cli.mjs --ports 59780,59781 [--scenari
   - `vals` go out at most 20 a second, like the plugin's. That includes the full set owed after `hello`, `watch`, entering Develop and a photo change, which waits until 50 ms after the last `vals`.
   - Ranges depend on the file format.
   - Gestures end on `done`, on another `p` or `g`, after 2 s without a `set`, on a disconnect, on a photo change, on leaving Develop and at shutdown. After one ends, `vals` carry its final value only if that changed.
-  - Like the plugin, the mock learns of the user's photo and module changes, and of Lightroom's own Auto Advance, only from its poll. A `set` can reach such a change first.
+  - The mock learns of the user's photo and module changes, and of Lightroom's own Auto Advance, only from its 200 ms poll, so a `set` can reach such a change first. The plugin also hears of a photo change in Develop from the adjustment observer, within milliseconds, so the mock hits the `stale` path far more often than Lightroom does. That suits testing; it isn't a model of Lightroom's timing.
   - A gesture belongs to the photo it started on. Once the photo or module changes under it, its later `set`s get `err stale` and change nothing. The deck's `nav` and a flag's `advance` end it as stale too, even at an end of the filmstrip where nothing moves, as the plugin does. The stale g is forgotten when the next gesture starts or a client is greeted.
   - Writes are checked in PROTOCOL.md's order: fields, the guard, a stale gesture, the switch to Develop, then the photo and the param.
   - `watch` drops unknown params once Lightroom is in Develop with a photo, since that's where `getRange` works. The `err bad` carries the watch's `id`.
@@ -179,6 +180,38 @@ Before running it against Lightroom:
 - Select exactly one photo, not the last in the filmstrip. With Auto Sync on, Lightroom copies a dial edit to every selected photo (spike S5), so the script refuses more than one.
 - Turn off Lightroom's own Auto Advance. If it's on, the script stops after the first flag and puts the photo back.
 - Stop the Stream Deck plugin. Lightroom serves one client at a time.
+
+## Deck vs mock
+
+```
+mise exec -- node lightroom/tools/integration/deck-vs-mock.mjs [--keep]
+```
+
+Verification ladder step 5: the deck plugin's built bundle against the mock, to find where the two tracks read `PROTOCOL.md` differently. It isn't part of `node --test`. It needs `lightroom/deck`'s `bin/plugin.js` (`npm run build` there) and its `node_modules`, for `ws`. A run takes about 35 s, and everything binds ephemeral ports.
+
+How it runs:
+- It copies the `.sdPlugin` folder to a temp folder, so the real plugin's logs stay untouched.
+- It runs `bin/plugin.js` with the deck's `scripts/smoke-guard.mjs` preloaded, so the plugin can't reach 58780/58781.
+- A fake Stream Deck app, after the deck's `smoke.mjs`, plays dial and key input.
+- `startMock` runs on the real clock, and the plugin gets its ports through `DECKBRIDGE_CMD_PORT` and `DECKBRIDGE_EVT_PORT`.
+
+What it checks: the mock's state, and what the plugin sends the app.
+1. The four dials and seven keys appear, and the plugin says hello and watches the 13 bank params.
+2. Turns, fine turns, press and long-touch resets, and the banks.
+3. Pick, Reject, Unflag with advance; Next and Previous, including a JPEG; Before/After; Apply Preset.
+4. A mouse edit reaching its strip.
+5. A user's photo change mid-gesture, both ways round: Lightroom's `err stale` first, and the deck's `state` first.
+6. A turn in Library.
+7. A relaunch, a stale event socket, a paused Lightroom, and Lightroom going away and coming back.
+8. For the whole session:
+   - every command is valid (the deck's `validate.ts`);
+   - the rates for `set`, `ping`, strip updates and `vals`;
+   - one `done` per gesture;
+   - no `err` beyond the expected `stale`;
+   - no alert;
+   - nothing unexpected in the plugin's log.
+
+It prints one ok/FAIL line per check, and the tails of the plugin's and the mock's logs on a failure. It exits 0 when every check passes, 1 when one fails, and 2 when it can't start. `--keep` keeps the temp folder, with the plugin's log and `conversation.jsonl`: every command, event and app message, in order.
 
 ## Latency harness
 
