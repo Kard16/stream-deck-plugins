@@ -55,6 +55,10 @@ function renderHeader(S) {
   if (st) lines.push(`- **Last state:** module ${cell(st.module)}, photo ${cell(st.photo)} (${cell(st.file)}), flag ${cell(st.flag)}, rating ${cell(st.rating)}, label ${cell(st.label)}, selected ${cell(st.sel)}.`);
   const types = Object.entries(S.counts.byType).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, v]) => `${k} ${v}`).join(', ');
   lines.push(`- **Messages:** in ${S.counts.in}, out ${S.counts.out}${types ? ` (in by type: ${types})` : ''}.`);
+  const link = S.link || {};
+  if (link.okLines > 0) lines.push(`- **LrSocket receive mode replies \`ok\` per line** on the cmd socket: ${link.okLines} so far. They're counted, not errors, and give the time until Lightroom took each line.`);
+  const hb = link.heartbeat;
+  if (hb) lines.push(`- **Heartbeat:** ping every ${hb.intervalMs / 1000} s, ${hb.pings} pings, ${hb.pongs} pongs (${hb.latePongs} late), ${hb.staleReconnects} stale-sender reconnect(s), ${hb.pausedEpisodes} pause(s) waited out, ${hb.slowGraceEpisodes} slow-probe wait(s).`);
   if (S.guard.count > 0) {
     lines.push('', `> **GUARD:** ${S.guard.count} command(s) were refused with \`err guard\`. The active catalog isn't the test catalog, so every write was blocked. Commands refused: ${S.guard.samples.map((g) => g.cmd).filter(Boolean).slice(0, 10).join(', ') || dash}.`);
   }
@@ -81,12 +85,18 @@ function renderStatus(S) {
 }
 
 function renderS1(S) {
-  const lines = ['## S1 sockets', '', 'Each cycle drops the named socket(s), waits 300 ms and reconnects. Pass: reconnected, a `hello` when evt was dropped, and a `pong`, all within 5 s of reconnecting. Times are from the start of the reconnect.', ''];
+  const lines = ['## S1 sockets', '',
+    'Cycles 1–10 drop both sockets and reconnect after 300 ms. Cycles 11–13 drop only cmd and reconnect it after 300 ms; Lightroom then recreates its sender, which closes our evt, and the pair rule reconnects that too. Cycles 14–16 lose evt the way the deck client handles it: the pair rule closes cmd as well, then reconnects both.',
+    '',
+    'A pure evt-only drop leaves Lightroom\'s sender stale: its send socket never notices the client went away and keeps writing to the dead socket, so no hello or reply arrives (observed in run 20261031-133539). Hence the pair rule.',
+    '',
+    'Pass: both sockets back, a `hello` after the drop, then a `pong`, all within 5 s of the reconnect starting. Times are from the drop; reconnects start after 300 ms (full and cmd drops) or the pair rule\'s 250 ms.', ''];
   if (S.s1.cycles.length === 0) {
     lines.push('Not run yet.');
   } else {
     lines.push(table(['#', 'Drop', 'OK', 'Connect ms', 'Hello ms', 'Ping ms', 'Total ms', 'gen', 'Note'],
-      S.s1.cycles.map((c) => [c.n, c.kind, yn(c.ok), c.connectMs, c.helloMs, c.pingMs, c.totalMs, c.gen, [c.retried ? 'retry' : null, c.note].filter(Boolean).join('; ')])));
+      S.s1.cycles.map((c) => [c.n, c.kind, yn(c.ok), c.connectMs, c.helloMs, c.pingMs, c.totalMs, c.gen,
+        [c.lrClosedEvt ? 'Lightroom closed evt' : null, c.pairClosed ? 'rule closed cmd' : null, c.retried ? 'retry' : null, c.note].filter(Boolean).join('; ')])));
   }
   if (S.s1.note) lines.push('', `Note: ${S.s1.note}`);
   return lines.join('\n');
@@ -121,19 +131,19 @@ function renderS5(S) {
 }
 
 function renderS2(S) {
-  const lines = ['## S2 latency', '', 'Ack: send to `ack`. Echo: send to the `vals` that carries the value. LR handler: the `ms` field of `ack`. Backlog compares the median echo latency in the first and last second of a burst; a large positive change means a growing queue. Drain: time from the last `set` to the last `ack` and the last `vals`.', ''];
+  const lines = ['## S2 latency', '', 'ok: send to LrSocket\'s `ok` for that line. Ack: send to `ack`. Echo: send to the `vals` that carries the value. LR handler: the `ms` field of `ack`. Backlog compares the median echo latency in the first and last second of a burst; a large positive change means a growing queue. Drain: time from the last `set` to the last `ack` and the last `vals`.', ''];
   if (S.s2.runs.length === 0) return lines.concat(['Not run yet. Starts after the S5 probes.']).join('\n');
   S.s2.runs.forEach((run, i) => {
     const p = run.photo || {};
     lines.push(`### Run ${i + 1} of ${S.s2.runs.length}, started ${run.startedAt}${run.endedAt ? `, ended ${run.endedAt}` : ''}`, '');
     lines.push(`Photo: ${cell(p.file ?? p.name)}, ${cell(p.format)}, ${cell(mb(p.fileSize ?? p.size))}, ${cell(p.width)}×${cell(p.height)}. Base Exposure ${cell(run.base)}.${run.note ? ` Note: ${run.note}.` : ''}`, '');
     if (run.bursts.length) {
-      lines.push(table(['Burst', 'Hz target / actual', 'Sets', 'Skipped', 'Drift p95 ms', 'Ack med / p95 / max', 'Missing acks', 'LR handler med / max', 'Echo med / p95 / max', 'Echoes / vals', 'Backlog echo ms', 'Drain ack / vals ms', 'cy', 'Errs'],
+      lines.push(table(['Burst', 'Hz target / actual', 'Sets', 'Skipped', 'Drift p95 ms', 'ok med / p95 / max', 'Ack med / p95 / max', 'Missing acks', 'LR handler med / max', 'Echo med / p95 / max', 'Echoes / vals', 'Backlog echo ms', 'Drain ack / vals ms', 'cy', 'Errs'],
         run.bursts.map((b) => [
           `${b.hz}/s ${b.track ? 'tracked' : 'untracked'}`,
           `${b.hz} / ${b.actualHz}`,
           b.sent, b.skipped, b.drift.p95,
-          trio(b.ack), b.missingAcks,
+          trio(b.ok), trio(b.ack), b.missingAcks,
           b.lr && b.lr.n ? `${b.lr.med} / ${b.lr.max}` : dash,
           trio(b.echo),
           `${b.echo.n ?? 0} / ${b.vals ?? 0}`,

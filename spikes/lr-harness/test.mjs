@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 // End-to-end test of the spike harness against fake-lr.mjs. Never touches the real ports or plugin dir.
-// Scenario 1 walks the user's checklist: connect late, tests, Auto Sync, Reload Plug-in, quit and relaunch.
+// The fake behaves like real LrSocket: "ok" per cmd line, a send socket that never notices its client
+// leaving, and a sender recreated when the cmd socket closes.
+// Scenario 1 walks the user's checklist: connect late, tests, Auto Sync after a long menu pause,
+// a stale sender the heartbeat must fix, Reload Plug-in, quit and relaunch.
 // Scenario 2 runs the tests against a fake whose guard refuses writes.
+// Scenario 3: vals before acks, hello only on request, and a slow Lightroom that builds a backlog.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -47,8 +51,9 @@ function start(script, args, logName) {
   return child;
 }
 
-function waitLine(child, text, timeoutMs) {
-  if (child.lines.some((l) => l.includes(text))) return Promise.resolve(true);
+// Wait for a stdout line containing text, looking only at lines from index `from` on.
+function waitLine(child, text, timeoutMs, from = 0) {
+  if (child.lines.slice(from).some((l) => l.includes(text))) return Promise.resolve(true);
   return new Promise((resolve, reject) => {
     const w = { text, resolve: () => { clearTimeout(timer); child.waiters.splice(child.waiters.indexOf(w), 1); resolve(true); } };
     const timer = setTimeout(() => {
@@ -81,6 +86,8 @@ function makePluginDir(name) {
 
 async function scenarioMain() {
   console.log('\n# Scenario 1: full checklist against the fake (ports 59780/59781)');
+  let beforeStale = null;
+  let staleRecoveryMs = null;
   const pluginDir = makePluginDir('plugin-main');
   const svFile = path.join(pluginDir, 'SpikeVersion.lua');
   const out = path.join(tmpRoot, 'out-main');
@@ -91,10 +98,19 @@ async function scenarioMain() {
     check('S3 left SpikeVersion.lua at v2 while waiting for a reload', /local V = 'v2-/.test(fs.readFileSync(svFile, 'utf8')));
     fake.stdin.write('trigger tests\n');
     await waitLine(harness, '[mark] tests-done', 120000);
-    fake.stdin.write('trigger autosync\n');
+    // Lightroom paused for 6 s (a menu held open), then the menu item fires the autosync trigger.
+    // The heartbeat must wait rather than reconnect, or the trigger would go to a dead socket.
+    fake.stdin.write('freeze 6 autosync\n');
     await waitLine(harness, '[mark] autosync-done', 30000);
+    beforeStale = harness.lines.length;
+    // A stale sender: Lightroom keeps answering 'ok' but its events go nowhere. The heartbeat must notice.
+    const tStale = Date.now();
+    fake.stdin.write('stale\n');
+    await waitLine(harness, '[mark] heartbeat-recovered', 15000, beforeStale);
+    staleRecoveryMs = Date.now() - tStale;
+    const beforeReload = harness.lines.length;
     fake.stdin.write('reload\n');
-    await waitLine(harness, '[mark] lifecycle reload', 20000);
+    await waitLine(harness, '[mark] lifecycle reload', 20000, beforeReload);
     await waitLine(harness, '[mark] s3-followup', 20000);
     check('SpikeVersion.lua restored after the reload follow-up', fs.readFileSync(svFile, 'utf8') === SPIKE_VERSION);
     fake.stdin.write('quit\n');
@@ -121,10 +137,26 @@ async function scenarioMain() {
   check('hello recorded with the test catalog', S.hello && S.hello.path === '/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat');
 
   const c = S.s1.cycles;
-  check('S1: 16 cycles (10 both, 3 cmd, 3 evt)', c.length === 16 && c.filter((x) => x.kind === 'both').length === 10 && c.filter((x) => x.kind === 'cmd').length === 3 && c.filter((x) => x.kind === 'evt').length === 3);
-  check('S1: every cycle ok within 5 s', c.every((x) => x.ok && x.totalMs <= 5000), `max total ${Math.max(...c.map((x) => x.totalMs ?? Infinity))} ms`);
-  check('S1: hello times recorded for full and evt drops', c.filter((x) => x.kind !== 'cmd').every((x) => typeof x.helloMs === 'number'));
+  check('S1: 16 cycles (10 both, 3 cmd, 3 evt+rule)', c.length === 16 && c.filter((x) => x.kind === 'both').length === 10 && c.filter((x) => x.kind === 'cmd').length === 3 && c.filter((x) => x.kind === 'evt+rule').length === 3);
+  check('S1: every cycle ok within 5 s of reconnecting', c.every((x) => x.ok && x.totalMs - x.reconnectAfterMs <= 5000), `max total ${Math.max(...c.map((x) => x.totalMs ?? Infinity))} ms from the drop`);
+  check('S1: hello and connect times are positive', c.every((x) => x.helloMs > 0 && x.connectMs > 0));
+  check('S1: every cycle verified with a hello', c.every((x) => typeof x.helloMs === 'number'));
+  check('S1: cmd drops make the fake close evt (sender recreated)', c.filter((x) => x.kind === 'cmd').every((x) => x.lrClosedEvt === true));
+  check('S1: evt drops close cmd too (pair rule)', c.filter((x) => x.kind === 'evt+rule').every((x) => x.pairClosed === true));
+  check('S1: no retries needed', c.every((x) => !x.retried));
   check('S1: pass flag set', S.s1.pass === true);
+
+  check("LrSocket 'ok' lines counted", S.link.okLines > 50, `${S.link.okLines}`);
+  check("no 'ok' line reported as bad JSON", !S.unexpected.some((u) => /bad JSON/.test(u.why)) && !harness.lines.some((l) => /bad JSON/.test(l)));
+  check("summary.md notes the 'ok' replies once", (md.match(/replies `ok` per line/g) || []).length === 1);
+  const hb = S.link.heartbeat;
+  check('heartbeat pinged and got pongs', hb && hb.pings > 5 && hb.pongs > 5, hb && `${hb.pings} pings, ${hb.pongs} pongs`);
+  check('heartbeat waited out the 6 s pause', hb && hb.pausedEpisodes >= 1 && S.lifecycle.events.some((e) => e.kind === 'paused') && S.lifecycle.events.some((e) => e.kind === 'resumed'));
+  check('no reconnect during the pause; the trigger after it arrived', beforeStale != null && !harness.lines.slice(0, beforeStale).some((l) => /reconnecting both sockets/.test(l)) && S.autosync.length === 1);
+  check('heartbeat recovered the stale sender within about 6 s', staleRecoveryMs != null && staleRecoveryMs <= 6500, `${staleRecoveryMs} ms`);
+  check('exactly one stale-sender reconnect', hb && hb.staleReconnects === 1, hb && `${hb.staleReconnects}`);
+  const hbEv = S.lifecycle.events.find((e) => e.kind === 'heartbeat reconnect');
+  check('lifecycle records the heartbeat reconnect and recovery', hbEv && hbEv.silentMs >= 4000 && S.lifecycle.events.some((e) => e.kind === 'heartbeat recovered'));
 
   const steps = Object.fromEntries(S.s3.steps.map((s) => [s.step.split(' ')[0], s]));
   check('S3 step 1 reads v1', steps['1'] && steps['1'].v === 'v1');
@@ -222,7 +254,7 @@ async function scenarioSlow() {
   await stop(fake);
   const S = JSON.parse(fs.readFileSync(path.join(out, 'summary.json'), 'utf8'));
   check('S1 passes when hello needs a hello command', S.s1.pass === true);
-  check('S1 notes the missing hello on evt-only drops', S.s1.cycles.filter((c) => c.kind === 'evt').every((c) => /hello only after a hello command/.test(c.note ?? '')));
+  check('S1 every cycle got a hello', S.s1.cycles.every((c) => typeof c.helloMs === 'number'));
   const bursts = S.s2.runs.at(-1).bursts;
   for (const b of bursts) {
     check(`S2 ${b.hz}/s ${b.track ? 'tracked' : 'untracked'}: echoes matched when vals precede acks`, b.echo.n >= b.sent * 0.9, `echo ${b.echo.n} of ${b.sent}`);

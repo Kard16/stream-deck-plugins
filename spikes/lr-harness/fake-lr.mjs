@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 // Fake Lightroom for testing the spike harness. Speaks spikes/protocol-v0.md on configurable ports,
-// close enough to the spike DeckBridge plugin to exercise every harness phase.
-// stdin commands: "trigger tests", "trigger autosync", "reload", "quit", "state", "exit".
+// close enough to the spike DeckBridge plugin to exercise every harness phase. Like real LrSocket:
+// the cmd socket answers every line with "ok"; the send socket never notices its client leaving
+// (writes to the dead peer are lost) and is recreated only when the cmd socket closes.
+// stdin: "trigger tests", "trigger autosync", "stale" (sender swallows writes until the cmd socket
+// closes), "freeze <secs> [trigger]" (paused like an open menu, then optionally fires a trigger),
+// "reload", "quit", "state", "exit".
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -75,13 +79,24 @@ const lr = {
 let cmdServer = null;
 let evtServer = null;
 let cmdSock = null;
-let evtSock = null;
+// Lightroom's send socket: once a client is attached it stays attached, even after that client is gone.
+const sender = { sock: null, stale: false };
+let evtBacklog = []; // evt connections accepted while the sender is taken; never served
+let frozenUntil = 0; // while frozen nothing is read, answered or sent, as when a menu is open
+let frozenIn = [];
+let frozenOut = [];
 let lastEchoAt = 0;
 let pendingVals = {};
 let flushTimer = null;
 
 function send(obj) {
-  if (evtSock && !evtSock.destroyed) evtSock.write(JSON.stringify(obj) + '\n');
+  if (Date.now() < frozenUntil) {
+    frozenOut.push(obj);
+    return;
+  }
+  const s = sender.sock;
+  if (!s || sender.stale || s.destroyed || !s.writable) return; // lost, like a write to a dead peer
+  s.write(JSON.stringify(obj) + '\n');
 }
 
 function readSpikeVersion() {
@@ -288,9 +303,26 @@ async function handle(line) {
   }
 }
 
+// Like LrSocket's receive mode: handle the line, then answer it with "ok".
+function receive(sock, line) {
+  handle(line).catch((e) => say(`handler error ${e.message}`));
+  if (!sock.destroyed) sock.write('ok\n');
+}
+
+function recreateSender(why) {
+  const old = sender.sock;
+  sender.sock = null;
+  sender.stale = false;
+  if (old && !old.destroyed) old.destroy();
+  for (const s of evtBacklog) s.destroy();
+  evtBacklog = [];
+  say(`sender recreated (${why})`);
+}
+
 function onCmdConnection(sock) {
-  if (cmdSock) cmdSock.destroy();
+  const old = cmdSock;
   cmdSock = sock;
+  if (old) old.destroy();
   sock.setEncoding('utf8');
   let buf = '';
   sock.on('data', (d) => {
@@ -299,20 +331,32 @@ function onCmdConnection(sock) {
     while ((i = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, i);
       buf = buf.slice(i + 1);
-      if (line.trim()) handle(line).catch((e) => say(`handler error ${e.message}`));
+      if (!line.trim()) continue;
+      if (Date.now() < frozenUntil) frozenIn.push({ sock, line });
+      else receive(sock, line);
     }
   });
   sock.on('error', () => {});
-  sock.on('close', () => { if (cmdSock === sock) cmdSock = null; });
+  sock.on('close', () => {
+    if (cmdSock !== sock) return;
+    cmdSock = null;
+    recreateSender('cmd socket closed');
+  });
 }
 
 function onEvtConnection(sock) {
-  if (evtSock) evtSock.destroy();
-  evtSock = sock;
+  sock.on('error', () => {});
+  if (sender.sock) {
+    // The sender is taken, maybe by a client that's gone: accepted, but never served.
+    evtBacklog.push(sock);
+    sock.on('close', () => { evtBacklog = evtBacklog.filter((s) => s !== sock); });
+    return;
+  }
+  sender.sock = sock;
+  sender.stale = false;
   lr.gen += 1;
   sock.setNoDelay(true);
-  sock.on('error', () => {});
-  sock.on('close', () => { if (evtSock === sock) evtSock = null; });
+  // Deliberately no 'close' handler: the send socket never notices its client leaving.
   if (!cfg.helloOnConnect) return;
   sendHello();
   sendState();
@@ -330,9 +374,10 @@ function bind() {
 }
 
 function unbind() {
-  for (const s of [cmdSock, evtSock]) if (s) s.destroy();
+  const c = cmdSock;
   cmdSock = null;
-  evtSock = null;
+  if (c) c.destroy();
+  recreateSender('unbind');
   for (const srv of [cmdServer, evtServer]) if (srv) srv.close();
   cmdServer = null;
   evtServer = null;
@@ -351,9 +396,35 @@ async function restart(why, downMs) {
 }
 
 const rl = readline.createInterface({ input: process.stdin });
+function unfreeze(after) {
+  frozenUntil = 0;
+  const outs = frozenOut;
+  const ins = frozenIn;
+  frozenOut = [];
+  frozenIn = [];
+  for (const o of outs) send(o);
+  for (const { sock, line } of ins) if (!sock.destroyed) receive(sock, line);
+  if (after) {
+    if (after === 'autosync') {
+      lr.sel = 3;
+      sendState();
+    }
+    send({ t: 'trigger', name: after });
+  }
+  say(`unfrozen${after ? `, sent trigger ${after}` : ''}`);
+}
+
 rl.on('line', (line) => {
-  const [cmd, arg] = line.trim().split(/\s+/);
-  if (cmd === 'trigger') {
+  const [cmd, arg, after] = line.trim().split(/\s+/);
+  if (cmd === 'stale') {
+    sender.stale = true;
+    say('sender stale: writes are lost until the cmd socket closes');
+  } else if (cmd === 'freeze') {
+    const secs = Number(arg) || 5;
+    frozenUntil = Date.now() + secs * 1000;
+    say(`frozen for ${secs} s`);
+    setTimeout(() => unfreeze(after), secs * 1000);
+  } else if (cmd === 'trigger') {
     if (arg === 'autosync') {
       lr.sel = 3;
       sendState();

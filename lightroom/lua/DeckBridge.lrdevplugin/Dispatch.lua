@@ -17,6 +17,7 @@ local Dispatch = { handlers = {} }
 local queue = {}
 local draining = false
 local arrival = 0
+local drain -- defined below; run() needs it for the task fallback
 
 -- Adds or replaces handlers by command type.
 function Dispatch.register(handlers)
@@ -25,15 +26,28 @@ function Dispatch.register(handlers)
   end
 end
 
-local function run(h, m)
+-- direct is true when the handler ran straight from onMessage, outside any task.
+local function run(h, m, direct)
   local ok, err = LrTasks.pcall(h.fn, m)
   if not ok then
+    -- Some Lightroom calls wait internally and fail outside a task ("We can only wait
+    -- from within a task"). Run this command, and every later one of its type, through
+    -- the task queue instead.
+    if direct and string.find(tostring(err), 'within a task', 1, true) then
+      Log.warn('%s needs a task; routing it through the queue from now on', tostring(m.t))
+      h.alwaysTask = true
+      queue[#queue + 1] = { h = h, m = m }
+      if not draining then
+        drain()
+      end
+      return
+    end
     Log.error('%s failed: %s', tostring(m.t), tostring(err))
     Server.send({ t = 'err', id = m.id, msg = tostring(err), cmd = m.t })
   end
 end
 
-local function drain()
+drain = function()
   draining = true
   LrTasks.startAsyncTask(function()
     LrTasks.pcall(function()
@@ -80,12 +94,12 @@ function Dispatch.onLine(line)
   m._arrival = arrival
   Log.debug('cmd %s', line)
 
-  if h.immediate then
-    run(h, m)
+  if h.immediate and not h.alwaysTask then
+    run(h, m, true)
     return
   end
-  local needsTask = false
-  if h.needsTask then
+  local needsTask = h.alwaysTask or false
+  if h.needsTask and not needsTask then
     local okNeeds, r = LrTasks.pcall(h.needsTask, m)
     needsTask = (not okNeeds) or (r and true or false)
   end
@@ -96,7 +110,7 @@ function Dispatch.onLine(line)
     end
     return
   end
-  run(h, m)
+  run(h, m, true)
 end
 
 function Dispatch.queueLength()

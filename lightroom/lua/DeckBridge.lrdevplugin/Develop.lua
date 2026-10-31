@@ -86,7 +86,6 @@ function Develop.pushValues(force)
       if force or last == nil or math.abs(v - last) > 1e-9 then
         changed[p] = v
         n = n + 1
-        State.lastSent[p] = v
       end
     end
   end
@@ -99,7 +98,13 @@ function Develop.pushValues(force)
   if not inDev then
     msg.cached = true
   end
-  Server.send(msg)
+  -- Only values that went out count as sent, so a dropped push is diffed again later.
+  if not Server.send(msg) then
+    return false
+  end
+  for p, v in pairs(changed) do
+    State.lastSent[p] = v
+  end
   return true
 end
 

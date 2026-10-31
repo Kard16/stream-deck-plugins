@@ -71,6 +71,7 @@ local function boot(opts)
     module = opts.module or 'develop',
     catalogPath = opts.catalogPath,
     photos = opts.photos,
+    strictTasks = opts.strictTasks,
   })
   os.remove(TMP .. '/deckbridge-inst')
   os.remove(TMP .. '/deckbridge-trigger-tests')
@@ -182,6 +183,77 @@ test('connecting to the event port sends hello, state, then vals', function()
   eq(h.path, Stubs.TEST_CATALOG); ok(type(h.inst) == 'string' and #h.inst > 4, 'inst'); eq(type(h.gen), 'number')
   ok(string.find(h.lr, '15.3', 1, true), 'lr version')
   eq(evs[3].vals.Exposure, 0); eq(evs[3].vals.Temperature, 5500)
+end)
+
+test('the greeting reads state inside a task, as Lightroom requires', function()
+  -- Live run 20261031-133539: reading state in the socket callback failed with
+  -- "We can only wait from within a task", so no state was ever sent.
+  local env = boot({ strictTasks = true })
+  local evs = env.events()
+  eq(evs[1].t, 'hello'); eq(evs[2].t, 'state'); eq(evs[3].t, 'vals')
+  eq(evs[2].file, 'DSCF0001.RAF')
+  ok(not env.logged('state read failed'), 'no failed state read')
+end)
+
+test('a state the server dropped is sent again on the next poll', function()
+  local env = boot()
+  local Poll, Server = require 'Poll', require 'Server'
+  Poll.tick()
+  Server.evtConnected = false -- e.g. between a client leaving and coming back
+  env.catalog.target.meta.pickStatus = -1
+  Poll.tick()
+  Server.evtConnected = true
+  env.clearEvents()
+  Poll.tick()
+  local st = last(env.events('state'))
+  ok(st, 'state resent once a client is back'); eq(st.flag, -1)
+end)
+
+test('values the server dropped are diffed again later', function()
+  local env = boot()
+  local Develop, Server = require 'Develop', require 'Server'
+  Server.evtConnected = false
+  env.dev.values.Shadows = 42
+  eq(Develop.pushValues(false), false, 'push dropped')
+  Server.evtConnected = true
+  env.clearEvents()
+  eq(Develop.pushValues(false), true, 'pushed once connected')
+  eq(last(env.events('vals')).vals.Shadows, 42)
+end)
+
+test('a command that needs a task is retried in the queue, and later ones queue too', function()
+  local env = boot()
+  local Dispatch = require 'Dispatch'
+  local runs = 0
+  Dispatch.register({ needy = { fn = function(m)
+    if not env.canYield then error('We can only wait from within a task') end
+    runs = runs + 1
+    require('Server').send({ t = 'done-needy', n = m.n })
+  end } })
+  env.clearEvents()
+  env.cmd({ t = 'needy', n = 1 })
+  eq(runs, 1, 'retried in a task'); eq(#env.events('err'), 0, 'no err for the retry')
+  ok(Dispatch.handlers.needy.alwaysTask, 'marked as needing a task')
+  env.deferTasks = true
+  env.cmd({ t = 'needy', n = 2 })
+  eq(runs, 1, 'second one queued, not run directly')
+  env.runTasks()
+  eq(runs, 2); eq(last(env.events('done-needy')).n, 2)
+end)
+
+test('a trigger with no client is held, then sent when one connects', function()
+  local env = boot()
+  local Server, SpikeTrigger = require 'Server', require 'SpikeTrigger'
+  Server.evtConnected = false
+  SpikeTrigger.fire('tests')
+  SpikeTrigger.consume()
+  eq(#env.events('trigger'), 0, 'nothing sent yet')
+  Server.evtConnected = true
+  SpikeTrigger.consume()
+  local trig = env.events('trigger')
+  eq(#trig, 1); eq(trig[1].name, 'tests'); eq(trig[1].held, true)
+  SpikeTrigger.consume()
+  eq(#env.events('trigger'), 1, 'sent once')
 end)
 
 test('guard refuses writes outside the test catalog', function()

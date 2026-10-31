@@ -89,6 +89,20 @@ function Stubs.reset(opts)
   end
   env.photos = photos
 
+  -- Lightroom refuses photo metadata reads outside a task, as seen on 15.3. Tests opt in
+  -- with strictTasks, because most of them call module functions directly.
+  env.strictTasks = opts.strictTasks or false
+  local function needTask()
+    if env.strictTasks and not env.canYield then
+      error('We can only wait from within a task', 3)
+    end
+  end
+  for _, photo in ipairs(photos) do
+    local raw, fmt = photo.getRawMetadata, photo.getFormattedMetadata
+    function photo:getRawMetadata(k) needTask(); return raw(self, k) end
+    function photo:getFormattedMetadata(k) needTask(); return fmt(self, k) end
+  end
+
   local catalog = { path = opts.catalogPath or Stubs.TEST_CATALOG, target = photos[1], targets = { photos[1] } }
   function catalog:getPath() return self.path end
   function catalog:getTargetPhoto() return self.target end

@@ -77,8 +77,8 @@ function Poll.sendState(force)
     Log.warn('state read failed: %s', tostring(st))
     return nil
   end
-  if force or differs(st, lastSentState) then
-    Server.send(stateMessage(st))
+  -- Only a state that went out counts as sent; a dropped one is retried next tick.
+  if (force or differs(st, lastSentState)) and Server.send(stateMessage(st)) then
     lastSentState = st
   end
   return st

@@ -41,12 +41,22 @@ function Core.helloMessage()
 end
 
 -- hello, then state, then vals: what a client gets on connecting to the event port.
+-- Socket callbacks aren't tasks, and reading photo metadata outside a task fails with
+-- "We can only wait from within a task", so state and vals follow from a task.
 function Core.greet()
   Server.send(Core.helloMessage())
   local Poll = require 'Poll'
   local Develop = require 'Develop'
-  Poll.sendState(true)
-  Develop.pushValues(true)
+  LrTasks.startAsyncTask(function()
+    local okState, errState = LrTasks.pcall(Poll.sendState, true)
+    if not okState then
+      Log.warn('greeting state failed: %s', tostring(errState))
+    end
+    local okVals, errVals = LrTasks.pcall(Develop.pushValues, true)
+    if not okVals then
+      Log.warn('greeting vals failed: %s', tostring(errVals))
+    end
+  end, 'DeckBridge greet')
 end
 
 Core.handlers = {

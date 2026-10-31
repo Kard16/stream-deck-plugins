@@ -319,6 +319,14 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   7. **Strip histogram or thumbnail:** later, not in this build.
   - **Before/After:** hold to compare. Key down = `showView('develop_before')`, key up = `showView('develop_loupe')`. The user preferred it if it wasn't harder, and it isn't: it needs no toggle state.
 - 2026-10-31, process: The spikes are built where Lightroom and the Stream Deck app will load the real plugins from: `lightroom/lua/DeckBridge.lrdevplugin` (real id and ports) and `lightroom/deck/` (real plugin and dial-action UUIDs). That way the user adds the Lua plugin and places the dial actions once. Spike-only code stays in clearly named files (`Spike*.lua`, the spike menu items), which Track A deletes. The harness and analysis scripts live in `spikes/`, and the temporary wire format is `spikes/protocol-v0.md`.
+- 2026-10-31, spike run 1 (`spikes/results/20261031-133539`, aborted). The plugin loaded on the first Plug-in Manager ▸ Add: LrC 15.3, the test catalog, guard on, writable. Findings:
+  - **S1:** 10/10 full drops and 3/3 cmd-only drops recovered (connect about 2 ms, hello 2–7 ms).
+  - **Send sockets never notice a client leaving.** LrC's send-mode socket gets no `onClosed`/`onError`, and sends to the dead peer don't fail; only the receive socket's `onClosed` fires. After the harness dropped only the event socket, Lightroom kept writing into it, so every later result and the user's menu trigger were lost. **Rule:** the client always drops and reconnects both sockets together, and pings to detect a dead event path.
+  - **LrSocket's receive mode answers every line with `ok`** on the same connection. Clients must keep reading and discarding it.
+  - **`onMessage` runs outside a task** (`canYield()` is false). Photo metadata reads there fail with "We can only wait from within a task". `LrDevelopController.getValue` and `catalog:getPath()` work there.
+  - **Menu scripts share module state with Init's task:** the trigger arrived through `State`, and the file route was a duplicate.
+  - **The user doesn't see bezels** shown while the Plug-in Manager is open.
+  - **Bugs fixed:** the greeting now reads state inside a task; dropped state, vals and triggers are retried instead of being marked sent; a command that fails outside a task falls back to the task queue from then on. Five regression tests now fail on the old code and pass on the new.
 
 ## Progress
 

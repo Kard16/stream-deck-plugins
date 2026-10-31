@@ -52,12 +52,27 @@ local function arrive(name, route)
   lastSentAt[name] = now
   Log.info('trigger %s arrived via %s', name, route)
   local Server = require 'Server'
-  Server.send({ t = 'trigger', name = name, route = route })
+  if not Server.send({ t = 'trigger', name = name, route = route }) then
+    -- No client right now: keep it, and retry from the poll loop for up to 60 s.
+    State.unsentTrigger = { name = name, route = route, at = now }
+    Log.info('trigger %s held until a client connects', name)
+  end
   return true
 end
 
 -- Runs from the poll loop.
 function SpikeTrigger.consume()
+  local unsent = State.unsentTrigger
+  if unsent then
+    local Server = require 'Server'
+    if LrDate.currentTime() - unsent.at > 60 then
+      State.unsentTrigger = nil
+      Log.info('trigger %s dropped: no client for 60 s', unsent.name)
+    elseif Server.send({ t = 'trigger', name = unsent.name, route = unsent.route, held = true }) then
+      State.unsentTrigger = nil
+      Log.info('trigger %s sent after being held', unsent.name)
+    end
+  end
   local pending = State.pendingTrigger
   if pending then
     State.pendingTrigger = nil

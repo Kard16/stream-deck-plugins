@@ -62,6 +62,7 @@ const S = {
   state: null,
   counts: { in: 0, out: 0, byType: {} },
   status: { s1: 'pending', s3: 'pending', s5: 'pending (needs trigger tests)', s2: 'pending (runs after S5)', beforeAfter: 'pending', autosync: 'pending (needs trigger autosync)' },
+  link: { okLines: 0, heartbeat: null },
   s1: { cycles: [], pass: null, note: null },
   s3: { steps: [], file: null, backup: null, rewrittenTo: null, followUpPending: false, fileRestored: null, restoreNote: null },
   s5: { runs: [] },
@@ -112,6 +113,7 @@ function writeFileAtomic(file, text) {
 
 function writeSummary() {
   S.meta.updatedAt = iso();
+  if (typeof client !== 'undefined') S.link = client.stats();
   try { writeFileAtomic(path.join(cfg.out, 'summary.json'), JSON.stringify(S, null, 2)); } catch (e) { log('error', `summary.json: ${e.message}`); }
   try { writeFileAtomic(path.join(cfg.out, 'summary.md'), renderSummary(S)); } catch (e) { log('error', `summary.md: ${e.message}`); }
 }
@@ -193,10 +195,11 @@ function normalizeReply(name, r) {
   return rec;
 }
 
-async function probe(name, args, timeoutMs = 10000) {
+// slow: the probe may hold up Lightroom's replies for a while, so the heartbeat waits for it.
+async function probe(name, args, timeoutMs = 10000, { slow = false } = {}) {
   const cmd = { t: 'probe', name };
   if (args !== undefined) cmd.args = args;
-  return normalizeReply(name, await client.request(cmd, timeoutMs));
+  return normalizeReply(name, await client.request(cmd, timeoutMs, { slow }));
 }
 
 function bezel(msg, secs = 2) {
@@ -259,12 +262,37 @@ client.on('m:state', (m) => {
 });
 client.on('m:trigger', (m) => onTrigger(m.name));
 
+// ---------- heartbeat ----------
+
+let staleEpisode = null; // { t, silentMs } from the last heartbeat reconnect, until the next hello
+
+client.on('stale', ({ t, silentMs }) => {
+  staleEpisode = { t, silentMs };
+  S.lifecycle.events.push({ kind: 'heartbeat reconnect', at: iso(), silentMs: round(silentMs), note: "no event for 4 s while Lightroom still answered 'ok': its sender was stale" });
+  log('heartbeat', `no pong or other event for ${round(silentMs)} ms, but Lightroom still answers 'ok': reconnecting both sockets`);
+  writeSummary();
+});
+client.on('paused', ({ silentMs }) => {
+  S.lifecycle.events.push({ kind: 'paused', at: iso(), silentMs: round(silentMs), note: "no events and no 'ok': Lightroom is paused (menu, dialog or Plug-in Manager). Not reconnecting." });
+  log('heartbeat', `Lightroom quiet for ${round(silentMs)} ms with no 'ok' either: paused (menu or dialog open?), waiting`);
+  writeSummary();
+});
+client.on('resumed', ({ pausedMs }) => {
+  S.lifecycle.events.push({ kind: 'resumed', at: iso(), pausedMs: round(pausedMs) });
+  log('heartbeat', `Lightroom answering again after ${round(pausedMs)} ms`);
+  writeSummary();
+});
+client.on('grace', ({ silentMs }) => {
+  log('heartbeat', `no events for ${round(silentMs)} ms while a slow probe runs; not reconnecting`);
+});
+
 // ---------- lifecycle ----------
 
 let currentInst = null;
 let tDown = null;
 let lastBye = null;
 let downTimer = null;
+let s1Current = null; // the S1 cycle in progress: Lightroom-initiated closes are noted there, not as lifecycle events
 
 client.on('m:bye', (m, t) => {
   lastBye = { why: m.why ?? null, t, tClose: null };
@@ -273,7 +301,12 @@ client.on('m:bye', (m, t) => {
   writeSummary();
 });
 
-client.on('disconnect', ({ side, t, deliberate }) => {
+client.on('disconnect', ({ side, t, deliberate, pair }) => {
+  if (s1Current) {
+    if (pair && side === 'cmd') s1Current.pairClosed = true;
+    if (!deliberate && !pair && side === 'evt') s1Current.lrClosedEvt = true;
+    if (!lastBye) return;
+  }
   if (deliberate) return;
   if (lastBye && lastBye.tClose == null) lastBye.tClose = t;
   if (tDown == null) {
@@ -300,6 +333,14 @@ client.on('disconnect', ({ side, t, deliberate }) => {
 client.on('m:hello', (m, t) => {
   S.lastHello = m;
   if (!S.hello) S.hello = m;
+  if (staleEpisode) {
+    const recoverMs = round(t - staleEpisode.t);
+    const sinceSilenceMs = round(t - staleEpisode.t + staleEpisode.silentMs);
+    S.lifecycle.events.push({ kind: 'heartbeat recovered', at: iso(), recoverMs, sinceSilenceMs, gen: m.gen ?? null });
+    log('heartbeat', `recovered: hello ${recoverMs} ms after reconnecting, ${sinceSilenceMs} ms after events stopped`);
+    staleEpisode = null;
+    mark('heartbeat-recovered');
+  }
   if (currentInst === null) {
     currentInst = m.inst ?? '(none)';
     tDown = null;
@@ -382,27 +423,35 @@ function onTrigger(name) {
     return;
   }
   lastTrigger.set(name, t);
+  triggerSeen = true;
+  clearTimeout(readyTimer);
   log('trigger', `${name}${running ? ` (queued behind ${running})` : ''}`);
   enqueue(name, name === 'tests' ? runTests : runAutoSync);
 }
 
 // ---------- S1 ----------
 
+// Kinds: 'both' drops both sockets on purpose. 'cmd' drops only cmd; Lightroom then recreates its
+// sender, which closes our evt, and the pair rule reconnects both. 'evt+rule' loses evt the way the
+// deck client handles it: the pair rule closes cmd too and reconnects both. (A pure evt-only drop
+// leaves Lightroom's sender stale, because its send socket never notices the close.)
 async function s1Cycle(n, kind) {
-  const sides = kind === 'both' ? ['cmd', 'evt'] : [kind];
   const res = { n, kind, ok: false };
   const tDrop = now();
-  client.drop(sides, 300);
-  const tReconnect = tDrop + 300;
-  const deadline = tReconnect + 5000;
-  const left = () => Math.max(1, deadline - now());
-  if (!(await client.waitSides(sides, left()))) {
-    res.note = 'socket did not reconnect within 5 s';
-    return res;
-  }
-  res.connectMs = round(Math.max(...sides.map((s) => client.sides[s].connectedAt)) - tReconnect);
-  if (sides.includes('evt')) {
-    // The protocol says hello comes on evt connect. If it doesn't within 1 s, ask for it, and note that.
+  let reconnectIn = 300;
+  s1Current = res;
+  try {
+    if (kind === 'both') client.drop(['cmd', 'evt'], 300);
+    else if (kind === 'cmd') client.drop(['cmd'], 300);
+    else reconnectIn = client.loseSide('evt') ?? 250;
+    const tReconnect = tDrop + reconnectIn;
+    const deadline = tReconnect + 5000;
+    const left = () => Math.max(1, deadline - now());
+    if (!(await client.waitUp(left()))) {
+      res.note = 'sockets did not reconnect within 5 s';
+      return res;
+    }
+    // Every cycle needs a hello after the drop. If none comes within 1 s, ask for one, and note that.
     let h = await client.waitHelloAfter(tDrop, Math.min(1000, left()));
     if (!h) {
       client.send({ t: 'hello', v: 0, client: 'spike-harness' });
@@ -413,29 +462,37 @@ async function s1Cycle(n, kind) {
       res.note = 'no hello within 5 s';
       return res;
     }
-    res.helloMs = round(h.t - tReconnect);
+    res.helloMs = round(h.t - tDrop);
     res.gen = h.msg.gen ?? null;
-  }
-  const p = await client.request({ t: 'ping' }, left());
-  if (!p.ok) {
-    res.note = `ping ${p.error}`;
+    if (!(await client.waitUp(left()))) {
+      res.note = 'sockets dropped again after the hello';
+      return res;
+    }
+    res.connectMs = round(Math.max(client.sides.cmd.connectedAt, client.sides.evt.connectedAt) - tDrop);
+    const p = await client.request({ t: 'ping' }, left());
+    if (!p.ok) {
+      res.note = `ping ${p.error}`;
+      return res;
+    }
+    if (p.reply.t !== 'pong') {
+      res.note = `ping got ${p.reply.t}`;
+      return res;
+    }
+    res.pingMs = round(p.rttMs);
+    res.reconnectAfterMs = reconnectIn;
+    res.totalMs = round(now() - tDrop);
+    res.ok = now() <= deadline;
+    if (!res.ok) res.note = 'over 5 s';
     return res;
+  } finally {
+    s1Current = null;
   }
-  if (p.reply.t !== 'pong') {
-    res.note = `ping got ${p.reply.t}`;
-    return res;
-  }
-  res.pingMs = round(p.rttMs);
-  res.totalMs = round(now() - tReconnect);
-  res.ok = res.totalMs <= 5000;
-  if (!res.ok) res.note = 'over 5 s';
-  return res;
 }
 
 async function runS1() {
   S.status.s1 = 'running';
-  log('S1', 'start: 10 full drops, then 3 cmd-only and 3 evt-only');
-  const plan = [...Array(10).fill('both'), 'cmd', 'cmd', 'cmd', 'evt', 'evt', 'evt'];
+  log('S1', 'start: 10 full drops, 3 cmd-only drops, 3 evt drops with the pair rule');
+  const plan = [...Array(10).fill('both'), 'cmd', 'cmd', 'cmd', 'evt+rule', 'evt+rule', 'evt+rule'];
   let aborted = false;
   for (let i = 0; i < plan.length; i += 1) {
     let r = await s1Cycle(i + 1, plan[i]);
@@ -454,7 +511,8 @@ async function runS1() {
       r.note = [r.note, `first try: ${first.note}`].filter(Boolean).join('; ');
     }
     S.s1.cycles.push(r);
-    log('S1', `cycle ${i + 1}/${plan.length} ${plan[i]} ${r.ok ? 'ok' : 'FAIL'} connect=${r.connectMs ?? '-'}ms${r.helloMs != null ? ` hello=${r.helloMs}ms` : ''} ping=${r.pingMs ?? '-'}ms${r.note ? ` (${r.note})` : ''}`);
+    const flags = [r.lrClosedEvt ? 'Lightroom closed evt' : null, r.pairClosed ? 'rule closed cmd' : null].filter(Boolean).join(', ');
+    log('S1', `cycle ${i + 1}/${plan.length} ${plan[i]} ${r.ok ? 'ok' : 'FAIL'} connect=${r.connectMs ?? '-'}ms${r.helloMs != null ? ` hello=${r.helloMs}ms` : ''} ping=${r.pingMs ?? '-'}ms${flags ? ` [${flags}]` : ''}${r.note ? ` (${r.note})` : ''}`);
     writeSummary();
     await sleep(200);
   }
@@ -572,14 +630,15 @@ async function runS3FollowUp(kind) {
 
 // ---------- S5 + S2 + Before/After (trigger "tests") ----------
 
+// [name, timeout ms, slow]. Slow probes can hold up Lightroom's replies, so the heartbeat waits for them.
 const PROBES = [
-  ['features', 15000],
-  ['timing', 30000],
-  ['presets', 30000],
-  ['ranges', 15000],
-  ['observerPhotoChange', 30000],
-  ['flagAdvance', 15000],
-  ['mask', 60000],
+  ['features', 15000, false],
+  ['timing', 30000, true],
+  ['presets', 30000, true],
+  ['ranges', 15000, false],
+  ['observerPhotoChange', 30000, true],
+  ['flagAdvance', 15000, true],
+  ['mask', 60000, true],
 ];
 
 async function runTests() {
@@ -589,13 +648,13 @@ async function runTests() {
   bezel('Deck spike: tests running, hands off for about 2 minutes', 4);
   await sleep(cfg.quick ? 300 : 2000);
 
-  for (const [name, timeout] of PROBES) {
+  for (const [name, timeout, slow] of PROBES) {
     if (!(await client.waitUp(15000))) {
       run.probes.push({ name, at: iso(), ok: false, msg: 'not connected' });
       continue;
     }
     bezel(`Deck spike: probe ${name}`, 1.5);
-    const rec = await probe(name, undefined, timeout);
+    const rec = await probe(name, undefined, timeout, { slow });
     run.probes.push(rec);
     log('S5', `${name} ${rec.ok ? 'ok' : 'FAIL'} ${rec.ms ?? '-'}ms${rec.ok ? '' : ` (${rec.msg})`}`);
     writeSummary();
@@ -688,9 +747,15 @@ async function runBurst({ index, hz, track, base, dir, burstMs, gapMs }) {
     lastMatchIdx = match.idx;
   };
   const onErr = (m, t) => { errs.push({ t, msg: m.msg, cmd: m.cmd }); };
+  const onOk = ({ t, sent }) => {
+    if (!sent || sent.type !== 'set') return;
+    const s = bySeq.get(sent.seq);
+    if (s && s.tOk == null) s.tOk = t;
+  };
   client.on('m:ack', onAck);
   client.on('m:vals', onVals);
   client.on('m:err', onErr);
+  client.on('ok', onOk);
 
   const t0 = now();
   let k = 0;
@@ -730,12 +795,14 @@ async function runBurst({ index, hz, track, base, dir, burstMs, gapMs }) {
     client.off('m:ack', onAck);
     client.off('m:vals', onVals);
     client.off('m:err', onErr);
+    client.off('ok', onOk);
   }
 
   for (const s of sets) {
     samples.write(JSON.stringify({
       run: S.s2.runs.length, burst: index, hz, track, seq: s.seq, v: s.v,
       tSent: round(s.tSent - t0, 2), drift: round(s.drift, 2),
+      ok: s.tOk != null ? round(s.tOk - s.tSent, 2) : null,
       ack: s.tAck != null ? round(s.tAck - s.tSent, 2) : null, ackV: s.ackV ?? null, lrMs: s.lrMs ?? null,
       echo: s.matched ? round(s.echoMs, 2) : null, superseded: !!s.superseded,
     }) + '\n');
@@ -765,6 +832,7 @@ async function runBurst({ index, hz, track, base, dir, burstMs, gapMs }) {
     actualHz: sent > 1 ? round((sent - 1) / (span / 1000)) : 0,
     skipped, sendFailures, maxBuffered,
     drift: stats(sets.map((s) => s.drift)),
+    ok: stats(sets.filter((s) => s.tOk != null).map((s) => s.tOk - s.tSent)),
     ack: stats(ackLat),
     missingAcks: sent - ackLat.length,
     lr: stats(sets.filter((s) => typeof s.lrMs === 'number').map((s) => s.lrMs)),
@@ -793,7 +861,7 @@ async function runS2(s5run) {
     return;
   }
   bezel('Deck spike: selecting the largest raw', 2);
-  const sel = normalizeReply('select', await client.request({ t: 'select', what: 'largestRaw' }, 30000));
+  const sel = normalizeReply('select', await client.request({ t: 'select', what: 'largestRaw' }, 30000, { slow: true }));
   run.photo = normalizePhoto(sel);
   s5run.probes.push({ ...sel, name: 'select largestRaw' });
   log('S2', `select largestRaw ${sel.ok ? 'ok' : 'FAIL'}: ${run.photo.file ?? sel.msg}`);
@@ -856,7 +924,7 @@ async function runBeforeAfter() {
   }
   bezel('Deck spike: Before view for 3 s', 2);
   await sleep(cfg.quick ? 150 : 1500);
-  const rec = await probe('beforeAfter', { secs: cfg.quick ? 0.5 : 3 }, 20000);
+  const rec = await probe('beforeAfter', { secs: cfg.quick ? 0.5 : 3 }, 20000, { slow: true });
   S.beforeAfter.push(rec);
   S.status.beforeAfter = rec.ok ? 'ok on the wire; the user confirms what they saw' : `FAIL: ${rec.msg}`;
   log('BA', `beforeAfter ${rec.ok ? 'ok' : 'FAIL'}${rec.ok ? '' : ` (${rec.msg})`}`);
@@ -897,7 +965,7 @@ async function runAutoSync() {
   }
   S.status.autosync = 'running';
   bezel('Deck spike: Auto Sync test running', 2);
-  const rec = await probe('autoSync', undefined, 30000);
+  const rec = await probe('autoSync', undefined, 30000, { slow: true });
   rec.text = describeAutoSync(rec);
   S.autosync.push(rec);
   S.status.autosync = rec.text;
@@ -926,7 +994,7 @@ async function startup() {
     if (m.writable === false) log('GUARD', '!!! Lightroom says writes are refused right now');
   }
   writeSummary();
-  bezel('Deck spike: connected. Socket and reload checks, about 30 s.', 3);
+  bezel('Deck spike: connected. Socket and reload checks, about 15 s.', 3);
   await sleep(300);
   try {
     await runS1();
@@ -941,8 +1009,25 @@ async function startup() {
     S.status.s3 = 'FAIL: harness error (see Errors)';
   }
   writeSummary();
-  bezel('Deck spike: ready. Run the tests from File ▸ Plug-in Extras.', 5);
   mark('ready');
+  showReady();
+}
+
+// The "ready" bezel can fire while the Plug-in Manager is still open, so repeat it every 20 s,
+// at most 4 times in all, until a trigger arrives. Skip it if a trigger is already queued.
+let triggerSeen = false;
+let readyTimer = null;
+function showReady() {
+  let shown = 0;
+  const tick = () => {
+    readyTimer = null;
+    if (triggerSeen || shuttingDown || shown >= 4) return;
+    shown += 1;
+    bezel('Deck spike: ready. Run the tests from File ▸ Plug-in Extras.', 5);
+    log('ready', `ready bezel ${shown}/4`);
+    readyTimer = setTimeout(tick, 20000);
+  };
+  tick();
 }
 
 // ---------- shutdown ----------
