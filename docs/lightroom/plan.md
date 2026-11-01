@@ -1,6 +1,6 @@
 # Lightroom Classic build plan
 
-**Status:** not started. Written 2026-10-31 at the end of the research session.
+**Status:** Phases 0–5 are done, with Phase 5 as scoped at kickoff. Phase 6, hardening, is next. Written 2026-10-31 at the end of the research session.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -447,6 +447,22 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - two dials at once, and clamping at the ends of a range;
     - presets that change sliders;
     - ticks dropped after 2 s.
+- 2026-10-31, Phase 4 (ladder step 6): the user walked through checklist 2 on the real deck and Lightroom and reports that every step worked as expected. That includes step 5, "does the image keep up", the visual check left over from S2. Both logs agree:
+  - **No warnings or errors** in either log since v1 started at 18:05.
+  - **Dials:**
+    - 271 tick events across all four dials, every one applied;
+    - 53 of them with the dial pushed (fine adjust);
+    - 11 presses;
+    - 34 strip taps, each one a bank change.
+  - **Apply Preset:** 22 applies across the four Cobalt Fuji presets (Classic Chrome, Classic Neg, Nostalgic Neg, Reala Ace), each to 1 photo with none locked. The picker listed 398 presets each time its Property Inspector opened.
+  - **Recovery:**
+    - Sleep and wake: at 18:36 the deck saw the wake and reconnected in 256 ms.
+    - Lightroom quit and relaunch: the deck went offline at once and came back 1.1 s after Lightroom started listening. It noticed the new instance and watched again. Lightroom's shutdown took 0.2 s.
+  - **Not in the logs, so these go on the next checklist:**
+    - A Stream Deck app restart. The app has been one process since 12:44. My `streamdeck restart` at 18:07 covered the plugin's side, connecting in 5 ms.
+    - A long-touch on the strip. All 34 touches were short taps.
+  - The deck logs no key presses and Lightroom logs no commands, so Pick, Reject, Unflag, Next, Previous and Before/After rest on the user's report.
+- 2026-10-31, Phase 5 is done as scoped at kickoff (answer 5): the Apply Preset key, verified on hardware. The other one-click tools wait, by the user's choice. The Hotkey write-up for Sync and Auto Sync moves to Phase 6's README.
 
 ## Progress
 
@@ -455,6 +471,6 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Phase 2: protocol frozen, 2026-10-31
 - [x] Track A: Lua plugin · [x] Track B: deck plugin · [x] Track C: tools, all built and verified offline, 2026-10-31 (workflow `wf_50e3a891-197`)
 - [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [x] the deck plugin against the mock (step 5), 2026-10-31
-- [ ] Phase 4: integration on hardware
-- [ ] Phase 5: presets and tools
+- [x] Phase 4: integration on hardware, 2026-10-31. A Stream Deck app restart and a long-touch move to the next checklist.
+- [x] Phase 5: presets, as scoped at kickoff, 2026-10-31. The other one-click tools wait.
 - [ ] Phase 6: hardening
