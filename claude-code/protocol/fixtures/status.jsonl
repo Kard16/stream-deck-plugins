@@ -1,0 +1,19 @@
+{"note":"A turn that reads a file. The deck shows working with the file name, then done, with the context %."}
+{"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
+{"mod":{"on":"session.start","e":{"cwd":"/Users/me/sandbox","surface":null,"isInteractive":false}}}
+{"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
+{"reply":{"to":"h","status":200,"body":{"v":1,"ok":true}}}
+{"plugin":{"as":"n1","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"mod":{"on":"turn.start","e":{"turnId":"t1","text":"Summarise notes.md"}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000100}]}}}
+{"registry":{"pid":101,"status":"busy","statusUpdatedAt":1793600001000}}
+{"mod":{"on":"tool.call","e":{"tool":"Read","tool_use_id":"u1","file_path":"/Users/me/sandbox/notes.md"},"result":{"isError":false}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":2,"events":[{"t":"tool.start","tool":"Read","use":"u1","summary":"notes.md","fp":"e839ee7c","at":1793600000200}]}}}
+{"expect":{"status":{"local_test-a":"working"},"doing":{"local_test-a":"notes.md"}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":3,"events":[{"t":"tool.end","tool":"Read","use":"u1","fp":"e839ee7c","ok":true,"at":1793600000300}]}}}
+{"mod":{"on":"session.measure","e":{"changed":["context"],"context":{"tokens":120000,"window":1000000,"percent":12}}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":4,"events":[{"t":"measure","context":{"percent":12,"tokens":120000,"window":1000000},"at":1793600000400}]}}}
+{"mod":{"on":"turn.complete","e":{"turnId":"t1","reason":"answer","isAborted":false,"durationMs":2400,"answer":"Done."}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":5,"events":[{"t":"turn.end","turn":"t1","reason":"answer","at":1793600000500}]}}}
+{"registry":{"pid":101,"status":"idle","statusUpdatedAt":1793600005000}}
+{"expect":{"status":{"local_test-a":"done"},"context":{"local_test-a":12},"doing":{"local_test-a":null}}}

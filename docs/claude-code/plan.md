@@ -1,6 +1,6 @@
 # Claude Code build plan
 
-**Status:** Phase 1, spikes: all run, 2026-11-01. Waiting on the user for the model and effort route, whether a mode raise needs a second press, and the go for Phase 2. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
+**Status:** Phase 3, building in parallel tracks, 2026-11-01. The contract is frozen in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -11,7 +11,7 @@ Work with Claude Code sessions in the Claude desktop app's Code tab from the Str
 1. **Live status for each session:** working (and on what), waiting for approval, waiting for an answer, finished, failed, plus how full its context is.
 2. **Approve and deny from the deck.** The keys show which session is asking, and for what.
 3. **Saved prompts** on keys, sent to a chosen session.
-4. **Mode, model and effort** buttons for a chosen session.
+4. **Mode** buttons for a chosen session, with its **model and effort** shown. Changing model and effort from the deck was dropped after S4.
 5. **An overview of all sessions,** with a way to jump to any of them in the app.
 
 Done means:
@@ -24,6 +24,7 @@ Done means:
 - Terminal (CLI) sessions, VS Code, cloud sessions, Remote Control. They may work by accident; nothing is built or tested for them.
 - Interrupting a running turn. Not chosen at kickoff. The mods API has `$.turn.abort` if it's wanted later.
 - Answering AskUserQuestion and approving plans from the deck, unless S2 shows the app lets a hook do it. The deck shows them and jumps to the session.
+- Changing a session's model or effort. The user chose to have them shown only, after S4 found no route the app's menus follow.
 - Marketplace, Windows, sharing the mod.
 
 ## Prerequisites
@@ -195,16 +196,16 @@ Inside the Stream Deck plugin
 Run this as a workflow. Each track owns its directory, so tracks don't need worktrees. Each ends with its checks, then an independent review against `PROTOCOL.md` and the `CLAUDE.md` rules, then a fixer for blockers and majors.
 
 **Track A: Claude Code plugin** (`claude-code/plugin/`)
-- Builds: `hooks/hooks.json`; the mod (hello, reports, the command loop, prompt submit, the S4 routes, context %); token handling; offline behaviour, where a bridge that's down means doing nothing and backing off.
-- Verified by: `tsc`, `claude plugin validate` and `claude plugin test` with the app's 2.1.309, against Track C's fake bridge and the fixtures.
+- Builds: `hooks/hooks.json` as PROTOCOL.md gives it; the mod (hello, events, the long poll, the `prompt` and `mode` commands, fingerprints and summaries, `settings`); token handling; offline behaviour, where a bridge that's down means doing nothing and backing off.
+- Verified by: `tsc`, `claude plugin validate` and `claude plugin test` with the app's 2.1.309, running the fixtures' plugin side and `vectors.json`.
 
-**Track B: Stream Deck plugin** (`claude-code/deck/`)
+**Track B: Stream Deck plugin** (`claude-code/deck/`, growing the S6 plugin)
 - Builds:
-  - The bridge server: auth, held requests, the command queue.
-  - The session model: the registry watcher merged with hook and mod reports.
-  - Actions: Approve, Deny, Saved Prompt, the Sessions dial, Mode, Model and Effort as keys and dials, the Session key.
+  - The bridge on 47600: the `/v1/` routes, auth, held requests with their kinds and release rules, the command queue and long poll.
+  - The session model: the registry and the app's records merged with the mod's reports, statuses as PROTOCOL.md lists them, and the target session.
+  - Actions: Approve and Deny keys, Saved Prompt keys, the Sessions dial (showing model and effort), the Mode dial and key, and the Session key. No Model or Effort actions.
   - Layouts, Property Inspectors, the S5 jump route, logging.
-- Verified by: typecheck, unit tests, `streamdeck validate`, and a smoke run against Track C's fake Claude.
+- Verified by: typecheck, unit tests, `streamdeck validate`, the fixtures' deck side and `vectors.json`, and a smoke run against Track C's fake Claude.
 
 **Track C: tools** (`claude-code/tools/`)
 - Builds: a fake Claude that speaks the plugin's side of the protocol from fixtures, hooks and mod alike; a fake bridge for Track A; a fixture runner; a fake registry folder.
@@ -429,15 +430,27 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - 2026-11-01, **decisions from the spikes, for Phase 2:**
   - **A held request ends** when the deck answers it, or when the same session reports a PostToolUse or PostToolUseFailure for the same tool and input, a turn end (the mod's `turn.complete`, or Stop), or a registry status other than `waiting`. The deck then clears it from the keys.
   - **Session status:** `idle`, `busy` and `waiting` from the registry, for every session. Sessions with the plugin add the tool being run, "needs you" (AskUserQuestion, ExitPlanMode), interrupted (`turn.complete` reason `aborted`) and context % (`session.measure`).
-  - **Deny** is `behavior: "deny"` with `interrupt: true`, like the app's No (kickoff answer 3). Claude never sees a message with it, so the deck sends none.
+  - **Deny** is `behavior: "deny"` with `interrupt: true`, like the app's No (kickoff answer 3). Claude never sees the message with it, but the deck still sends a fixed one, since S2 verified that shape.
   - **Saved prompts after Esc** are refused by the engine until the user types in that session. The key shows refused, with that reason.
   - **The mod's mode changes raise PermissionRequests of their own.** How the deck treats them waits on the user's answer about a second press.
+- 2026-11-01, **the user's answers after the spikes:**
+  1. **Model and effort are shown, never changed,** from the deck. So the Model and Effort dials and keys are dropped. The Sessions strip shows each session's model and effort, and the Mode strip the target's.
+  2. **A mode raise takes one press.** The bridge allows the PermissionRequest that the deck's own mode change raises, and only that one: the same session, the app's mode tool, and the mode the deck asked for, while that change is in flight.
+  3. **Go** for Phase 2, then Phase 3.
+- 2026-11-01, **Phase 2: the contract is frozen** in `claude-code/protocol/PROTOCOL.md`, version 1, with 14 fixtures and `vectors.json`, written by `make-fixtures.mjs`. The choices the spikes didn't settle:
+  - **Routes under `/v1/` on 47600:** the hook's `POST /v1/permission`, and the mod's `hello`, `events`, `next` (a long poll of up to 20 s) and `result`. The deck plugin moves from 47601 to 47600 once the spike bridge stops.
+  - **Status comes from the mod alone.** The only hook is the PermissionRequest http hook, which also sends the `local_…` id in an `X-Deck-Host` header.
+  - **A held request is matched to its tool call by a fingerprint,** FNV-1a over the tool name and its canonical input, since the request has no `tool_use_id`. Registry changes release it when the fingerprints don't meet.
+  - **Three kinds of request:** `tool` (Approve and Deny), `ask` (AskUserQuestion and ExitPlanMode: shown, and a press jumps), and `mode` (the deck's own mode change, allowed at once).
+  - **Commands** are `prompt` and `mode` only. Results go `waiting`, then `done`, `refused` or `failed`.
+  - **The target session** is the last one picked on the Sessions dial, else the one last on screen (`attach`, or the records' `lastFocusedAt`), refining kickoff answer 4 with S3's finding.
 
 ## Progress
 
 - [x] Phase 0: kickoff (open questions answered), 2026-11-01
-- [x] S0 sandbox · [x] S1 status · [x] S2 approvals · [x] S3 mod · [ ] S4 mode, model, effort (mode done; model and effort wait on the user) · [x] S5 overview and jump · [x] S6 deck
-- [ ] Phase 2: contract frozen
+- [x] S0 sandbox · [x] S1 status · [x] S2 approvals · [x] S3 mod · [x] S4 mode, model, effort (mode through the app's tool; model and effort shown only, by the user's choice) · [x] S5 overview and jump · [x] S6 deck
+- [x] Phase 1: spike results shown to the user, and their go, 2026-11-01
+- [x] Phase 2: contract frozen, 2026-11-01
 - [ ] Track A: Claude Code plugin · [ ] Track B: deck plugin · [ ] Track C: tools
 - [ ] Ladder steps 4–5
 - [ ] Phase 4: on hardware with the user

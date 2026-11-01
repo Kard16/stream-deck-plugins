@@ -102,10 +102,12 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 - A mod has no Node and no DOM. It reaches everything through `$`: `$.http.fetch`, `$.clock`, `$.process`, `$.env`, `$.session`, `$.prompt`.
 - Don't load the plugin-authoring skill: it arms the session's mods folder. Read the vendored copy instead.
 
+**The bridge protocol** is `claude-code/protocol/PROTOCOL.md`, frozen with its fixtures. Changes go through the main thread, and fixtures are edited in `make-fixtures.mjs`, never by hand.
+
 **Hooks**
+- The only hook is the PermissionRequest `http` hook. Status comes from the mod.
 - Never give the PermissionRequest hook `onFailure: "block"`: with the bridge down, it would deny every tool call.
 - PermissionRequest ignores exit code 2; answer with JSON.
-- Status hooks are `async`, so they never hold up a tool call.
 
 **The desktop app**
 - Sessions are SDK-hosted. Their environment has `CLAUDE_CODE_SESSION_ID` and the app's own id, `CLAUDE_CODE_HOST_SESSION_ID` (`local_…`).

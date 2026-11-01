@@ -1,0 +1,20 @@
+{"note":"AskUserQuestion is held for display only. A press jumps to the session and answers nothing. The user answers in the app, and the tool's end releases the request."}
+{"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
+{"mod":{"on":"session.start","e":{"cwd":"/Users/me/sandbox","surface":null,"isInteractive":false}}}
+{"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
+{"reply":{"to":"h","status":200,"body":{"v":1,"ok":true}}}
+{"plugin":{"as":"n1","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"mod":{"on":"turn.start","e":{"turnId":"t1","text":"Ask me a question"}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000100}]}}}
+{"registry":{"pid":101,"status":"busy","statusUpdatedAt":1793600001000}}
+{"mod":{"on":"tool.call","e":{"tool":"AskUserQuestion","tool_use_id":"u6","questions":[{"question":"Red or blue?","header":"Color","options":[{"label":"Red","description":"Red"},{"label":"Blue","description":"Blue"}],"multiSelect":false}]},"result":{"isError":false}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":2,"events":[{"t":"tool.start","tool":"AskUserQuestion","use":"u6","summary":"Red or blue?","fp":"7e65e85f","at":1793600000200}]}}}
+{"plugin":{"as":"p1","method":"POST","path":"/v1/permission","headers":{"X-Deck-Host":"local_test-a"},"body":{"session_id":"3fa86955-0000-4000-8000-00000000000a","transcript_path":"/Users/me/.claude/projects/-Users-me-sandbox/3fa86955-0000-4000-8000-00000000000a.jsonl","cwd":"/Users/me/sandbox","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Red or blue?","header":"Color","options":[{"label":"Red","description":"Red"},{"label":"Blue","description":"Blue"}],"multiSelect":false}]},"permission_mode":"default","effort":{"level":"low"},"prompt_id":"prompt-1"}}}
+{"registry":{"pid":101,"status":"waiting","statusUpdatedAt":1793600002000}}
+{"expect":{"held":[{"host":"local_test-a","tool":"AskUserQuestion","kind":"ask","summary":"Red or blue?"}],"status":{"local_test-a":"needs-you"}}}
+{"press":{"approve":{}}}
+{"expect":{"jumped":"local_test-a","held":[{"host":"local_test-a","tool":"AskUserQuestion","kind":"ask","summary":"Red or blue?"}]}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":3,"events":[{"t":"tool.end","tool":"AskUserQuestion","use":"u6","fp":"7e65e85f","ok":true,"at":1793600000300}]}}}
+{"reply":{"to":"p1","status":200,"body":{}}}
+{"registry":{"pid":101,"status":"busy","statusUpdatedAt":1793600003000}}
+{"expect":{"held":[],"status":{"local_test-a":"working"}}}

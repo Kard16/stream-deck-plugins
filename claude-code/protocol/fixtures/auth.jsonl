@@ -1,0 +1,16 @@
+{"note":"Requests without the right Host or token, or for routes that do not exist, are refused before anything else. In headers, $TOKEN stands for the right token and null leaves a header out. No mod lines: the plugin side skips this fixture."}
+{"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
+{"plugin":{"as":"a1","method":"POST","path":"/v1/events","headers":{"Authorization":"Bearer wrong-token"},"body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000000}]}}}
+{"reply":{"to":"a1","status":401,"body":{"error":"*"}}}
+{"plugin":{"as":"a2","method":"POST","path":"/v1/events","headers":{"Authorization":null},"body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000000}]}}}
+{"reply":{"to":"a2","status":401,"body":{"error":"*"}}}
+{"plugin":{"as":"a3","method":"POST","path":"/v1/events","headers":{"Host":"evil.example:47600","Authorization":"Bearer $TOKEN"},"body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000000}]}}}
+{"reply":{"to":"a3","status":403,"body":{"error":"*"}}}
+{"plugin":{"as":"a4","method":"POST","path":"/v1/events","headers":{"Host":"evil.example:47600","Authorization":"Bearer wrong-token"},"body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000000}]}}}
+{"reply":{"to":"a4","status":403,"body":{"error":"*"}}}
+{"plugin":{"as":"a5","method":"GET","path":"/v1/nope"}}
+{"reply":{"to":"a5","status":404,"body":{"error":"*"}}}
+{"plugin":{"as":"a6","method":"GET","path":"/v1/permission"}}
+{"reply":{"to":"a6","status":405,"body":{"error":"*"}}}
+{"plugin":{"as":"a7","method":"POST","path":"/v1/events","raw":"not json"}}
+{"reply":{"to":"a7","status":400,"body":{"error":"*"}}}

@@ -1,0 +1,250 @@
+[
+  {
+    "tool": "Write",
+    "input": {
+      "file_path": "/Users/me/sandbox/s4.txt",
+      "content": "four"
+    },
+    "canonical": "{\"content\":\"four\",\"file_path\":\"/Users/me/sandbox/s4.txt\"}",
+    "fp": "1d3780c3",
+    "summary": "s4.txt"
+  },
+  {
+    "tool": "Bash",
+    "input": {
+      "command": "rm -rf build",
+      "description": "Remove the build folder"
+    },
+    "canonical": "{\"command\":\"rm -rf build\",\"description\":\"Remove the build folder\"}",
+    "fp": "cd8f01e5",
+    "summary": "rm -rf build"
+  },
+  {
+    "tool": "Bash",
+    "input": {
+      "command": "  npm run build && npm test -- --reporter spec --bail\necho done",
+      "description": "Build and test"
+    },
+    "canonical": "{\"command\":\"  npm run build && npm test -- --reporter spec --bail\\necho done\",\"description\":\"Build and test\"}",
+    "fp": "025245a5",
+    "summary": "npm run build && npm test -- --reporter…"
+  },
+  {
+    "tool": "Bash",
+    "input": {
+      "command": "\n  ls"
+    },
+    "canonical": "{\"command\":\"\\n  ls\"}",
+    "fp": "a9088605",
+    "summary": "Bash"
+  },
+  {
+    "tool": "Read",
+    "input": {
+      "file_path": "/Users/me/sandbox/notes.md",
+      "limit": 50
+    },
+    "canonical": "{\"file_path\":\"/Users/me/sandbox/notes.md\",\"limit\":50}",
+    "fp": "05d8801a",
+    "summary": "notes.md"
+  },
+  {
+    "tool": "Edit",
+    "input": {
+      "file_path": "relative/dir/",
+      "old_string": "a",
+      "new_string": "b"
+    },
+    "canonical": "{\"file_path\":\"relative/dir/\",\"new_string\":\"b\",\"old_string\":\"a\"}",
+    "fp": "17ce6e22",
+    "summary": "dir"
+  },
+  {
+    "tool": "NotebookEdit",
+    "input": {
+      "notebook_path": "/n/analysis.ipynb",
+      "new_source": "x = 1"
+    },
+    "canonical": "{\"new_source\":\"x = 1\",\"notebook_path\":\"/n/analysis.ipynb\"}",
+    "fp": "d13c3357",
+    "summary": "analysis.ipynb"
+  },
+  {
+    "tool": "Grep",
+    "input": {
+      "pattern": "TODO|FIXME",
+      "path": "src",
+      "output_mode": "content"
+    },
+    "canonical": "{\"output_mode\":\"content\",\"path\":\"src\",\"pattern\":\"TODO|FIXME\"}",
+    "fp": "12e5b87f",
+    "summary": "TODO|FIXME"
+  },
+  {
+    "tool": "Glob",
+    "input": {
+      "pattern": "**/*.ts"
+    },
+    "canonical": "{\"pattern\":\"**/*.ts\"}",
+    "fp": "a26b1b8f",
+    "summary": "**/*.ts"
+  },
+  {
+    "tool": "WebFetch",
+    "input": {
+      "url": "https://user:pw@docs.example.com:8443/path?q=1#top",
+      "prompt": "Summarise"
+    },
+    "canonical": "{\"prompt\":\"Summarise\",\"url\":\"https://user:pw@docs.example.com:8443/path?q=1#top\"}",
+    "fp": "080d9b82",
+    "summary": "docs.example.com"
+  },
+  {
+    "tool": "WebFetch",
+    "input": {
+      "url": "not a url",
+      "prompt": "x"
+    },
+    "canonical": "{\"prompt\":\"x\",\"url\":\"not a url\"}",
+    "fp": "07f65b27",
+    "summary": "WebFetch"
+  },
+  {
+    "tool": "WebSearch",
+    "input": {
+      "query": "stream deck plus touch strip layout"
+    },
+    "canonical": "{\"query\":\"stream deck plus touch strip layout\"}",
+    "fp": "958b3a1b",
+    "summary": "stream deck plus touch strip layout"
+  },
+  {
+    "tool": "Agent",
+    "input": {
+      "description": "Find the bridge code",
+      "subagent_type": "Explore",
+      "prompt": "Look in claude-code/"
+    },
+    "canonical": "{\"description\":\"Find the bridge code\",\"prompt\":\"Look in claude-code/\",\"subagent_type\":\"Explore\"}",
+    "fp": "77236e20",
+    "summary": "Find the bridge code"
+  },
+  {
+    "tool": "Task",
+    "input": {
+      "subagent_type": "general-purpose",
+      "prompt": "x"
+    },
+    "canonical": "{\"prompt\":\"x\",\"subagent_type\":\"general-purpose\"}",
+    "fp": "674d8bd7",
+    "summary": "general-purpose"
+  },
+  {
+    "tool": "AskUserQuestion",
+    "input": {
+      "questions": [
+        {
+          "question": "Red or blue?",
+          "header": "Color",
+          "options": [
+            {
+              "label": "Red",
+              "description": "Red"
+            },
+            {
+              "label": "Blue",
+              "description": "Blue"
+            }
+          ],
+          "multiSelect": false
+        }
+      ]
+    },
+    "canonical": "{\"questions\":[{\"header\":\"Color\",\"multiSelect\":false,\"options\":[{\"description\":\"Red\",\"label\":\"Red\"},{\"description\":\"Blue\",\"label\":\"Blue\"}],\"question\":\"Red or blue?\"}]}",
+    "fp": "7e65e85f",
+    "summary": "Red or blue?"
+  },
+  {
+    "tool": "ExitPlanMode",
+    "input": {
+      "plan": "Create s7.txt containing: seven."
+    },
+    "canonical": "{\"plan\":\"Create s7.txt containing: seven.\"}",
+    "fp": "a1118495",
+    "summary": "Plan ready"
+  },
+  {
+    "tool": "mcp__ccd_session_mgmt__set_session_permission_mode",
+    "input": {
+      "session_id": "self",
+      "mode": "acceptEdits"
+    },
+    "canonical": "{\"mode\":\"acceptEdits\",\"session_id\":\"self\"}",
+    "fp": "9c96520b",
+    "summary": "set session permission mode"
+  },
+  {
+    "tool": "mcp__plugin_vercel_vercel__get_project",
+    "input": {
+      "projectId": "p1"
+    },
+    "canonical": "{\"projectId\":\"p1\"}",
+    "fp": "ff1fad79",
+    "summary": "get project"
+  },
+  {
+    "tool": "SomeNewTool",
+    "input": {
+      "x": 1
+    },
+    "canonical": "{\"x\":1}",
+    "fp": "df9bbcec",
+    "summary": "SomeNewTool"
+  },
+  {
+    "tool": "Write",
+    "input": {
+      "file_path": "/tmp/café ☕.txt",
+      "content": "é\u0000\"quoted\"\n"
+    },
+    "canonical": "{\"content\":\"é\\u0000\\\"quoted\\\"\\n\",\"file_path\":\"/tmp/café ☕.txt\"}",
+    "fp": "151cf498",
+    "summary": "café ☕.txt"
+  },
+  {
+    "tool": "Custom",
+    "input": {
+      "b": 1,
+      "a": {
+        "d": [
+          1,
+          {
+            "z": 2,
+            "y": 3
+          }
+        ],
+        "c": null
+      },
+      "e": [
+        true,
+        false,
+        1.5,
+        0,
+        "x"
+      ]
+    },
+    "canonical": "{\"a\":{\"c\":null,\"d\":[1,{\"y\":3,\"z\":2}]},\"b\":1,\"e\":[true,false,1.5,0,\"x\"]}",
+    "fp": "dc35f7b9",
+    "summary": "Custom"
+  },
+  {
+    "tool": "Write",
+    "input": {
+      "file_path": "/Users/me/sandbox/a-file-name-that-is-much-longer-than-forty-characters.md",
+      "content": ""
+    },
+    "canonical": "{\"content\":\"\",\"file_path\":\"/Users/me/sandbox/a-file-name-that-is-much-longer-than-forty-characters.md\"}",
+    "fp": "c41cc57a",
+    "summary": "a-file-name-that-is-much-longer-than-fo…"
+  }
+]
