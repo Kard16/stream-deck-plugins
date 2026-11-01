@@ -2,8 +2,8 @@
 
 Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and, later, Claude Code. One user, one Mac (macOS 26). No Marketplace, Windows support or distribution polish. Keystroke automation and undocumented APIs are fine when they're the only route.
 
-- **Now building:** the Lightroom Classic side. Plan, decisions and progress: `docs/lightroom/plan.md`.
-- **Later:** the Claude Code side. Design notes: `docs/research/claude-code-extensibility.md`.
+- **Done:** the Lightroom Classic side, 2026-11-01. Plan, decisions and progress: `docs/lightroom/plan.md`.
+- **Next:** the Claude Code side. Design notes: `docs/research/claude-code-extensibility.md`. Kickoff prompt: `docs/claude-code/kickoff-prompt.md`.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
 ## Rules
