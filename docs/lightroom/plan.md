@@ -554,6 +554,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - `Stubs.boot` now turns the guard on for every test, unless a test's `config` turns it off. Without that, 5 of the guard's tests failed against the new setting.
   - Lua 96 unit tests and 21/21 fixtures, with `GUARD = false` in `Config.lua`.
   - `CLAUDE.md` keeps agents out of the user's catalogs. Before driving Lightroom, they check that its log names the test catalog.
+  - **In effect:** the user relaunched Lightroom at 11:38, and Deck Bridge started on their catalog with `guard off`. The deck reconnected 1.4 s later. The user reports that writes go through, and Lightroom's log has no refusal, warning or error in the 15 minutes since.
 
 ## Progress
 
