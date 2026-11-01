@@ -755,6 +755,7 @@ function Stubs.boot(opts)
   end
   local Config = require 'Config'
   Config.CMD_PORT, Config.EVT_PORT = 0, 0 -- ephemeral ports only: other tracks test too
+  Config.GUARD = true -- whatever the user set; tests that want it off say so in config
   for k, v in pairs(opts.config or {}) do
     Config[k] = v
   end

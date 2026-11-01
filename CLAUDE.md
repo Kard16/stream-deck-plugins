@@ -8,7 +8,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and, later, Cl
 
 ## Rules
 
-- Never touch the user's main Lightroom catalog. Work only in the test catalog named in `docs/lightroom/plan.md`. The Lua plugin refuses writes unless that catalog is open, and only the user lifts that guard.
+- Never touch the user's main Lightroom catalog. Work only in the test catalog named in `docs/lightroom/plan.md`. The Lua plugin's guard (`GUARD` in `Config.lua`) refuses writes in other catalogs, but the user turned it off on 2026-11-01 for daily use. So before driving Lightroom, check that the latest `starting:` line in its log names the test catalog. Only the user changes `GUARD`.
 - Lightroom, the Stream Deck app and the physical deck are shared. One agent drives them at a time, and the main thread decides which.
 - Steps only the user can do go back to the main thread, which batches them into one numbered checklist. That means Lightroom's Plug-in Manager, macOS permission prompts, looking at the deck, and design choices.
 - Stay inside this repo. Outside it, these are fine without asking:

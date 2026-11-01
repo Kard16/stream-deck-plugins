@@ -8,9 +8,10 @@ return {
   -- Never 58763/58764: MIDI2LR and lightroom-mcp use them.
 
   -- While GUARD is true, writes (set, reset, flag, preset) only go through when this
-  -- catalog is the active one, compared without case.
+  -- catalog is the active one, compared without case. The user turned it off on
+  -- 2026-11-01, for daily use with their own catalogs.
   TEST_CATALOG = '/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat',
-  GUARD = true,
+  GUARD = false,
 
   POLL_SECS = 0.2, -- the state and value poll
   REBIND_SECS = 2, -- retry after a listener fails to open

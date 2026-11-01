@@ -101,13 +101,13 @@ If the file has a mistake, the plugin uses its built-in banks and logs why. Deck
 
 ## The test-catalog guard
 
-While the plugins are being built, Deck Bridge refuses every write unless the test catalog, `/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat`, is open. Writes are dial turns, resets, flags and presets. When it refuses one, Lightroom shows a bezel saying why, and the deck shows an alert on the key or dial.
+With the guard on, Deck Bridge refuses every write unless the test catalog, `/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat`, is open. Writes are dial turns, resets, flags and presets. When it refuses one, Lightroom shows a bezel saying why, and the deck shows an alert on the key or dial.
 
-To use the deck on your own catalogs:
-1. Open `lua/DeckBridge.lrdevplugin/Config.lua` and set `GUARD = false`.
-2. Click Reload Plug-in in the Plug-in Manager.
+The guard kept your catalogs safe while the plugins were built. It's been off since 2026-11-01, so the deck works in any catalog. To change it:
+1. Open `lua/DeckBridge.lrdevplugin/Config.lua` and set `GUARD` to `true` or `false`.
+2. Click Reload Plug-in in the Plug-in Manager, then Done.
 
-Only you do this: the repo's rules in `CLAUDE.md` keep agents from lifting the guard.
+Turn it on while an agent works on the Lua plugin. Only you decide to turn it off: the repo's rules in `CLAUDE.md` keep agents from doing it on their own.
 
 ## When something's wrong
 

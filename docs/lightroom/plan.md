@@ -1,6 +1,6 @@
 # Lightroom Classic build plan
 
-**Status:** Phases 0–6 are done, with Phase 5 as scoped at kickoff. Written 2026-10-31 at the end of the research session.
+**Status:** Phases 0–6 are done, with Phase 5 as scoped at kickoff. The guard is off, for daily use with the user's own catalogs. Written 2026-10-31 at the end of the research session.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -549,6 +549,11 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Ticks after the cold boot,** 17 min after boot with the Mac still busy (5-minute load average 5.1): one spin of 26 events and 45 ticks in 2.4 s, all applied, then a press. Events came less evenly than during checklist 3: median 97 ms apart and uneven, against S4's steady steps of about 50 ms (median 51 ms last night). The user felt no lag, so no workaround is needed.
   - **No strip tap** after the reboot either, so bank changes on this build still rest on the tests.
   - **Logs back to info:** `log-level.txt` deleted and the plugin restarted at 10:50:20. STARTUP at log level info, online 6 ms later.
+- 2026-11-01, after Phase 6: the user lifted the guard for daily use and asked the main thread to make the change. Lightroom's log showed their own catalog open, with 4 flags refused by the guard.
+  - `GUARD = false` in `Config.lua`. It takes effect at the next Reload Plug-in.
+  - `Stubs.boot` now turns the guard on for every test, unless a test's `config` turns it off. Without that, 5 of the guard's tests failed against the new setting.
+  - Lua 96 unit tests and 21/21 fixtures, with `GUARD = false` in `Config.lua`.
+  - `CLAUDE.md` keeps agents out of the user's catalogs. Before driving Lightroom, they check that its log names the test catalog.
 
 ## Progress
 
