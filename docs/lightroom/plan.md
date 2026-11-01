@@ -1,6 +1,6 @@
 # Lightroom Classic build plan
 
-**Status:** Phases 0–5 are done, with Phase 5 as scoped at kickoff. Phase 6, hardening, is built and verified on hardware except the reboot, which the user will run later. Written 2026-10-31 at the end of the research session.
+**Status:** Phases 0–6 are done, with Phase 5 as scoped at kickoff. Written 2026-10-31 at the end of the research session.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -540,6 +540,15 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Neither log records resets, preset applies or which photos changed, so the long-touch reset, Auto Sync and Apply Preset rest on the user's report.
   - **No short tap shows in the log,** so this build's bank changes, locked or not, rest on the tests. Phase 4 had 34 on hardware.
   - **Still to do:** the reboot. The deck stays at debug until then, for tick timing after a cold boot. Afterwards, delete `log-level.txt` and restart the plugin.
+- 2026-11-01, Phase 6 reboot (checklist 3, step 6): the user restarted the Mac and reports that everything worked. The logs agree, and neither has a warning or error.
+  - **Before the reboot,** the deck saw the Mac wake at 10:30:11 and reconnected in 256 ms. Lightroom shut down cleanly with the restart.
+  - **After it:**
+    - The Mac booted at 10:30:56. The Stream Deck app started at 10:45:08, and the plugin 3 s later.
+    - Lightroom wasn't open yet, so the deck kept retrying for 2 min, with one log line. Lightroom started listening at 10:47:11.4, and the deck connected 1.6 s later.
+    - Lightroom opened 16 min after boot, so this run can't say whether macOS's localhost delay after a reboot would have struck. The deck's first try after Lightroom listened got through.
+  - **Ticks after the cold boot,** 17 min after boot with the Mac still busy (5-minute load average 5.1): one spin of 26 events and 45 ticks in 2.4 s, all applied, then a press. Events came less evenly than during checklist 3: median 97 ms apart and uneven, against S4's steady steps of about 50 ms (median 51 ms last night). The user felt no lag, so no workaround is needed.
+  - **No strip tap** after the reboot either, so bank changes on this build still rest on the tests.
+  - **Logs back to info:** `log-level.txt` deleted and the plugin restarted at 10:50:20. STARTUP at log level info, online 6 ms later.
 
 ## Progress
 
@@ -550,4 +559,4 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [x] the deck plugin against the mock (step 5), 2026-10-31
 - [x] Phase 4: integration on hardware, 2026-10-31. A Stream Deck app restart and a long-touch move to the next checklist.
 - [x] Phase 5: presets, as scoped at kickoff, 2026-10-31. The other one-click tools wait.
-- [ ] Phase 6: hardening. Built and verified offline, in Lightroom and on hardware (ladder steps 1–6), 2026-10-31, except the reboot, which the user will run later.
+- [x] Phase 6: hardening, verified offline, in Lightroom and on hardware (ladder steps 1–6), 2026-11-01. Bank changes on this build rest on the tests.
