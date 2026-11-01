@@ -1,6 +1,6 @@
 # Lightroom Classic build plan
 
-**Status:** Phases 0–5 are done, with Phase 5 as scoped at kickoff. Phase 6, hardening, is built and verified short of the hardware checklist. Written 2026-10-31 at the end of the research session.
+**Status:** Phases 0–5 are done, with Phase 5 as scoped at kickoff. Phase 6, hardening, is built and verified on hardware except the reboot, which the user will run later. Written 2026-10-31 at the end of the research session.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -525,6 +525,21 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Latency** at 15, 30 and 60 sets/s: ack median 2.7, 1.6 and 1.2 ms, max 11 ms. No backlog, leaks or errors, and Exposure was put back.
   - **Lightroom's log:** 26 lines, all INFO.
   - **The deck plugin** restarted on the new build: STARTUP at log level info, and online 6 ms later.
+- 2026-10-31, Phase 6 on hardware (ladder step 6): the user walked through checklist 3 and reports that steps 1–5 worked. Step 6, the reboot, waits until they can restart the Mac. The deck logged at debug from 22:14 for this checklist. Both logs agree:
+  - **No warnings or errors** in either log.
+  - **Long-touch:** two strip touches with `hold: true` on the first dial, each right after a turn.
+  - **Locked photo:** Lightroom 15.3 locks a photo while Denoise runs. That answers the first half of LR research §10, question 15.
+    - `isAvailableForEditing()` read false, so `state.locked` was true. The deck refused 4 tick events in two bursts, with one alert per burst (23:38:56 and 23:38:58). The next turns, at 23:39:30, applied.
+    - Still open: whether Develop calls on a locked photo fail silently. Deck Bridge never makes them.
+    - No gesture was open when the lock arrived, so neither "ending gesture … locked" nor `err locked` came up. Tests cover both.
+  - **Many photos:** with 3 selected and Auto Sync on, the user saw Exposure from the deck reach all 3, as S5 found, and Apply Preset too.
+  - **Recovery:**
+    - Stream Deck app restart: the app quit at 23:40:36.4 and started again at 23:40:37.4. The new plugin process reached Lightroom 5 ms after starting, and the app had it connected 0.7 s after launch.
+    - Lightroom quit and relaunch: the deck went offline at once. It came back 0.7 s after Lightroom started listening again, noticed the new instance and watched again. Turns applied afterwards.
+    - Sleep and wake, at 23:37:36 before the checklist: reconnected in 258 ms.
+  - Neither log records resets, preset applies or which photos changed, so the long-touch reset, Auto Sync and Apply Preset rest on the user's report.
+  - **No short tap shows in the log,** so this build's bank changes, locked or not, rest on the tests. Phase 4 had 34 on hardware.
+  - **Still to do:** the reboot. The deck stays at debug until then, for tick timing after a cold boot. Afterwards, delete `log-level.txt` and restart the plugin.
 
 ## Progress
 
@@ -535,4 +550,4 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [x] the deck plugin against the mock (step 5), 2026-10-31
 - [x] Phase 4: integration on hardware, 2026-10-31. A Stream Deck app restart and a long-touch move to the next checklist.
 - [x] Phase 5: presets, as scoped at kickoff, 2026-10-31. The other one-click tools wait.
-- [ ] Phase 6: hardening. Built and verified offline and in Lightroom (ladder steps 1–5), 2026-10-31. Checklist 3 on hardware is next.
+- [ ] Phase 6: hardening. Built and verified offline, in Lightroom and on hardware (ladder steps 1–6), 2026-10-31, except the reboot, which the user will run later.
