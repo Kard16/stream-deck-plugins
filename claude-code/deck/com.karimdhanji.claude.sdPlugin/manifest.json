@@ -1,0 +1,68 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+	"UUID": "com.karimdhanji.claude",
+	"Name": "Claude Code",
+	"Version": "0.1.0.0",
+	"Author": "Karim Dhanji",
+	"Description": "Claude Code desktop sessions on the dials and keys: a Sessions dial and a held-approval key (spike S6).",
+	"Category": "Claude Code",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"Icon": "imgs/plugin/icon",
+	"CodePath": "bin/plugin.js",
+	"SDKVersion": 3,
+	"Software": {
+		"MinimumVersion": "7.1"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "13"
+		}
+	],
+	"Nodejs": {
+		"Version": "24",
+		"Debug": "enabled"
+	},
+	"Actions": [
+		{
+			"UUID": "com.karimdhanji.claude.sessions",
+			"Name": "Sessions",
+			"Tooltip": "Turn to scroll through the running Claude Code sessions. Press or tap to jump to one (spike: it only logs).",
+			"Icon": "imgs/actions/sessions/icon",
+			"Controllers": [
+				"Encoder"
+			],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/sessions/key"
+				}
+			],
+			"Encoder": {
+				"layout": "layouts/sessions.json",
+				"Icon": "imgs/actions/sessions/encoder",
+				"TriggerDescription": {
+					"Rotate": "Scroll sessions",
+					"Push": "Jump (logs only)",
+					"Touch": "Jump (logs only)",
+					"LongTouch": "Log only"
+				}
+			}
+		},
+		{
+			"UUID": "com.karimdhanji.claude.approve",
+			"Name": "Approve",
+			"Tooltip": "Shows how many permission requests are waiting. Press to allow the oldest one (spike).",
+			"Icon": "imgs/actions/approve/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"SupportedInMultiActions": false,
+			"States": [
+				{
+					"Image": "imgs/actions/approve/key"
+				}
+			]
+		}
+	]
+}

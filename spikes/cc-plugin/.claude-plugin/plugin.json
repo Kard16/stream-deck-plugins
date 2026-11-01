@@ -1,0 +1,6 @@
+{
+  "name": "deck-spike",
+  "version": "0.0.1",
+  "description": "Phase 1 spike for the Stream Deck bridge: logs every hook event and what the mod's $ offers to the spike bridge on 127.0.0.1:47600, and answers PermissionRequest as the bridge says. Throwaway sessions only.",
+  "author": { "name": "Karim Dhanji" }
+}

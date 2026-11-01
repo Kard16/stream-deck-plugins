@@ -1,0 +1,4 @@
+# Throwaway sessions write scratch files here. Keep only these two.
+*
+!.gitignore
+!CLAUDE.md

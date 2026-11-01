@@ -32,3 +32,6 @@ dist/
 
 # Spike run output
 spikes/results/
+
+# Claude Code side: bridge tokens and sockets, sandbox scratch
+**/run/

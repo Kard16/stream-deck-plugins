@@ -1,6 +1,6 @@
 # Claude Code build plan
 
-**Status:** Phase 1, spikes. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
+**Status:** Phase 1, spikes: all run, 2026-11-01. Waiting on the user for the model and effort route, whether a mode raise needs a second press, and the go for Phase 2. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -118,13 +118,13 @@ Each phase ends with a verification step. Phases 1 and 2 are mostly serial; Phas
 Answer the risky questions before building on them. Spike code lives in `spikes/cc-*`. Report the results to the user, record them in the log, and wait for the user's go before Phase 2.
 
 The spikes share:
-- **The sandbox,** `claude-code/sandbox/`, whose own `.claude/` loads the spike plugin.
+- **The sandbox:** the folder `claude-code/sandbox/`, plus a session preset, `deck-sandbox`, that the user makes in the app. The preset starts sessions in that folder with `CLAUDE_CODE_PLUGIN_DIRS` set to `claude-code/sandbox-plugin`, a link to the plugin under test (the spike plugin now, `claude-code/plugin/` from Phase 4). No plugin sits in a `.claude/skills/` folder, which this session might discover as a nested one.
 - **The spike plugin,** `spikes/cc-plugin/`: a logging command hook on every event, an http PermissionRequest hook, and a mod that reports what `$` gives it.
 - **The spike bridge,** `spikes/cc-bridge/`: a Node server on 127.0.0.1:47600 that logs everything under `spikes/results/<timestamp>/` and answers held requests from a script.
 - **Throwaway sessions,** started and driven by the main thread with the app's session tools: start, send a message, set the mode, archive.
 
 **S0: sandbox and isolation.** Can the plugin load in sandbox sessions only?
-- How: try a plugin folder in the sandbox's `.claude/skills/` first, then a folder marketplace with a project-scope install. Start a throwaway session there and let it and the user's sessions run for 10 minutes while the bridge logs every caller.
+- How: start a throwaway session from the `deck-sandbox` preset, and let it and the user's sessions run for 10 minutes while the bridge logs every caller. Fallbacks, in order: a plugin folder in the sandbox's `.claude/skills/` (watching for this session picking it up), then a folder marketplace with a project-scope install.
 - Pass: the throwaway session's hooks and mod reach the bridge; nothing arrives from any other session; no prompt is left waiting in the app.
 
 **S1: status from hooks.**
@@ -278,11 +278,165 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   5. **Values:** Mode Manual, Accept edits, Plan, Auto (no Bypass); Model Opus 5.5, Sonnet 5.5, Haiku 5.5; Effort low to max. Keystrokes are an allowed fallback where S4 finds no API route, after the user has seen S4's results.
   6. **Saved prompts:** text set per key in its Property Inspector, sent as the user's own message, waiting while the session is busy; the key shows sent, waiting or refused. Slash commands if S3 shows they work.
   7. **Overview scope:** every running Code-tab session, from the registry, with jump for all. Approvals, prompts and settings only for sessions with the plugin, which means throwaway sessions until the user says otherwise.
+- 2026-11-01, S0 setup: the plugin reaches throwaway sessions through a session preset, not a project skills folder.
+  - **Why:** the reference documents `CLAUDE_CODE_PLUGIN_DIRS` for "a session the desktop app or an SDK host starts", read from the process environment, and the app's presets carry environment variables (the app's start-session tool says so). A plugin in `claude-code/sandbox/.claude/skills/` sits under this session's root, and whether a session loads nested skills folders it works in isn't documented.
+  - **The preset** (`deck-sandbox`, made by the user): folder `claude-code/sandbox`, no worktree, and `CLAUDE_CODE_PLUGIN_DIRS=<repo>/claude-code/sandbox-plugin`, `CLAUDE_CODE_PLUGIN_DIR_WATCH=1` (desktop sessions hot-reload only with it) and `DECK_TOKEN` (the spike token, for the http hook's header).
+  - `claude-code/sandbox-plugin` is a link to `spikes/cc-plugin`, so the preset stays the same when the real plugin replaces the spike one.
+  - Three agents started: the spike bridge and spike plugin (`spikes/cc-bridge/`, `spikes/cc-plugin/`), the S6 deck spike (`claude-code/deck/`, its server on 47601 while the spike bridge holds 47600), and a read-only search of the app bundle for `claude://` routes (S5).
+- 2026-11-01, S5 desk research (read-only, Claude.app 4.4212.0's `app.asar` and CLI 2.1.312's binary; nothing opened or launched). Still to test live.
+  - **Jump route: `claude://code/continue?session=<local_id>`.** It's what the app's own Dock menu and Spotlight entries use.
+    - It takes the `local_…` id (`hostSessionId`), not the Claude Code UUID.
+    - It shows no dialog. It restores, shows and focuses the app's one main window, then navigates to `/epitaxy/<local_id>`, the session in the Code tab.
+    - An unknown or archived id lands on the Code home. An id that doesn't match `^local_[A-Za-z0-9-]{1,64}$` does nothing. `session=last` means the most recently active session.
+  - **`claude://code/needs-input[?session=local_…]`** opens that session if it has a pending permission prompt, otherwise the oldest waiting session. That fits a "needs you" key.
+  - **Avoid:**
+    - `claude --desktop --resume <uuid>` refuses any session the app is running, because those register as live `interactive` sessions.
+    - `claude://resume?session=<uuid>` un-archives the session, and can import a duplicate when the UUID is an old one.
+    - `claude://code/local_<id>` isn't a route.
+    - `claude://hotkey` only brings the app forward.
+  - **No AppleScript dictionary.** Use `/usr/bin/open <url>`; a plugin sending Apple Events would raise an Automation prompt.
+  - **The app's session records** (`claude-code-sessions/<account>/<org>/local_<id>.json`, 22 files, 7 archived). Fields:
+    - `sessionId` (`local_…`); `cliSessionId`, the Claude Code UUID, which can change, with `priorCliSessionIds`; `isArchived`; `title`.
+    - Times: `lastActivityAt`, `lastFocusedAt`, `createdAt`.
+    - `model`, `effort`, `permissionMode`, `completedTurns`.
+    - `postTurnSummary` (`needs_action`, `status_category`, `status_detail`), and `turnWrapUp` (`description`, `needsUser`).
+  - **What that could mean for the build:**
+    - The overview can show every session's mode, model and effort without the plugin.
+    - `lastFocusedAt` could pick the target session better than "last finished a turn" (kickoff answer 4).
+    - S4 can read a record to check a change landed.
+    - Key the deck on the `local_` id, which is fixed for a session's life.
+  - **Open for the live test:**
+    - Whether the app really comes to the front when a background process (the Stream Deck plugin) runs `open`.
+    - What happens when the session is already showing in a split pane.
+    - A cold start.
+- 2026-11-01, S6 built and checked offline (`claude-code/deck/`, plugin `com.karimdhanji.claude` 0.1.0.0). The agent's results, re-run by the main thread: typecheck exit 0, 49/49 tests, `streamdeck validate` passes.
+  - **Linking needs no app restart.** On app 7.6 with developer mode on, `streamdeck link` then `streamdeck restart com.karimdhanji.claude` started it. Its log has STARTUP, then "listening on 127.0.0.1:47601" and "Registry: 10 session(s) running".
+  - **The Lightroom plugin wasn't touched:** same process (pid 2181) since 10:50:20, one STARTUP line, and nothing about it in the app log since.
+  - **Live curl checks:** no token or a wrong one gets 401; a wrong Host gets 403, checked before the token; requests are held and logged. A client that gives up is removed from the count. A plugin restart while a request is held gives the client an empty reply, never a decision; the new process was up about 60 ms later and reused the token. The token appears in no log.
+  - **Decisions taken in the spike, for Phase 2:**
+    - A key press answers only the request the key last showed. If that one has gone, the press alerts and does nothing.
+    - The dial follows a session by `hostSessionId`, ordered by `startedAt`.
+    - Hooks must use `127.0.0.1`, not `localhost`: the server binds IPv4 only.
+    - Held requests have no server-side timeout yet.
+  - **For Track B:**
+    - `Nodejs.Debug: "enabled"`, copied from Lightroom, opens a Node inspector on a random 127.0.0.1 port. Turn it off for daily use.
+    - Log SIGTERM, since a killed plugin currently logs nothing.
+  - **The plugin now runs whenever the Stream Deck app does,** reading `~/.claude/sessions` every second and holding 47601.
+  - **Still to do, with the user:** place Sessions on a dial and Approve on a key, look at the strip, and press Approve on a held request.
+- 2026-11-01, spike tools checked by the main thread: bridge 18/18 tests, tsc clean, and the app's 2.1.309 `plugin validate` and `plugin test` (4/4) pass.
+  - `validate` and `test` write `.claude.json` and `backups/` into the config folder, so they run with `CLAUDE_CONFIG_DIR` set to a scratch folder.
+  - One `hooks.json` may hold both `hooks` and `modules`.
+  - The user made the `deck-sandbox` preset.
+  - The app starts a session only in a turn that began with the user's own words; a turn woken by an agent's report was refused. So test sessions start on the user's go, and get reused across spikes.
+  - The bridge runs from `spikes/results/20261101-133155-cc/`.
+- 2026-11-01, **S0 passes so far** ("Deck spike S0", `local_5e3575bb…`, Claude Code session `3fa86955…`, Haiku, Manual, started 13:32:50). The isolation watch runs on through the other spikes.
+  - **The preset route works.** The plugin loaded from `CLAUDE_CODE_PLUGIN_DIRS`, with no prompt. `CLAUDE_PLUGIN_ROOT` is the link path (`claude-code/sandbox-plugin`), not its target, and `CLAUDE_PROJECT_DIR` is the sandbox.
+  - **Every plugin request came from that session.** None came from this session (`548b10e1…`) or the user's nine others.
+  - **Hooks see both ids.** `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_HOST_SESSION_ID` are in their environment.
+  - **The mod sees fewer.** `$.env.get("CLAUDE_CODE_SESSION_ID")` is null, but `$.session.id()` gives the same id, and `$.env.get("CLAUDE_CODE_HOST_SESSION_ID")` works.
+  - **Auth works three ways:** the http hook interpolated `$DECK_TOKEN` from the preset's environment, the mod read it from its environment, and `hook.sh` read the token file.
+  - **The mod's fetches** come from the host with user agent `Bun/1.4.4`.
+  - **Where prompts come from,** as the mod's `prompt.submit` sees them:
+    - the app's own prompt: `origin.kind` `sdk`;
+    - a message from another session: `peer`;
+    - a finished background subagent: `task-notification`, which starts a turn of its own.
+  - **First turn, in ms from the first hook:** InstructionsLoaded ×3 at 0, SessionStart (`source: startup`) at 261, the mod's `session.start` and hello at about 500, UserPromptSubmit at 524, Stop at 3916.
+  - **The mod's view of the session** (`$.session.*`): model `claude-haiku-5-5`; version 2.1.309; `surfaces` empty and not interactive, so the mod draws nowhere in a desktop session; at start, `usage()` gives the context window size (1,000,000) but no figures yet.
+  - **The `/config` rows** (43):
+    - `model` is this session's model, with choices `default`, `sonnet`, `opus`, `haiku`, `fable`, `best` and the `[1m]` variants.
+    - `permissionMode` is the *default* for new sessions, so it's no route to the current session's mode.
+    - There's no effort row.
+  - **Commands** (132) include `/model`, `/effort`, `/fast`, `/rename`, `/context`, `/compact`, `/clear`, `/focus` and `/goal`, but no mode command.
+- 2026-11-01, **S1: status from hooks** (same session; the bridge allowed each request at once).
+  - **Every step fires a hook,** with `permission_mode` and `effort.level` on tool and Stop events:
+    - Bash `ls`: PreToolUse, PostToolUse, PostToolBatch, with no PermissionRequest.
+    - Write: PermissionRequest, then PostToolUse.
+    - `false`: PostToolUseFailure, with `error: "Exit code 1"` and `is_interrupt: false`.
+    - Agent: SubagentStart and SubagentStop, carrying `agent_id` and `agent_type`. The subagent's own tool calls carry `agent_id` too. It ran in the background, and its result started a new turn.
+  - **The approval path, in ms after the Write call:**
+    - The mod's `tool.check` verdict was `ask`, with the reason "Claude requested permissions to write to …".
+    - The http hook's request reached the bridge at +16; the policy's `allow` went back 2 ms later; the Write had finished by +47. Nobody touched the app.
+    - The request carried `permission_suggestions: [{type: "setMode", mode: "acceptEdits", destination: "session"}]`, the app's own "don't ask again for edits" choice.
+  - **Async logging hooks** arrive about 5–25 ms after the mod's view of the same moment.
+  - **The registry** flips `idle`→`busy` about 35 ms after a prompt, and `busy`→`idle` about 130 ms after Stop, for all sessions. During the approval only `statusUpdatedAt` moved, and the status read `busy` at both polls. A held request in S2 shows whether there's a separate waiting status.
+- 2026-11-01, **S3: the mod in the desktop app** (same session). Results without the user:
+  - **Context and limits:** `$.session.usage()` gives `{context: {tokens: 89910, window: 1000000, percent: 9}, rateLimits: [{kind: "seven_day", percentUsed: 24, …}], cost: {usd: 0.027}}`. The `session.measure` event pushes changes after each turn.
+  - **Sending a prompt:**
+    - `$.prompt.submit({text, asUser: true})` into an idle session started a turn within 29 ms. UserPromptSubmit saw the bare text, with no plugin framing.
+    - Submitted while busy, it waited out a 20 s turn, then started 24 ms after `turn.complete`.
+    - The mod's own hooks don't see its own submissions or tool calls.
+  - **The mod reaches the bridge** over TCP and over the Unix socket (`socketPath`, 200 in 19 ms).
+  - **Hot reload works** in a desktop session with `CLAUDE_CODE_PLUGIN_DIR_WATCH=1`. Edits to the mod and to `hooks.json` both took effect within about 8 s, and the mod reran `session.start` as a new instance.
+  - **Which session is on screen:** opening a session in the app raises `session.attach` (`surface: "desktop"`, the window size), and leaving it raises `session.detach`. The app's record sets `lastFocusedAt` to the same millisecond. So the mod knows when its session is in front, which beats "last finished a turn" for kickoff answer 4.
+  - **The app's per-turn summary:** each record has `postTurnSummary` (`status_category`, `status_detail` such as "replied 'effort check' as requested", and `needs_action`), which could caption sessions on the overview.
+  - `$.ui.status` and `$.ui.toast` return nothing. Whether they show is for the user to check.
+  - **The S0 session refused long waits.** The Bash tool blocks a plain `sleep 30`, and the session then took a `perl` wait as a workaround, per the sandbox's no-workarounds rule. The sandbox CLAUDE.md now says a long command asked for on purpose isn't a workaround. The Esc test moves to the user's checklist.
+- 2026-11-01, **S4: mode, model and effort of a running session.** Results without the user:
+  - **Model and effort through the engine work for the next turns, but the app doesn't learn of them.**
+    - The mod ran `$.command.run({command: "effort", args: "medium"})`, answered "Set effort level to medium (this session only)", and the next turn's Stop hook had `effort.level: "medium"`.
+    - `/model sonnet` answered "Set model to `Sonnet 5.5` for this session only", and the next turn replied "Sonnet 5.5".
+    - `~/.claude/settings.json` kept the same mtime throughout.
+    - The app's record and `get_session` still say `claude-haiku-5-5` and `low`.
+    - Open, for the user: what the app's pickers show, and whether a prompt typed in the app switches back.
+  - **The app's own tools, called from the mod** with `$.mcp.call("ccd_session_mgmt", …)`. The `ccd_*` servers are connected in every desktop session. A mod's `$.mcp.call` goes through the session's permission check like any tool call (corrected in "S4 finished" below).
+    - `set_session_effort` and `set_session_model` with `self` are refused: "Refusing to change this session's own model or effort".
+    - `set_session_permission_mode` with `self` worked going down (`acceptEdits`→`default`, "applies to the rest of this turn and every turn after it"). The first try was refused with "this session is waiting for the user to answer a request", which didn't recur; cause unknown.
+    - Going up should show an approval card in the app, by that tool's own documentation. The user to see.
+  - **A mode switch carried by an approval.**
+    - S0's own Write raised a PermissionRequest carrying `permission_suggestions: [{type: "setMode", mode: "acceptEdits", destination: "session"}]`. The bridge allowed it with that update, and the engine was in `acceptEdits` from the PostToolUse on. The next Write needed no approval, and the app's record changed to `acceptEdits`.
+    - That makes a deck "Approve + accept edits" possible, with no card.
+    - A request the mod raises itself won't carry a switch. The mod's `$.tool.call` (a Read of a marker file, forced to ask by a classic PreToolUse hook) did raise a PermissionRequest, and the bridge answered with `setMode plan`, then `default`, but the mode stayed.
+  - **This session set S0 to Plan** with its own `set_session_permission_mode`: going down, for a session it started, needs no card.
+  - **So far, then:**
+    - Mode: the mod and the app's tool, with a card when going up; or an approval carrying `setMode`.
+    - Model and effort: `/model` and `/effort`, with the app showing stale values, or the app's shortcuts.
+- 2026-11-01, the S6 deck plugin now jumps. Press or tap on the Sessions dial runs `/usr/bin/open claude://code/continue?session=<local_id>` and logs the result. Typecheck clean, 49/49 tests, validate passes, and the plugin restarted at 19:47:18 UTC.
+- 2026-11-01, **S2: approve and deny** (S0, with the bridge holding each PermissionRequest and the user in the app). Driver: `spikes/cc-bridge/s2-run.mjs`. Results: `s2-summary*.json` in the bridge's run folder.
+  - **What each answer did:**
+    - **The deck allows** (held 8 s): the tool ran about 50 ms later, and the app's dialog closed by itself (the user watched).
+    - **The deck denies with `interrupt: true`:** the Write didn't run, the dialog closed by itself, and the turn stopped. Claude got the standard "The user doesn't want to proceed with this tool use … STOP" text and "[Request interrupted by user for tool use]", not the deck's message. No Stop or PostToolUseFailure hook fired; the mod's `turn.complete` came with reason `answer`. The mod's next prompt was accepted.
+    - **Deny without `interrupt`:** not tested.
+    - **The user answers in the app first:** the tool ran 20–50 ms after the click, but the held request stayed open (23 s, 9 s and 15 s) until the script closed it after the turn. The app doesn't cancel the hook.
+    - **No answer until the hook times out:** not tested. The dialog works while a request is held, which covers the risk.
+    - **AskUserQuestion and plan approval (ExitPlanMode)** both raise a PermissionRequest. The user answered them in the app, and the held copies stayed open as above. A hook's answer to them wasn't tried, so they stay "needs you" and jump (kickoff answer 3).
+  - **The request carries no `tool_use_id`.** Its fields: `session_id`, `prompt_id`, `tool_name`, `tool_input`, `permission_mode`, `effort`, `cwd`, `transcript_path` and `scratchpad_dir`; `permission_suggestions` for edits and the app's tools; `mcp_server` for MCP tools. PreToolUse and PostToolUse carry the `tool_use_id`, so a held request matches its tool call by session, tool name and input.
+  - **The registry has a third status, `waiting`,** while a request is open. It showed in every step with a dialog and in none of the others.
+  - **Notification** ("Claude needs your permission to use Write", `notification_type: permission_prompt`) fires 6 s after a request that's still open.
+  - **Esc** (by the user, step 6) ended the turn with the mod's `turn.complete` reason `aborted`, and no Stop or StopFailure hook. After it the mod's `$.prompt.submit` was dropped ("the session was stopped and nobody has sent input since") until the user typed in the session. The mod's `$.mcp.call` still worked.
+  - **Step 3's Allow also switched S0 to Accept edits,** the request's `setMode` suggestion. The user doesn't remember the button; the dialog showed an allow and a deny button. Whether the app's plain Allow applies the switch is open. It changes nothing for the deck, whose Allow is "this once".
+  - **Prompts from the mod show in the app** as the user's messages: the user followed the steps from them. The transcript marks them `origin: {kind: "plugin", name: "deck-spike", asUser: true}`.
+- 2026-11-01, **S4 finished.**
+  - **Correction:** a mod's `$.mcp.call` goes through the session's permission check like any tool call. The app's tools raise a PermissionRequest (`tool_name: mcp__ccd_session_mgmt__set_session_permission_mode`); the app let lowering through at once and asked the user for the rest.
+  - **Mode:** the mod calls `set_session_permission_mode` for `self`.
+    - Going down (Accept edits → Manual) took 31–55 ms with no card.
+    - Going up (Manual → Accept edits) raised the app's dialog. The user approved it after 88 s, and the mode and the app's record changed.
+    - With the bridge allowing that request, the raise took 57 ms with no card, and the record followed. So the deck can confirm a raise itself.
+  - **Model and effort:**
+    - `/model` and `/effort` through `$.command.run` held for the following turns: S0 still answered "Sonnet 5.5" hours later. But the app's menus showed Haiku and low (the user looked), as do its record and `get_session`.
+    - The app's `set_session_model` with the session's own `local_…` id is refused like `self`, and only after the app's permission dialog: the user approved a "Set Session Model" card, then the tool refused. By its documentation it's refused for the calling session, and for any other session the app asks the user first.
+    - The app's bundle has no `claude://` link for them, only `code/new`, `code/needs-input` and `code/continue`.
+    - The app's menus (Cmd+Shift+I, Cmd+Shift+E) open, as the user saw. Driving them by keystrokes is untested.
+  - **Open, for the user:** the route for model and effort, and whether a mode raise needs a second press.
+- 2026-11-01, **S5 live: the jump works.**
+  - Pressing the Sessions dial with another app in front brought Claude forward on S0 (the user saw it).
+  - Tapping the strip while Claude showed another session switched it to S0. The mod's `session.attach` came 133 ms after the tap, and the record's `lastFocusedAt` matches it.
+  - `open` returned in 59–87 ms on all four jumps.
+  - Not tested: a session in a split pane, and a cold start.
+  - The registry went from 11 sessions to 12 and back within a second as the user switched sessions in the app. The deck must tolerate short-lived entries.
+- 2026-11-01, **S6 passes on the deck.** The user confirmed that the strip shows session titles with their status, turning scrolls them, press and tap jump, and the Approve key shows a held request. A press answered it with Allow after 16 minutes. Re-run before the commit: typecheck exit 0, 49/49 tests, `streamdeck validate` passes. The spike tools too: bridge 18/18, `tsc` clean, the app's 2.1.309 `plugin validate` passes and `plugin test` 4/4.
+- 2026-11-01, **S0 passes.** Over 3 h 20 min of spikes, all 12,420 plugin requests came from S0: 455 hook and mod calls with its session id, and 11,976 polls from its mod (plus one socket probe). Nothing came from this session or the user's other sessions, which ran throughout.
+- 2026-11-01, **S1 and S3 pass.** S1's table is in its entry, and its state machine is under "Session status" below. S3's last item, prompts showing in the app, is confirmed in S2. `$.ui.status` and `.toast` weren't checked; nothing needs them.
+- 2026-11-01, **decisions from the spikes, for Phase 2:**
+  - **A held request ends** when the deck answers it, or when the same session reports a PostToolUse or PostToolUseFailure for the same tool and input, a turn end (the mod's `turn.complete`, or Stop), or a registry status other than `waiting`. The deck then clears it from the keys.
+  - **Session status:** `idle`, `busy` and `waiting` from the registry, for every session. Sessions with the plugin add the tool being run, "needs you" (AskUserQuestion, ExitPlanMode), interrupted (`turn.complete` reason `aborted`) and context % (`session.measure`).
+  - **Deny** is `behavior: "deny"` with `interrupt: true`, like the app's No (kickoff answer 3). Claude never sees a message with it, so the deck sends none.
+  - **Saved prompts after Esc** are refused by the engine until the user types in that session. The key shows refused, with that reason.
+  - **The mod's mode changes raise PermissionRequests of their own.** How the deck treats them waits on the user's answer about a second press.
 
 ## Progress
 
 - [x] Phase 0: kickoff (open questions answered), 2026-11-01
-- [ ] S0 sandbox · [ ] S1 status · [ ] S2 approvals · [ ] S3 mod · [ ] S4 mode, model, effort · [ ] S5 overview and jump · [ ] S6 deck
+- [x] S0 sandbox · [x] S1 status · [x] S2 approvals · [x] S3 mod · [ ] S4 mode, model, effort (mode done; model and effort wait on the user) · [x] S5 overview and jump · [x] S6 deck
 - [ ] Phase 2: contract frozen
 - [ ] Track A: Claude Code plugin · [ ] Track B: deck plugin · [ ] Track C: tools
 - [ ] Ladder steps 4–5

@@ -1,0 +1,19 @@
+{
+  "//": "Type-checks the deck-spike mod against Claude Code 2.1.309's d.ts, kept outside the plugin folder. Options from the d.ts header. Run: mise exec -- node lightroom/deck/node_modules/typescript/bin/tsc -p spikes/cc-tsc",
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": [],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
+  "files": ["../../claude-code/vendor/mods-api-2.1.309/claude-code.d.ts"],
+  "include": ["../cc-plugin/hooks/**/*.ts", "../cc-plugin/tests/**/*.ts"]
+}

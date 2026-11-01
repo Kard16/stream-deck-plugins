@@ -1,0 +1,8 @@
+# Stream Deck build output and logs. The root .gitignore's *.sdPlugin/bin/ is anchored to the repo root.
+*.sdPlugin/bin/
+*.sdPlugin/logs/
+# The optional log level, read at startup (src/util/log-level.ts): a local choice, like the logs it raises.
+*.sdPlugin/log-level.txt
+# Compiled tests (npm test).
+build/
+# The bridge token lives in *.sdPlugin/run/, which the root .gitignore's **/run/ already covers.
