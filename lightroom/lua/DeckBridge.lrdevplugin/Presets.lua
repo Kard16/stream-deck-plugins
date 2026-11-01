@@ -46,7 +46,7 @@ function Presets.find(uuid)
 end
 
 -- Lightroom 15.3 locks a photo while background AI updates it. Older versions lack the
--- call, and then every photo is available.
+-- call, and then every photo is available. The poll uses this too, for state.locked.
 function Presets.available(photo)
   if not photo.isAvailableForEditing then
     return true

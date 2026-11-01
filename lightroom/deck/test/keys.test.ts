@@ -7,6 +7,7 @@ import { isPresetRequest, PresetCatalog, sortPresets } from "../src/keys/presets
 import { LrError } from "../src/lr/client.js";
 import type { LrState } from "../src/model/model.js";
 import { FakeLink } from "./helpers/fake-link.js";
+import { RecordingLog } from "./helpers/recording-log.js";
 
 const state = (flag: number | null, photo: string | null = "101"): LrState => ({
 	module: "library",
@@ -16,6 +17,7 @@ const state = (flag: number | null, photo: string | null = "101"): LrState => ({
 	rating: 0,
 	label: "none",
 	sel: photo ? 1 : 0,
+	locked: false,
 });
 
 describe("flag keys", () => {
@@ -103,9 +105,11 @@ describe("preset catalog (the Property Inspector's list)", () => {
 			if (calls === 2) throw new LrError("timeout", "slow");
 			return { t: "presets", id: cmd.id, items };
 		};
-		const catalog = new PresetCatalog(link);
+		const log = new RecordingLog();
+		const catalog = new PresetCatalog(link, log);
 		const first = await catalog.list();
 		assert.deepEqual(first, { t: "presets", items: sortPresets(items) });
+		assert.deepEqual(log.at("debug"), ["debug listed 4 Develop presets"], "below info: a list comes every time a Property Inspector opens");
 		const second = await catalog.list();
 		assert.deepEqual(second, { t: "presets", items: sortPresets(items), error: "timeout", stale: true });
 		link.state = "offline";

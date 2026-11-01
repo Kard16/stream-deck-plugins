@@ -15,9 +15,11 @@ describe("command validator (PROTOCOL.md, Commands)", () => {
 		{ t: "set", p: "Exposure", v: 0.35, g: 1 },
 		{ t: "set", p: "Exposure", v: -5, g: 2, id: 7 },
 		{ t: "set", p: "Temperature", v: 5550, g: 3 },
+		{ t: "set", p: "Exposure", v: 0.38, g: 4, ph: "101", id: 8 },
 		{ t: "done", g: 1 },
 		{ t: "done" },
 		{ t: "reset", p: "Exposure", id: 3 },
+		{ t: "reset", p: "Exposure", ph: "101", id: 9 },
 		{ t: "module", v: "develop" },
 		{ t: "module", v: "library" },
 		{ t: "flag", v: "pick", advance: true },
@@ -48,6 +50,9 @@ describe("command validator (PROTOCOL.md, Commands)", () => {
 		[{ t: "set", p: "Contrast", v: 10.5, g: 1 }, /isn't rounded to a whole number/],
 		[{ t: "set", p: "Exposure", v: 1, g: 1, seq: 4 }, /set\.seq isn't a field/],
 		[{ t: "set", p: "Exposure", v: Number.NaN, g: 1 }, /finite/],
+		[{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: 101 }, /set\.ph must be a non-empty string/],
+		[{ t: "reset", p: "Exposure", ph: "" }, /reset\.ph must be a non-empty string/],
+		[{ t: "done", g: 1, ph: "101" }, /done\.ph isn't a field/],
 		[{ t: "flag", v: "maybe" }, /flag\.v must be one of/],
 		[{ t: "flag", v: "pick", advance: "yes" }, /advance must be a boolean/],
 		[{ t: "watch", ps: ["Exposure", ""] }, /list of non-empty strings/],
@@ -69,7 +74,7 @@ describe("command validator (PROTOCOL.md, Commands)", () => {
 		});
 	}
 
-	test("every deck line in the fixtures passes, except the malformed ones errors.jsonl sends on purpose", () => {
+	test("every deck line in the fixtures passes, except the malformed ones errors.jsonl and stale-photo.jsonl send on purpose", () => {
 		const failures: string[] = [];
 		for (const fixture of loadFixtures()) {
 			for (const line of fixture.lines) {
@@ -82,6 +87,7 @@ describe("command validator (PROTOCOL.md, Commands)", () => {
 			'errors.jsonl: {"t":"explode","id":4}',
 			'errors.jsonl: {"t":"set","p":"Exposure","g":1}',
 			'errors.jsonl: {"t":"flag","v":"maybe"}',
+			'stale-photo.jsonl: {"t":"set","p":"Exposure","v":-0.2,"g":6,"ph":102}',
 		]);
 	});
 });
@@ -92,6 +98,7 @@ describe("event parsing (PROTOCOL.md, Events)", () => {
 			{ t: "hello", v: 1, lr: "15.3", catalog: "Plugin Test.lrcat", path: "/x.lrcat", guard: "on", writable: true, inst: "abc", extra: 1 },
 			{ t: "state", module: "develop", photo: "101", file: "DSC0101.ARW", flag: -1, rating: 5, label: "red", sel: 3 },
 			{ t: "state", module: "library", photo: null, file: null, flag: 0, rating: 0, label: "none", sel: 0 },
+			{ t: "state", module: "develop", photo: "101", file: "DSC0101.ARW", flag: 0, rating: 0, label: "none", sel: 1, locked: true },
 			{ t: "ranges", ranges: { Temperature: [2000, 50000] } },
 			{ t: "vals", vals: { Exposure: 0.35 } },
 			{ t: "ack", p: "Exposure", v: 5, g: 1 },
@@ -118,6 +125,23 @@ describe("event parsing (PROTOCOL.md, Events)", () => {
 			assert.deepEqual(parsed.evt, raw);
 			assert.deepEqual(parsed.dropped, []);
 		}
+	});
+
+	test("state.locked and err locked: a photo a background AI process holds (Amendments, Phase 6)", () => {
+		const code: ErrCode = "locked";
+		for (const raw of [
+			{ t: "state", module: "library", photo: "101", locked: true },
+			{ t: "state", module: "develop", photo: "101", locked: false },
+			{ t: "err", id: 3, cmd: "reset", code, msg: "photo 101 is locked by a background process" },
+		]) {
+			const parsed = parseEvent(raw);
+			assert.ok(parsed.kind === "event", JSON.stringify(raw));
+			assert.deepEqual(parsed.evt, raw);
+			assert.deepEqual(parsed.dropped, []);
+		}
+		const odd = parseEvent({ t: "state", photo: "101", locked: "yes" });
+		assert.ok(odd.kind === "event");
+		assert.deepEqual([odd.evt, odd.dropped], [{ t: "state", photo: "101" }, ["locked"]], "a locked that isn't a boolean is dropped, so the last reading stands");
 	});
 
 	test("rejects malformed events, ignores unknown types, and drops badly typed optional fields", () => {

@@ -3,7 +3,9 @@ import { afterEach, describe, test } from "node:test";
 
 import { backoffDelay, type ClientTiming, type ConnState, DEFAULT_TIMING, LrClient, LrError } from "../src/lr/client.js";
 import { LrModel } from "../src/model/model.js";
+import type { Log } from "../src/util/log.js";
 import { FakeLr, standardLightroom } from "./helpers/fake-lr.js";
+import { RecordingLog } from "./helpers/recording-log.js";
 import { sleep, waitFor } from "./helpers/wait.js";
 
 /** PROTOCOL.md's timings scaled down about ten times, so heartbeat and backoff tests take a second or two. */
@@ -51,9 +53,9 @@ afterEach(async () => {
 	cleanups = [];
 });
 
-async function setup(lrOpts: Parameters<typeof FakeLr.start>[0], timing: Partial<ClientTiming> = FAST) {
+async function setup(lrOpts: Parameters<typeof FakeLr.start>[0], timing: Partial<ClientTiming> = FAST, log?: Log) {
 	const lr = await FakeLr.start(lrOpts);
-	const client = new LrClient({ cmdPort: lr.cmdPort, evtPort: lr.evtPort, ver: "0.2.0-test", watch: WATCH, timing });
+	const client = new LrClient({ cmdPort: lr.cmdPort, evtPort: lr.evtPort, ver: "0.2.0-test", watch: WATCH, timing, log });
 	const states: ConnState[] = [];
 	client.on("state", (s) => states.push(s));
 	cleanups.push(async () => {
@@ -320,6 +322,28 @@ describe("LrClient", () => {
 		assert.deepEqual(errs, ["guard"]);
 		await assert.rejects(client.request({ t: "reload", mods: ["Develop"] }, { timeoutMs: 100 }), (err: unknown) => err instanceof LrError && err.code === "timeout");
 		assertValidCommands(lr);
+	});
+
+	test("quiet logs: a session logs only the connection at info; a stale refusal is below it, guard and locked at it, the rest warn", async () => {
+		const log = new RecordingLog();
+		const { lr, client } = await setup(standardLightroom(hello(), state()), FAST, log);
+		client.start();
+		await waitFor(() => client.state === "online", "online");
+		await sleep(400); // pings and pongs
+		assert.deepEqual(log.at("info"), [
+			"info connecting to Lightroom on 127.0.0.1, commands " + lr.cmdPort + ", events " + lr.evtPort,
+			"info both sockets connected; saying hello",
+			"info Lightroom connection: offline → online",
+		]);
+		for (const code of ["stale", "guard", "locked", "failed"]) lr.send({ t: "err", cmd: "set", code, msg: "test" });
+		const refusals = (): string[] => log.lines.flatMap((l) => (l.message.startsWith("Lightroom refused") ? [`${l.level} ${l.message}`] : []));
+		await waitFor(() => refusals().length === 4, "the four refusals");
+		assert.deepEqual(refusals(), [
+			"debug Lightroom refused set: stale (test)",
+			"info Lightroom refused set: guard (test)",
+			"info Lightroom refused set: locked (test)",
+			"warn Lightroom refused set: failed (test)",
+		]);
 	});
 
 	test("refuses to send a command that breaks the protocol", async () => {

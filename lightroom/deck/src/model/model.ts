@@ -1,5 +1,17 @@
 import type { ConnState, LrLink } from "../lr/client.js";
-import { type AckEvt, type ErrCode, type ErrEvt, type HelloEvt, type LrEvent, type Range, roundForSend, type StateEvt, type ValsEvt } from "../lr/protocol.js";
+import {
+	type AckEvt,
+	type ErrCode,
+	type ErrEvt,
+	type HelloEvt,
+	type LrEvent,
+	type Range,
+	type ResetCmd,
+	roundForSend,
+	type SetCmd,
+	type StateEvt,
+	type ValsEvt,
+} from "../lr/protocol.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { Emitter } from "../util/emitter.js";
 import { nullLog, type Log } from "../util/log.js";
@@ -45,6 +57,8 @@ export type LrState = {
 	rating: number | null;
 	label: string | null;
 	sel: number | null;
+	/** A background AI process holds the target photo, so the dials don't write (PROTOCOL.md, Locked photos). False until a `state` says so. */
+	locked: boolean;
 };
 
 export type ParamView = {
@@ -56,7 +70,7 @@ export type ParamView = {
 	adjusting: boolean;
 };
 
-export type TurnResult = "applied" | "held" | "offline" | "readonly" | "ignored";
+export type TurnResult = "applied" | "held" | "offline" | "readonly" | "locked" | "noPhoto" | "ignored";
 
 type Param = {
 	value: number | null;
@@ -108,7 +122,7 @@ type Held = { coarse: number; fine: number; spec: StepSpec; origin: Origin; orig
 
 type ModelEvents = { change: []; alert: [origin: Origin, reason: string] };
 
-const EMPTY_STATE: LrState = { module: null, photo: null, file: null, flag: null, rating: null, label: null, sel: null };
+const EMPTY_STATE: LrState = { module: null, photo: null, file: null, flag: null, rating: null, label: null, sel: null, locked: false };
 
 /**
  * The deck's picture of Lightroom: each watched param's value and range, the photo state, and whether
@@ -126,6 +140,14 @@ const EMPTY_STATE: LrState = { module: null, photo: null, file: null, flag: null
  *   Lightroom refuses the gesture's later sets with `err stale`. The deck ends the gesture without a final set
  *   or `done`, raises no alert, and, if it hasn't seen the new photo yet, holds turns for it as after
  *   beforePhotoChange. The next turn is a new gesture from the new photo's value.
+ * - Every `set` and `reset` carries `ph`, the `photo` of the latest `state`, read as it goes out. A photo change
+ *   in Lightroom reaches the deck a few ms late, so a gesture can start from the old photo's value in between;
+ *   Lightroom refuses its sets as stale, as above. A reset refused as stale is dropped, without an alert.
+ * - While the latest `state` names no photo there's no `ph` to send. A press sends no `reset`, and a turn that
+ *   would start a gesture starts none; either alerts the dial, once per burst. Held turns stay held, as before.
+ * - While `state.locked` is true a background AI process holds the photo: the open gesture ends with `done`,
+ *   and turns and presses are dropped rather than held, sending nothing, not even `module develop`. Each dial
+ *   alerts once per burst.
  */
 export class LrModel {
 	readonly #link: LrLink;
@@ -137,6 +159,10 @@ export class LrModel {
 	readonly #held = new Map<string, Held>();
 	readonly #probes = new Map<string, number>();
 	readonly #lastAlert = new Map<Origin, number>();
+	/** While the photo is locked: when each dial was last turned or pressed, for one alert per burst. Cleared when the lock ends. */
+	readonly #lockedInputs = new Map<Origin, number>();
+	/** While the latest state names no photo: when each dial last had a press or a turn refused, for one alert per burst. Cleared when a state names one. */
+	readonly #noPhotoInputs = new Map<Origin, number>();
 	#holdTimer: TimerHandle | null = null;
 	#moduleAsked = false;
 	/** Turns wait until then: a photo change the deck asked for, or one a stale err revealed, may still be landing (see beforePhotoChange). 0 when none is. */
@@ -223,6 +249,10 @@ export class LrModel {
 			this.#alert(origin, `turned ${p} while Lightroom is ${this.#conn}`);
 			return "offline";
 		}
+		if (this.#state.locked) {
+			this.#lockedInput(origin, `turned ${p}`);
+			return "locked";
+		}
 		if (this.writable === false) {
 			this.#probe(p, ticks, fine, spec, origin);
 			return "readonly";
@@ -232,6 +262,13 @@ export class LrModel {
 			this.#hold(p, ticks, fine, spec, origin);
 			this.#changed();
 			return "held";
+		}
+		// Values can reach the deck ahead of the state that names their photo: Lightroom answers watch with the
+		// target photo's ranges and vals, even before that photo's state has gone out. A set now would go without
+		// ph, unchecked, to whatever photo Lightroom is on.
+		if (this.#state.photo === null) {
+			this.#noPhotoInput(origin, `turned ${p}`);
+			return "noPhoto";
 		}
 		this.#apply(p, ticks, fine, spec, origin);
 		this.#changed();
@@ -250,26 +287,44 @@ export class LrModel {
 			this.#alert(origin, `reset ${p} while Lightroom is ${this.#conn}`);
 			return false;
 		}
+		if (this.#state.locked) {
+			this.#lockedInput(origin, `reset ${p}`);
+			return false;
+		}
+		// No photo to send as ph: unchecked, the reset could land on a photo Lightroom has just gained (PROTOCOL.md,
+		// Gestures). Refused before anything changes, so no gesture ends and held turns stay.
+		if (this.#state.photo === null) {
+			this.#noPhotoInput(origin, `reset ${p}`);
+			return false;
+		}
 		// Lightroom's reset ends any gesture; finish ours so the wire agrees with it.
 		const g = this.#active;
+		// A gesture of p that this reset ends without done. Lightroom still tracks it if it refuses the reset.
+		let cancelled: Gesture | null = null;
 		if (g && g.open) {
-			if (g.p === p) this.#abort(g, false);
-			else this.#endNow(g);
+			if (g.p === p) {
+				this.#abort(g, false);
+				if (g.sets > 0) cancelled = g;
+			} else this.#endNow(g);
 		}
 		this.#held.delete(p);
 		if (this.#held.size === 0) this.#clearHold();
 		const param = this.#param(p);
-		const sent = this.#link.send(
-			{ t: "reset", p },
-			{
-				onErr: (err) => {
-					param.resetPendingUntil = 0;
+		const sent = this.#link.send(this.#withPhoto({ t: "reset", p }), {
+			onErr: (err) => {
+				param.resetPendingUntil = 0;
+				if (err.code === ("stale" satisfies ErrCode)) {
+					// Lightroom is on a photo the deck hasn't heard of yet, and the reset was meant for the old one.
+					this.#log.debug(`Lightroom refused reset ${p} as stale: it's on another photo; dropping the reset`);
+				} else {
 					this.#alert(origin, `Lightroom refused reset ${p}: ${err.code}`);
-					this.#applyHeld();
-					this.#changed();
-				},
+					// A locked photo changed nothing, so Lightroom still tracks the gesture the reset ended.
+					if (err.code === ("locked" satisfies ErrCode) && cancelled) this.#link.send({ t: "done", g: cancelled.g });
+				}
+				this.#applyHeld();
+				this.#changed();
 			},
-		);
+		});
 		if (!sent) {
 			this.#alert(origin, `couldn't send reset ${p}`);
 			return false;
@@ -401,7 +456,7 @@ export class LrModel {
 		let v = roundForSend(g.p, clampToRange(g.value, range));
 		v = clampToRange(v, range);
 		if (v !== g.sent) {
-			const sent = this.#link.send({ t: "set", p: g.p, v, g: g.g }, { onErr: (err) => this.#onSetErr(g, err) });
+			const sent = this.#link.send(this.#withPhoto({ t: "set", p: g.p, v, g: g.g }), { onErr: (err) => this.#onSetErr(g, err) });
 			if (sent) {
 				g.sent = v;
 				g.sets += 1;
@@ -500,9 +555,10 @@ export class LrModel {
 	}
 
 	/**
-	 * Lightroom refused a set of `g` with err stale: the photo or module changed under the gesture, and its
-	 * values, worked out from the old photo, changed nothing (PROTOCOL.md, Gestures). Each of g's sets still in
-	 * flight gets its own err; only the first does anything. None raises an alert.
+	 * Lightroom refused a set of `g` with err stale: the photo or module changed under the gesture, or before the
+	 * deck heard of the change the gesture began from the old photo's value, which its `ph` shows. Its values,
+	 * worked out from the old photo, changed nothing (PROTOCOL.md, Gestures). Each of g's sets still in flight
+	 * gets its own err; only the first does anything. None raises an alert.
 	 *
 	 * - If a `state` with another photo or module arrived after `g` began, the deck already knows. That state
 	 *   ended `g`, and the model has the new photo's values or is waiting for them, so nothing more happens. In
@@ -575,9 +631,62 @@ export class LrModel {
 		}
 		const steps = stepsFor(spec, param.range);
 		const v = clampToRange(roundForSend(p, clampToRange(param.value + ticks * (fine ? steps.fine : steps.step), param.range)), param.range);
-		const sent = this.#link.send({ t: "set", p, v, g: ++this.#gseq }, { onErr: (err) => this.#alert(origin, `Lightroom refused set ${p}: ${err.code}`) });
+		const sent = this.#link.send(this.#withPhoto({ t: "set", p, v, g: ++this.#gseq }), { onErr: (err) => this.#alert(origin, `Lightroom refused set ${p}: ${err.code}`) });
 		if (sent) param.lastSentAt = now;
 		else this.#alert(origin, `couldn't send set ${p}`);
+	}
+
+	// ---- locked photos ----
+
+	/**
+	 * A background AI process locked the target photo (PROTOCOL.md, Locked photos), and Lightroom refuses every
+	 * set and reset until it finishes. The open gesture ends with `done` but without its pending final set, and
+	 * held turns are dropped, with an alert on their dials.
+	 */
+	#onLock(): void {
+		const g = this.#active;
+		if (g && g.open) {
+			this.#log.debug(`ending gesture ${g.g} on ${g.p}: the photo is locked`);
+			if (g.sendTimer !== null) this.#clock.clearTimeout(g.sendTimer);
+			g.sendTimer = null;
+			this.#finishEnd(g);
+		}
+		if (this.#held.size > 0) this.#dropHeld("the photo is locked by a background process", (origin) => this.#lockedInput(origin, "held turn"));
+	}
+
+	/**
+	 * A turn or press while the photo is locked: nothing goes out and nothing is held. The dial alerts once per
+	 * burst, a burst being inputs on one dial less than doneAfterMs apart, like the ticks of one gesture.
+	 */
+	#lockedInput(origin: Origin, what: string): void {
+		this.#burstAlert(this.#lockedInputs, origin, `${what}: the photo is locked by a background process`);
+	}
+
+	/**
+	 * A press, or a turn that would start a gesture, while the latest `state` names no photo: there's no `ph` to
+	 * send, so nothing goes out. Nothing else changes either. The dial alerts once per burst, as while locked.
+	 */
+	#noPhotoInput(origin: Origin, what: string): void {
+		this.#burstAlert(this.#noPhotoInputs, origin, `${what}: Lightroom has no target photo`);
+	}
+
+	/** Alerts `origin` on the first input of a burst: inputs on one dial less than doneAfterMs apart. */
+	#burstAlert(inputs: Map<Origin, number>, origin: Origin, reason: string): void {
+		const now = this.#clock.now();
+		const last = inputs.get(origin);
+		inputs.set(origin, now);
+		if (last === undefined || now - last >= this.#timing.doneAfterMs) this.#alert(origin, reason);
+	}
+
+	/**
+	 * Adds `ph`, the `photo` of the latest `state`, as a `set` or `reset` goes out, so Lightroom can refuse one
+	 * worked out for another photo (PROTOCOL.md, Gestures). While the state names no photo there's no id to send,
+	 * so reset() sends nothing, turn() starts no gesture and held turns wait (#applyHeld). Only the read-only probe
+	 * then goes without `ph`: the guard refuses it before Lightroom looks at any photo.
+	 */
+	#withPhoto<C extends SetCmd | ResetCmd>(cmd: C): C {
+		const ph = this.#state.photo;
+		return ph === null ? cmd : { ...cmd, ph };
 	}
 
 	// ---- held ticks ----
@@ -606,9 +715,14 @@ export class LrModel {
 		}
 	}
 
-	/** Applies held ticks whose param now has a value for the current photo in Develop. */
+	/**
+	 * Applies held ticks whose param now has a value for the current photo in Develop. While the state names no
+	 * photo they wait, even with values that came ahead of their photo's state: a set would go without `ph`. The
+	 * state that names the photo marks those values stale, so the ticks then wait for its own.
+	 */
 	#applyHeld(): void {
-		if (this.#held.size === 0 || this.#conn !== "online" || !this.inDevelop || this.writable === false) return;
+		if (this.#held.size === 0 || this.#conn !== "online" || !this.inDevelop || this.writable === false || this.#state.locked) return;
+		if (this.#state.photo === null) return;
 		for (const [p, h] of [...this.#held]) {
 			if (!this.#usable(this.#param(p))) continue;
 			this.#held.delete(p);
@@ -618,10 +732,10 @@ export class LrModel {
 		if (this.#held.size === 0) this.#clearHold();
 	}
 
-	#dropHeld(why: string): void {
+	#dropHeld(why: string, alert: (origin: Origin) => void = (origin) => this.#alert(origin, why)): void {
 		if (this.#held.size > 0) {
 			this.#log.info(`dropped held ticks for ${[...this.#held.keys()].join(", ")}: ${why}`);
-			for (const h of this.#held.values()) for (const origin of h.origins) this.#alert(origin, why);
+			for (const h of this.#held.values()) for (const origin of h.origins) alert(origin);
 		}
 		this.#held.clear();
 		this.#clearHold();
@@ -677,6 +791,7 @@ export class LrModel {
 		if (evt.rating !== undefined) next.rating = evt.rating;
 		if (evt.label !== undefined) next.label = evt.label;
 		if (evt.sel !== undefined) next.sel = evt.sel;
+		if (evt.locked !== undefined) next.locked = evt.locked;
 		this.#state = next;
 		if (next.photo !== prev.photo || next.module !== prev.module) {
 			// The values and ranges belong to the old photo or module now; new ones arrive as vals and ranges in
@@ -693,6 +808,10 @@ export class LrModel {
 				this.#clearEcho(param);
 			}
 		}
+		// Moving onto a locked photo does both: the photo change above ends the gesture, and the lock drops the turns held for the new photo.
+		if (next.locked && !prev.locked) this.#onLock();
+		else if (!next.locked && prev.locked) this.#lockedInputs.clear();
+		if (next.photo !== null) this.#noPhotoInputs.clear();
 		this.#applyHeld();
 		this.#changed();
 	}

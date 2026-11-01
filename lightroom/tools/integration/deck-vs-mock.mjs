@@ -7,17 +7,21 @@
 //
 // - The plugin: lightroom/deck/com.karimdhanji.lightroom.sdPlugin is copied to a temp folder, so the real
 //   plugin's logs stay untouched, and its bin/plugin.js runs there with lightroom/deck/scripts/smoke-guard.mjs
-//   preloaded: any connection to 58780/58781 throws. Build it first (npm run build in lightroom/deck).
+//   preloaded: any connection to 58780/58781 throws. Build it first (npm run build in lightroom/deck). The copy
+//   gets a log-level.txt saying debug, so the log checks see the plugin's debug lines as well.
 // - The Stream Deck app: a fake one speaking the plugin's SDK WebSocket protocol, after scripts/smoke.mjs. It
 //   needs ws from lightroom/deck/node_modules.
 // - Lightroom: startMock on ephemeral ports and the real clock, given to the plugin as DECKBRIDGE_CMD_PORT and
 //   DECKBRIDGE_EVT_PORT.
 //
-// The checks look at the mock's state (values, flags, target, view, history) and at what the plugin sends the
-// app (strip feedback, key images, alerts). It prints one ok/FAIL line per check and, on a failure, the tail of
-// the plugin's log. It exits 0 when every check passes, 1 when one fails, and 2 when it can't start. --keep
-// keeps the temp folder, with the plugin's log and conversation.jsonl (every command, event and app message, in
-// order). Nothing here touches Lightroom, the Stream Deck app or the deck.
+// Steps 1-8 are a session in which everything succeeds. Steps 9-16 are Phase 6's: the ph race, locked photos,
+// read-only mode, a version mismatch, two dials at once, clamping, presets that change sliders, and held ticks
+// dropped after 2 s. Step 17 checks rules over the whole session, allowing only the alerts and errs those steps
+// expect. The checks look at the mock's state (values, flags, target, view, history) and at what the plugin
+// sends the app (strip feedback, key images, alerts). It prints one ok/FAIL line per check and, on a failure,
+// the tail of the plugin's log. It exits 0 when every check passes, 1 when one fails, and 2 when it can't start.
+// --keep keeps the temp folder, with the plugin's log and conversation.jsonl (every command, event and app
+// message, in order). Nothing here touches Lightroom, the Stream Deck app or the deck.
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -27,7 +31,7 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { loadScenario, startMock } from '../mock-lr/index.mjs';
-import { defaultRange } from '../lib/params.mjs';
+import { defaultRange, TEST_CATALOG } from '../lib/params.mjs';
 import { validateCommand } from '../../deck/src/lr/validate.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -84,10 +88,19 @@ function display(slot, v, range) {
 
 const SCENARIO = loadScenario(); // the mock's default scenario
 const PRESET = SCENARIO.presets[0]; // Cobalt Classic Chrome, profile-only
+// The two presets that change sliders, for step 15.
+const PUNCHY = SCENARIO.presets.find((p) => p.name === 'Punchy');
+const SOFT = SCENARIO.presets.find((p) => p.name === 'Soft Matte');
+if (PUNCHY?.values?.Contrast === undefined || SOFT?.values?.Contrast === undefined) {
+  fatal("the mock's default scenario no longer has the Punchy and Soft Matte presets, which set Contrast: update this script");
+}
+// Any catalog but the test catalog: the guard refuses writes there (step 11). The mock opens no files.
+const OTHER_CATALOG = '/Users/karimdhanji/Pictures/Another Catalog/Another Catalog.lrcat';
 
 // ---- checks ----
 
 const now = () => performance.now();
+const WALL0 = Date.now() - now(); // log lines carry wall-clock times: now() = Date.now() - WALL0
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let exited = null; // the plugin process's exit, once it has exited
 const results = [];
@@ -134,7 +147,6 @@ const lost = []; // events that vanished into a stale or dead event socket
 const mockLog = [];
 let gen = 0;
 let mock = null;
-let lastPollAt = -Infinity; // when the mock last ran its 200 ms poll, which is how it learns of the user's photo changes
 
 async function startWatchedMock(ports = { cmd: 0, evt: 0 }) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -156,13 +168,9 @@ async function startWatchedMock(ports = { cmd: 0, evt: 0 }) {
       received.push({ at: now(), gen: g, conn: m.server.connections.cmd, line, cmd });
       receive(line);
     };
+    // Written means on the socket: with delayEvents, later than Lightroom sent it.
     m.control.on('sent', (obj) => sent.push({ at: now(), gen: g, obj, target: m.lr.target }));
     m.control.on('lost', (obj) => lost.push({ at: now(), gen: g, obj }));
-    const poll = m.lr.poll.bind(m.lr);
-    m.lr.poll = () => {
-      lastPollAt = now();
-      poll();
-    };
     return m;
   }
   throw new Error('the OS kept handing out a DeckBridge port');
@@ -181,6 +189,8 @@ const describeMock = () => {
   const s = st();
   return `mock: ${s.module}, target ${s.target}, Exposure ${value('Exposure')}, Contrast ${value('Contrast')}, tracking ${s.tracking}, clients ${JSON.stringify(s.clients)}`;
 };
+const describeCmds = (t) => JSON.stringify(cmdsSince(t, (c) => c.t !== 'ping'));
+const describeErrs = (t) => JSON.stringify(sentSince(t, (o) => o.t === 'err').map((s) => s.obj));
 
 // ---- the fake Stream Deck app ----
 
@@ -233,6 +243,8 @@ const KEYS = {
   prev: { action: 'prev', context: 'key-prev', coordinates: { column: 0, row: 1 }, settings: {} },
   ba: { action: 'before-after', context: 'key-ba', coordinates: { column: 1, row: 1 }, settings: {} },
   preset: { action: 'preset', context: 'key-preset', coordinates: { column: 2, row: 1 }, settings: { uuid: PRESET.uuid, name: PRESET.name } },
+  // A second Apply Preset key, for step 15's presets that change sliders.
+  sliders: { action: 'preset', context: 'key-sliders', coordinates: { column: 3, row: 1 }, settings: { uuid: PUNCHY.uuid, name: PUNCHY.name } },
 };
 const keyMsg = (event, k) => toPlugin({ event, action: `${UUID}.${k.action}`, context: k.context, device: DEVICE, payload: payload('Keypad', k.coordinates, k.settings, { state: 0 }) });
 async function press(k) {
@@ -257,26 +269,35 @@ function stripClimbsFrom(photo, base, since) {
 }
 const image = (context) => images.get(context) ?? '';
 let NEXT_LIT = null; // the Next key's image while online, learnt in step 1: it changes only with the connection
+let PRESET_LIT = null; // the Apply Preset key's image while online and writable, learnt in step 1
 const nextKeyDimmedSince = (since) => imageEvents.some((e) => e.at >= since && e.context === KEYS.next.context && e.svg !== NEXT_LIT);
 const alerts = () => app.messages.filter((m) => m.msg.event === 'showAlert');
+const alertsOn = (context, since) => alerts().filter((m) => m.at >= since && m.msg.context === context).length;
+const alertCounts = (since) => {
+  const counts = {};
+  for (const m of alerts()) if (m.at >= since) counts[m.msg.context] = (counts[m.msg.context] ?? 0) + 1;
+  return counts;
+};
 const fromPluginSince = (t, pred) => app.messages.filter((m) => m.at >= t && pred(m.msg)).map((m) => m.msg);
 
 let bank = 0; // the bank the dials should be on, 0-based
 let LIT = null; // a strip's label and value colours when live in Develop, learnt in step 1
 
-function wantStrip(b, col, s) {
+// With a status word (Locked, Mismatch), each slot shows the word in place of its value.
+function wantStrip(b, col, s, word = null) {
   const slot = slotAt(b, col);
   const bankText = `${b + 1}/${BANKS.banks.length}`;
   if (!slot) return { label: '—', value: '', bank: bankText };
+  if (word) return { label: slot.label, value: word, bank: bankText };
   const ph = s.photos[s.target];
   return { label: slot.label, value: display(slot, ph.values[slot.param], defaultRange(ph.fmt, slot.param)), bank: bankText };
 }
-// What differs between the four strips and the mock's values for its target photo, on bank b.
-function stripMismatches(b = bank) {
+// What differs between the four strips and the mock's values for its target photo (or the word), on bank b.
+function stripMismatches(b = bank, word = null) {
   const s = st();
   const bad = [];
   for (const col of DIALS) {
-    const want = wantStrip(b, col, s);
+    const want = wantStrip(b, col, s, word);
     const got = strip(col);
     const g = { label: got.label?.value, value: got.value?.value, bank: got.bank?.value };
     if (g.label !== want.label || g.value !== want.value || g.bank !== want.bank) {
@@ -285,10 +306,27 @@ function stripMismatches(b = bank) {
   }
   return bad;
 }
-const stripsMatch = (b = bank) => stripMismatches(b).length === 0;
+const stripsMatch = (b = bank, word = null) => stripMismatches(b, word).length === 0;
 const lit = (col) => strip(col).label?.color === LIT.label && strip(col).value?.color === LIT.value;
 const dimmed = (col) => strip(col).label?.color !== LIT.label && strip(col).value?.color !== LIT.value;
-const stripsWhy = () => `${stripMismatches().join('; ') || 'texts match'}; colours ${DIALS.map((c) => `${strip(c).label?.color}/${strip(c).value?.color}`).join(' ')}; ${describeMock()}`;
+const stripsWhy = (word = null) => `${stripMismatches(bank, word).join('; ') || 'texts match'}; colours ${DIALS.map((c) => `${strip(c).label?.color}/${strip(c).value?.color}`).join(' ')}; ${describeMock()}`;
+
+// Taps the strips once round every bank, back to the one they started on, waiting at each bank for its strips:
+// the mock's values, or `word` in place of each value.
+async function tapRound(what, word = null) {
+  for (let i = 1; i <= BANKS.banks.length; i += 1) {
+    touch(i % 4);
+    bank = (bank + 1) % BANKS.banks.length;
+    const names = DIALS.map((c) => slotAt(bank, c)?.label ?? '—').join(', ');
+    await waitFor(`${what}: bank ${bank + 1} (${names})`, () => stripsMatch(bank, word), 2000, () => stripsWhy(word));
+  }
+}
+
+// ---- what steps 9-16 expect, for the checks over the whole session (now() times) ----
+
+const alertWindows = []; // { from, to, contexts }: alerts on these dials and keys
+const errWindows = []; // { from, to, codes }: errs with these codes
+const warnWindows = []; // { from, to, re }: WARN lines in the plugin's log
 
 // ---- the plugin's log ----
 
@@ -304,12 +342,24 @@ function logText() {
     .join('');
 }
 const logCount = (re) => logText().split('\n').filter((l) => re.test(l)).length;
+// A log line a step expects: an alert for a dial it used, or a warning it allows, within the step. Log lines
+// start with their wall-clock time, to the ms.
+function expectedLogLine(line) {
+  const at = Date.parse(line.slice(0, 24)) - WALL0;
+  if (!Number.isFinite(at)) return false;
+  const within = (w) => at >= w.from - 100 && at <= w.to + 100;
+  const alert = line.match(/alert for (\S+): /);
+  if (alert) return alertWindows.some((w) => within(w) && w.contexts.includes(alert[1]));
+  return warnWindows.some((w) => within(w) && w.re.test(line));
+}
 
 // ---- run ----
 
 const tmp = mkdtempSync(path.join(os.tmpdir(), 'deck-vs-mock-'));
 pluginDir = path.join(tmp, `${UUID}.sdPlugin`); // the SDK names its log after this folder
-cpSync(SOURCE, pluginDir, { recursive: true, filter: (src) => !src.startsWith(path.join(SOURCE, 'logs')) });
+// The user's own log-level.txt stays behind: the copy logs at debug.
+cpSync(SOURCE, pluginDir, { recursive: true, filter: (src) => !src.startsWith(path.join(SOURCE, 'logs')) && path.basename(src) !== 'log-level.txt' });
+writeFileSync(path.join(pluginDir, 'log-level.txt'), 'debug\n');
 
 mock = await startWatchedMock();
 for (let attempt = 0; ; attempt += 1) {
@@ -335,12 +385,12 @@ child.stdout.on('data', (d) => { childOutput += d; });
 child.stderr.on('data', (d) => { childOutput += d; });
 child.on('exit', (code, signal) => { exited = { code, signal }; });
 const deadline = setTimeout(() => {
-  console.error('deck-vs-mock: gave up after 180 s');
+  console.error('deck-vs-mock: gave up after 300 s');
   console.log(`\n--- plugin log (last 80 lines) ---\n${logText().split('\n').slice(-81).join('\n')}`);
   child.kill('SIGKILL');
   if (!KEEP) rmSync(tmp, { recursive: true, force: true });
   process.exit(1);
-}, 180_000);
+}, 300_000);
 deadline.unref();
 
 class Abort extends Error {}
@@ -348,8 +398,7 @@ const must = (ok) => {
   if (!ok) throw new Abort();
 };
 
-// For the checks at the end: step 6's window, step 8c's pause, and each mock's history.
-let staleWindow = null;
+// For the checks at the end: step 8c's pause, and each mock's history.
 const pauses = [];
 const histories = [];
 
@@ -370,6 +419,7 @@ try {
     return Object.entries(want).every(([k, text]) => image(KEYS[k].context).includes(text));
   }, 3000, () => Object.keys(KEYS).map((k) => `${k} ${image(KEYS[k].context).match(/>([^<]+)</g)?.join('') ?? 'no image'}`).join('; '));
   NEXT_LIT = image(KEYS.next.context);
+  PRESET_LIT = image(KEYS.preset.context);
 
   // ---------------------------------------------------------------------------------------------------------
   section('2. Turning Exposure');
@@ -541,7 +591,7 @@ try {
         // Just after a poll, so the next tick's set reaches the mock well before the poll that would notice the
         // switch: Lightroom refuses it as stale before the deck has seen the new photo. (Ending that gesture runs
         // the mock's observer, which then sends the new photo's state, as the plugin's afterAdjustment does.)
-        await until(() => now() - lastPollAt < 10, 400);
+        await mock.control.nextPoll();
         tSwitch = now();
         mock.control.user({ photo: Y });
       }
@@ -552,7 +602,7 @@ try {
     const tStop = now();
     await until(() => !st().tracking && cmdsSince(tStop - 50, (c) => c.t === 'done').length >= 1, 3000);
     await sleep(400);
-    staleWindow = [tSwitch, now()];
+    errWindows.push({ from: tSwitch, to: now(), codes: ['stale'] });
 
     const acks = sentSince(t, (o) => o.t === 'ack' && o.p === 'Exposure');
     const oldGs = new Set(acks.filter((a) => a.target === X).map((a) => a.obj.g));
@@ -610,7 +660,7 @@ try {
       rotate(EXPOSURE, 1);
       await sleep(50);
     }
-    await until(() => now() - lastPollAt < 10, 400);
+    await mock.control.nextPoll();
     const tSwitch = now();
     mock.control.user({ photo: Z });
     await sleep(450); // the dial rests; the next poll tells the deck about Z, well inside the 800 ms before done
@@ -728,10 +778,488 @@ try {
   }
 
   // ---------------------------------------------------------------------------------------------------------
-  section('9. The whole session');
+  section("9. The ph race: the user moves to another photo, and the deck turns before it hears");
+  {
+    // Back to bank 1, where Exposure and Contrast are.
+    while (bank !== 0) {
+      touch(0);
+      bank = (bank + 1) % BANKS.banks.length;
+      await sleep(100);
+    }
+    await waitFor('taps bring the dials back round to bank 1', () => stripsMatch(), 2000, stripsWhy);
+    await sleep(500);
+    const X = st().target;
+    const [Y, Z] = st().order.filter((id) => id !== X && !st().photos[id].locked);
+    const xBase = value('Exposure', X);
+    const yBase = value('Exposure', Y);
+    const alerts0 = alerts().length;
+    const history0 = st().history.length;
+    // Just after a poll, the mock stops noticing photo changes by itself (PROTOCOL.md, Gestures: "The photo the
+    // deck worked from"). The user moves to Y meanwhile, so the deck's latest state still says X.
+    await mock.control.nextPoll();
+    mock.control.holdPoll(10_000);
+    const t = now();
+    mock.control.user({ photo: Y });
+    rotate(EXPOSURE, 1);
+    const firstSet = () => cmdsSince(t, (c) => c.t === 'set')[0];
+    await waitFor(`a turn before the deck hears of ${Y}: its set carries ph ${X}, from its latest state, and Lightroom refuses it with err stale`, () => {
+      const set = firstSet();
+      return set !== undefined && set.ph === X && sentSince(t, (o) => o.t === 'err' && o.id === set.id && o.code === 'stale').length === 1;
+    }, 1000, () => `${describeCmds(t)}; errs ${describeErrs(t)}`);
+    const refused = firstSet();
+    const errAt = sentSince(t, (o) => o.t === 'err')[0]?.at ?? now();
+    // The deck on stale: it holds turns for the new photo, for up to 500 ms.
+    for (let i = 0; i < 3; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(40);
+    }
+    check(`nothing landed on either photo: ${X} keeps ${xBase}, ${Y} keeps ${yBase}, and the three turns after the refusal sent nothing`,
+      value('Exposure', X) === xBase && value('Exposure', Y) === yBase && cmdsSince(errAt, (c) => c.t === 'set').length === 0 && sentSince(t, (o) => o.t === 'ack').length === 0 && st().history.length === history0,
+      `${X} ${value('Exposure', X)}, ${Y} ${value('Exposure', Y)}; sets after the err ${JSON.stringify(cmdsSince(errAt, (c) => c.t === 'set'))}; ${sentSince(t, (o) => o.t === 'ack').length} acks; history ${JSON.stringify(st().history.slice(history0))}`);
+    const tRelease = now();
+    mock.control.holdPoll(0);
+    await mock.control.nextPoll();
+    const want = round2(yBase + 3 * STEP);
+    await waitFor(`once ${Y}'s state and values reach the deck, the held turns go out with ph ${Y} and move ${Y} from its own value (3 ticks: ${yBase} to ${want})`, () => {
+      const sets = cmdsSince(tRelease, (c) => c.t === 'set');
+      return near(value('Exposure', Y), want) && sets.length > 0 && sets.every((c) => c.ph === Y);
+    }, 2000, () => `${describeMock()}; ${Y} at ${value('Exposure', Y)}; sets ${JSON.stringify(cmdsSince(tRelease, (c) => c.t === 'set'))}`);
+    await until(() => !st().tracking && cmdsSince(tRelease, (c) => c.t === 'done').length >= 1, 3000);
+    await sleep(400);
+    const lateDones = received.filter((r) => r.at >= t && r.cmd?.t === 'done' && r.cmd.g === refused?.g).length;
+    check(`${X} still has ${xBase}, and the refused gesture got no done: Lightroom had ended it`, value('Exposure', X) === xBase && refused !== undefined && lateDones === 0, `${X} ${value('Exposure', X)}; ${lateDones} done for g ${refused?.g}`);
+    await waitFor(`the strips show ${Y}'s values`, () => stripsMatch(), 2000, stripsWhy);
+    // The held turns paint within a ms of Y's vals, and the dial rests meanwhile, so the window starts at the vals.
+    const valsAt = sent.find((s) => s.at >= tRelease && s.obj.t === 'vals' && 'Exposure' in s.obj.vals && s.target === Y)?.at;
+    const texts = valsAt === undefined ? [] : shownSince(EXPOSURE, valsAt);
+    check(`once the deck had ${Y}'s values, the Exposure strip showed only values from ${Y}'s ${yBase} to ${want}`,
+      texts.length > 0 && texts.every((s) => Number(s) >= yBase - 0.006 && Number(s) <= want + 0.006) && texts.at(-1) === display(slotAt(0, EXPOSURE), want, [-5, 5]), texts.join(' ') || 'nothing shown');
+
+    // A press in the same window: the reset carries the old photo too, and Lightroom refuses it the same way.
+    await sleep(300);
+    const yNow = value('Exposure', Y);
+    const zBase = value('Exposure', Z);
+    const history1 = st().history.length;
+    await mock.control.nextPoll();
+    mock.control.holdPoll(10_000);
+    const t2 = now();
+    mock.control.user({ photo: Z });
+    dialDown(EXPOSURE);
+    await sleep(80);
+    dialUp(EXPOSURE);
+    await waitFor(`a press before the deck hears of ${Z}: its reset carries ph ${Y}, and Lightroom refuses it with err stale`, () => {
+      const reset = cmdsSince(t2, (c) => c.t === 'reset')[0];
+      return reset !== undefined && reset.ph === Y && sentSince(t2, (o) => o.t === 'err' && o.id === reset.id && o.code === 'stale').length === 1;
+    }, 1000, () => `${describeCmds(t2)}; errs ${describeErrs(t2)}`);
+    await sleep(100);
+    check(`the reset landed nowhere: ${Y} keeps ${yNow} and ${Z} keeps ${zBase}`, value('Exposure', Y) === yNow && value('Exposure', Z) === zBase && st().history.length === history1 && sentSince(t2, (o) => o.t === 'ack').length === 0,
+      `${Y} ${value('Exposure', Y)}, ${Z} ${value('Exposure', Z)}; history ${JSON.stringify(st().history.slice(history1))}`);
+    mock.control.holdPoll(0);
+    await mock.control.nextPoll();
+    await waitFor(`the strips show ${Z}'s values`, () => stripsMatch(), 2000, stripsWhy);
+    const t3 = now();
+    for (let i = 0; i < 2; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    const want2 = round2(zBase + 2 * STEP);
+    await waitFor(`the next turn works on ${Z}: 2 ticks take it from ${zBase} to ${want2}, with ph ${Z}`, () => near(value('Exposure', Z), want2) && cmdsSince(t3, (c) => c.t === 'set').every((c) => c.ph === Z) && cmdsSince(t3, (c) => c.t === 'done').length === 1, 3000, describeMock);
+    await sleep(400);
+    errWindows.push({ from: t, to: now(), codes: ['stale'] });
+    check('the ph race raised no alert', alerts().length === alerts0, `${alerts().length - alerts0} alerts`);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('10. Locked photos');
+  {
+    // 10a: a background AI process, such as Denoise, locks the photo while a turn is still open.
+    await sleep(300);
+    const X = st().target;
+    let base = value('Exposure');
+    const history0 = st().history.length;
+    let t = now();
+    for (let i = 0; i < 3; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    const lastTick = now() - 50;
+    await sleep(60); // every set is out, and done is still 700 ms away
+    const tLock = now();
+    mock.control.user({ locked: [X] });
+    const lockedState = () => sentSince(tLock, (o) => o.t === 'state' && o.locked === true)[0];
+    await waitFor(`a background process locks ${X} mid-turn: the mock's next poll sends state.locked, and the strips say Locked, dimmed`, () => lockedState() !== undefined && stripsMatch(bank, 'Locked') && DIALS.every(dimmed), 1000, () => stripsWhy('Locked'));
+    const lockedAt = lockedState()?.at ?? Infinity;
+    const done = received.find((r) => r.at >= t && r.cmd?.t === 'done');
+    check('the deck ended the open turn with done as soon as it saw state.locked, not 800 ms after its last tick', done !== undefined && done.at >= lockedAt && done.at - lockedAt < 100 && done.at - lastTick < 700,
+      done === undefined ? 'no done' : `${Math.round(done.at - lockedAt)} ms after state.locked, ${Math.round(done.at - lastTick)} ms after the last tick`);
+    await sleep(100);
+    let want = round2(base + 3 * STEP);
+    const steps = st().history.slice(history0);
+    check(`no set after state.locked: the turn is one history step, ended by that done, and ${X} keeps its last value (${want})`,
+      cmdsSince(lockedAt, (c) => c.t === 'set').length === 0 && steps.length === 1 && steps[0].kind === 'gesture' && steps[0].why === 'done' && near(value('Exposure'), want, 1e-9), `${value('Exposure')}; history ${JSON.stringify(steps)}`);
+
+    // 10b: while it's locked, every input on a dial does nothing but alert that dial, once per burst.
+    await sleep(1100);
+    const before = JSON.stringify(st().photos[X].values);
+    t = now();
+    for (let i = 0; i < 5; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    for (let i = 0; i < 3; i += 1) {
+      rotate(CONTRAST, -1);
+      await sleep(50);
+    }
+    dialDown(1);
+    await sleep(30);
+    rotate(1, 2, true);
+    await sleep(45);
+    rotate(1, 2, true);
+    await sleep(45);
+    dialUp(1);
+    await sleep(100);
+    touch(0, true);
+    await sleep(1200); // a new burst on Exposure's dial, past the 1 s between alerts
+    dialDown(EXPOSURE);
+    await sleep(80);
+    dialUp(EXPOSURE);
+    await sleep(300);
+    alertWindows.push({ from: t, to: now(), contexts: DIALS.map(dialContext) });
+    const counts = alertCounts(t);
+    check('while locked, turns, push + turn, a long touch and a press send Lightroom nothing', cmdsSince(t, (c) => c.t !== 'ping').length === 0, describeCmds(t));
+    check('each dial alerts once per burst: Temp (long touch), Tint (push + turn) and Contrast (turn) once, Exposure twice (a turn, then a press 1.2 s later)',
+      counts['dial-0'] === 1 && counts['dial-1'] === 1 && counts['dial-3'] === 1 && counts['dial-2'] === 2 && Object.keys(counts).length === 4, JSON.stringify(counts));
+    check(`${X}'s values didn't move, and the strips still say Locked`, JSON.stringify(st().photos[X].values) === before && stripsMatch(bank, 'Locked'), stripsWhy('Locked'));
+
+    // 10c: tapping a strip still changes the bank.
+    t = now();
+    await tapRound('a tap still changes banks while locked, and every bank says Locked', 'Locked');
+    check('the taps sent nothing and raised no alert', cmdsSince(t, (c) => c.t !== 'ping').length === 0 && alerts().filter((m) => m.at >= t).length === 0, `${describeCmds(t)}; ${JSON.stringify(alertCounts(t))}`);
+
+    // 10d: outside Develop a locked dial doesn't ask for Develop either.
+    t = now();
+    mock.control.user({ module: 'library' });
+    await waitFor('the user moves the mock to Library: its state still says locked, and so do the strips', () => sentSince(t, (o) => o.t === 'state' && o.module === 'library' && o.locked === true).length === 1 && stripsMatch(bank, 'Locked'), 1000, () => stripsWhy('Locked'));
+    await sleep(1100);
+    t = now();
+    for (let i = 0; i < 3; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    await sleep(300);
+    alertWindows.push({ from: t, to: now(), contexts: [dialContext(EXPOSURE)] });
+    check('a turn in Library sends no module develop, nothing at all: the mock stays in Library, and the dial alerts once',
+      cmdsSince(t, (c) => c.t !== 'ping').length === 0 && st().module === 'library' && alertsOn(dialContext(EXPOSURE), t) === 1 && alerts().filter((m) => m.at >= t).length === 1, `${describeCmds(t)}; module ${st().module}; ${JSON.stringify(alertCounts(t))}`);
+    t = now();
+    mock.control.user({ module: 'develop' });
+    await waitFor('back in Develop and still locked, the strips still say Locked', () => sentSince(t, (o) => o.t === 'state' && o.module === 'develop' && o.locked === true).length === 1 && stripsMatch(bank, 'Locked'), 1000, () => stripsWhy('Locked'));
+
+    // 10e: the process finishes.
+    await sleep(300);
+    const tUnlock = now();
+    mock.control.user({ locked: [] });
+    await waitFor('when the process finishes, the next state says locked false, and the strips show the values again, lit', () => sentSince(tUnlock, (o) => o.t === 'state' && o.locked === false).length === 1 && stripsMatch() && DIALS.every(lit), 1000, stripsWhy);
+    base = value('Exposure');
+    t = now();
+    for (let i = 0; i < 3; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    want = round2(base + 3 * STEP);
+    await waitFor(`turns work again: 3 ticks take Exposure from ${base} to ${want}`, () => near(value('Exposure'), want) && cmdsSince(t, (c) => c.t === 'done').length === 1, 3000, describeMock);
+    await sleep(400);
+    check('with no alert since the unlock', alerts().filter((m) => m.at >= tUnlock).length === 0, JSON.stringify(alertCounts(tUnlock)));
+
+    // 10f: a set that crosses state.locked on the wire. Lightroom sends state.locked from the poll that reads the
+    // lock, so err locked only meets a set the deck sent before that state reached it. Here the mock's events
+    // reach the deck 300 ms late, which widens that window from a fraction of a ms to 300 ms.
+    await sleep(1000);
+    base = value('Exposure');
+    const history2 = st().history.length;
+    mock.control.delayEvents(300);
+    mock.control.user({ locked: [X] });
+    await mock.control.nextPoll(); // it has read the lock: from now on set gets err locked
+    const tRead = now();
+    rotate(EXPOSURE, 1);
+    await sleep(50);
+    rotate(EXPOSURE, 1);
+    const lockedEvt = () => sentSince(tRead - 50, (o) => o.t === 'state' && o.locked === true)[0];
+    await waitFor('the delayed state.locked and both errs reach the deck', () => lockedEvt() !== undefined && sentSince(tRead, (o) => o.t === 'err').length === 2 && mock.control.clients().delayed === 0, 2000, () => `${describeCmds(tRead)}; errs ${describeErrs(tRead)}; ${mock.control.clients().delayed} events still on their way`);
+    mock.control.delayEvents(0);
+    const stAt = lockedEvt()?.at ?? Infinity;
+    const sets = received.filter((r) => r.at >= tRead && r.cmd?.t === 'set');
+    const errs = sentSince(tRead, (o) => o.t === 'err');
+    check(`the deck sent ${sets.length} sets, with ph ${X}, after the mock's poll read the lock but before state.locked reached it: Lightroom refused each with err locked`,
+      sets.length === 2 && sets.every((r) => r.at < stAt && r.cmd.ph === X && errs.some((e) => e.obj.id === r.cmd.id && e.obj.code === 'locked')), `${describeCmds(tRead)}; errs ${describeErrs(tRead)}`);
+    check('the errs reached the deck after state.locked, as from Lightroom: the order of one event socket', errs.length === 2 && errs.every((e) => e.at >= stAt), errs.map((e) => `${Math.round(e.at - stAt)} ms`).join(', '));
+    const dones = received.filter((r) => r.at >= tRead && r.cmd?.t === 'done');
+    check('the deck ended that gesture with one done, as state.locked reached it', dones.length === 1 && dones[0].cmd.g === sets[0]?.cmd.g && dones[0].at >= stAt && dones[0].at - stAt < 100, JSON.stringify(dones.map((r) => [r.cmd.g, Math.round(r.at - stAt)])));
+    check(`err locked alerted Exposure's dial once, and nothing changed: ${X} keeps ${base}, with no history step`,
+      alertsOn(dialContext(EXPOSURE), tRead) === 1 && alerts().filter((m) => m.at >= tRead).length === 1 && value('Exposure') === base && st().history.length === history2, `${JSON.stringify(alertCounts(tRead))}; ${value('Exposure')}; history ${JSON.stringify(st().history.slice(history2))}`);
+    await waitFor('the strips say Locked', () => stripsMatch(bank, 'Locked'), 1000, () => stripsWhy('Locked'));
+    alertWindows.push({ from: tRead, to: now(), contexts: [dialContext(EXPOSURE)] });
+    errWindows.push({ from: tRead, to: now(), codes: ['locked'] });
+    t = now();
+    mock.control.user({ locked: [] });
+    await waitFor('unlocked again, the strips show the values, lit', () => sentSince(t, (o) => o.t === 'state' && o.locked === false).length === 1 && stripsMatch() && DIALS.every(lit), 1000, stripsWhy);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('11. Read-only: another catalog is open');
+  {
+    await sleep(600);
+    const alerts0 = alerts().length;
+    let t = now();
+    await mock.control.relaunch({ downMs: 500, catalog: OTHER_CATALOG });
+    must(await waitFor('when the mock relaunches with another catalog open, its hello says writable false; the deck watches again, and the strips show its values, dimmed',
+      () => sentSince(t, (o) => o.t === 'hello' && o.writable === false).length > 0 && cmdsSince(t, (c) => c.t === 'watch' && sameSet(c.ps, WATCH)).length >= 1 && stripsMatch() && DIALS.every(dimmed), 6000, stripsWhy));
+    await waitFor('Apply Preset dims as well, since it writes, while Next stays lit', () => image(KEYS.preset.context) !== PRESET_LIT && image(KEYS.next.context) === NEXT_LIT, 2000);
+    await sleep(300);
+    const target = st().target;
+    const base = value('Exposure');
+    const cBase = value('Contrast');
+    const flag = st().photos[target].flag;
+    const applied0 = st().photos[target].applied.length;
+    const bezels0 = st().bezels;
+    const probe = (from) => {
+      const sets = cmdsSince(from, (c) => c.t === 'set');
+      const errs = sentSince(from, (o) => o.t === 'err');
+      return sets.length === 1 && sets[0].p === 'Exposure' && sets[0].ph === target && errs.length === 1 && errs[0].obj.id === sets[0].id && errs[0].obj.code === 'guard';
+    };
+    const tReadOnly = now();
+    t = now();
+    for (let i = 0; i < 5; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    await sleep(200);
+    check('a turn of 5 events sends one set, for its first, with ph; Lightroom refuses it with err guard', probe(t), `${describeCmds(t)}; errs ${describeErrs(t)}`);
+    check(`the Exposure dial alerts once, and nothing moves: the mock and the strip keep ${base}`, alertsOn(dialContext(EXPOSURE), t) === 1 && value('Exposure') === base && stripsMatch(), `${JSON.stringify(alertCounts(t))}; ${stripsWhy()}`);
+    check("Lightroom's bezel says why: one, the most it shows in 5 s", st().bezels === bezels0 + 1, `${st().bezels - bezels0} bezels`);
+    await sleep(1200);
+    t = now();
+    rotate(EXPOSURE, 1);
+    await sleep(50);
+    rotate(EXPOSURE, 1);
+    await sleep(200);
+    check('a second burst 1.2 s later sends one more set, refused the same way, with another alert', probe(t) && alertsOn(dialContext(EXPOSURE), t) === 1 && value('Exposure') === base, `${describeCmds(t)}; errs ${describeErrs(t)}; ${JSON.stringify(alertCounts(t))}`);
+    t = now();
+    dialDown(CONTRAST);
+    await sleep(80);
+    dialUp(CONTRAST);
+    await sleep(200);
+    const resets = cmdsSince(t, (c) => c.t === 'reset');
+    check(`a press sends its reset, with ph; err guard refuses it, the Contrast dial alerts, and Contrast stays ${cBase}`,
+      resets.length === 1 && resets[0].ph === target && sentSince(t, (o) => o.t === 'err' && o.id === resets[0].id && o.code === 'guard').length === 1 && alertsOn(dialContext(CONTRAST), t) === 1 && value('Contrast') === cBase, `${describeCmds(t)}; errs ${describeErrs(t)}; ${JSON.stringify(alertCounts(t))}`);
+    t = now();
+    await press(KEYS.pick);
+    await sleep(300);
+    check(`Pick gets err guard: the key alerts, and ${target} keeps its flag and stays the target`,
+      cmdsSince(t, (c) => c.t === 'flag').length === 1 && sentSince(t, (o) => o.t === 'err' && o.cmd === 'flag' && o.code === 'guard').length === 1 && alertsOn(KEYS.pick.context, t) === 1 && st().photos[target].flag === flag && st().target === target, `${describeCmds(t)}; errs ${describeErrs(t)}; target ${st().target}`);
+    t = now();
+    await press(KEYS.preset);
+    await sleep(300);
+    check('Apply Preset gets err guard: the key alerts, and nothing is applied',
+      cmdsSince(t, (c) => c.t === 'preset').length === 1 && sentSince(t, (o) => o.t === 'err' && o.cmd === 'preset' && o.code === 'guard').length === 1 && alertsOn(KEYS.preset.context, t) === 1 && st().photos[target].applied.length === applied0, `${describeCmds(t)}; errs ${describeErrs(t)}`);
+    alertWindows.push({ from: tReadOnly, to: now(), contexts: [dialContext(EXPOSURE), dialContext(CONTRAST), KEYS.pick.context, KEYS.preset.context] });
+    errWindows.push({ from: tReadOnly, to: now(), codes: ['guard'] });
+    check('those five are the only alerts', alerts().length === alerts0 + 5, JSON.stringify(alertCounts(tReadOnly)));
+
+    await sleep(300);
+    t = now();
+    await mock.control.relaunch({ downMs: 500, catalog: TEST_CATALOG });
+    must(await waitFor('when the mock relaunches with the test catalog, writable is true again: the strips light up with its values, and Apply Preset too',
+      () => sentSince(t, (o) => o.t === 'hello' && o.writable === true).length > 0 && stripsMatch() && DIALS.every(lit) && image(KEYS.preset.context) === PRESET_LIT, 6000, stripsWhy));
+    const b2 = value('Exposure');
+    t = now();
+    for (let i = 0; i < 3; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    const want = round2(b2 + 3 * STEP);
+    await waitFor(`and turns write again: 3 ticks take Exposure from ${b2} to ${want}`, () => near(value('Exposure'), want) && cmdsSince(t, (c) => c.t === 'done').length === 1, 3000, describeMock);
+    await sleep(400);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('12. A version mismatch');
+  {
+    await sleep(600);
+    const base = value('Exposure');
+    const alerts0 = alerts().length;
+    let t = now();
+    mock.control.options({ protocolVersion: 2 });
+    mock.control.close('both');
+    must(await waitFor("when the mock's hello says v 2 after a reconnect, the strips say Mismatch and the keys dim", () => sentSince(t, (o) => o.t === 'hello' && o.v === 2).length > 0 && stripsMatch(bank, 'Mismatch') && image(KEYS.next.context) !== NEXT_LIT, 4000, () => stripsWhy('Mismatch')));
+    check('the plugin logged the mismatch, once', logCount(/speaks protocol v2, this plugin speaks v1/) === 1, `${logCount(/speaks protocol v2/)} lines`);
+    const t2 = now();
+    rotate(EXPOSURE, 1);
+    await sleep(50);
+    rotate(EXPOSURE, 1);
+    await sleep(50);
+    await press(KEYS.pick);
+    await sleep(300);
+    check('a turn and a Pick press alert their dial and key, and change nothing', alertsOn(dialContext(EXPOSURE), t2) === 1 && alertsOn(KEYS.pick.context, t2) === 1 && alerts().length === alerts0 + 2 && value('Exposure') === base, `${JSON.stringify(alertCounts(t2))}; ${value('Exposure')}`);
+    await sleep(2000); // a ping goes by
+    const cmds = cmdsSince(t);
+    const pings = cmds.filter((c) => c.t === 'ping');
+    check(`while mismatched the deck sent only hello and ping, and the mock answered every ping (${pings.length})`,
+      cmds.every((c) => c.t === 'hello' || c.t === 'ping') && pings.length >= 1 && pings.every((c) => sentSince(t, (o) => o.t === 'pong' && o.id === c.id).length === 1), cmds.map((c) => c.t).join(', '));
+    alertWindows.push({ from: t2, to: now(), contexts: [dialContext(EXPOSURE), KEYS.pick.context] });
+    warnWindows.push({ from: t, to: now(), re: /speaks protocol v2/ });
+    t = now();
+    mock.control.options({ protocolVersion: 1 });
+    mock.control.close('both');
+    must(await waitFor('when the mock speaks v1 again and the deck reconnects, it watches again, and the strips and keys come back',
+      () => sentSince(t, (o) => o.t === 'hello' && o.v === 1).length > 0 && cmdsSince(t, (c) => c.t === 'watch' && sameSet(c.ps, WATCH)).length >= 1 && stripsMatch() && DIALS.every(lit) && image(KEYS.next.context) === NEXT_LIT, 4000, stripsWhy));
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('13. Two dials at once');
+  {
+    await sleep(600);
+    const eBase = value('Exposure');
+    const cBase = value('Contrast');
+    const alerts0 = alerts().length;
+    const history0 = st().history.length;
+    const t = now();
+    // Exposure and Contrast in turn, 25 ms apart: each dial's events come every 50 ms, as from two hands.
+    for (let i = 0; i < 20; i += 1) {
+      rotate(i % 2 === 0 ? EXPOSURE : CONTRAST, 1);
+      await sleep(25);
+    }
+    const lastSetAt = () => received.filter((r) => r.at >= t && r.cmd?.t === 'set').at(-1)?.at ?? now();
+    await until(() => !st().tracking && now() - lastSetAt() > 850, 3000);
+    await sleep(400);
+    // Each dial's turn ends the other's gesture, so every event is a gesture of its own, starting from the value
+    // last sent: Exposure then gains 0.03 a tick rather than 1/30.
+    const lo = round2(eBase + 10 * 0.03);
+    const hi = round2(eBase + 10 * STEP);
+    check(`both land: Contrast goes from ${cBase} to ${cBase + 10}, and Exposure from ${eBase} to ${value('Exposure')} (${lo} to ${hi})`, value('Contrast') === cBase + 10 && value('Exposure') >= lo - 0.0051 && value('Exposure') <= hi + 0.0051, describeMock());
+    const steps = st().history.slice(history0);
+    check(`each gesture ended with the deck's done before the other dial's next set: ${steps.length} history steps, each a gesture ended by done`, steps.length >= 2 && steps.every((h) => h.kind === 'gesture' && h.why === 'done'), JSON.stringify(steps.filter((h) => h.kind !== 'gesture' || h.why !== 'done')));
+    await waitFor('the strips show both values', () => stripsMatch(), 2000, stripsWhy);
+    check('no alert', alerts().length === alerts0, `${alerts().length - alerts0} alerts`);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('14. Clamping at both ends of a range');
+  {
+    await sleep(300);
+    const slot = slotAt(0, EXPOSURE);
+    const per = accelerate(4) * STEP; // a 4-tick event, the most the app puts in one (spike S4)
+    // Fast events in one direction until well past the end of Exposure's range, then the gesture's done.
+    const turnPast = async (end) => {
+      const t = now();
+      const events = Math.ceil(Math.abs(end - value('Exposure')) / per) + 3;
+      for (let i = 0; i < events; i += 1) {
+        rotate(EXPOSURE, Math.sign(end) * 4);
+        await sleep(50);
+      }
+      await until(() => !st().tracking && cmdsSince(t, (c) => c.t === 'done').length === 1, 3000);
+      await sleep(400);
+      return { events, sets: cmdsSince(t, (c) => c.t === 'set') };
+    };
+    for (const end of [5, -5]) {
+      const { events, sets } = await turnPast(end);
+      const text = display(slot, end, [-5, 5]);
+      check(`${events} fast events stop Exposure at ${end > 0 ? 'the top' : 'the bottom'} of its range: the mock has ${end}, the strip says ${text}, and no set went past it`,
+        value('Exposure') === end && shown(EXPOSURE) === text && stripsMatch() && sets.length > 0 && sets.every((c) => Math.abs(c.v) <= 5), `${describeMock()}; strip ${shown(EXPOSURE)}; sets ${sets.map((c) => c.v).join(', ')}`);
+      check(`once at ${end} the deck sent nothing more: one set says ${end}, and it's the last`, sets.filter((c) => c.v === end).length === 1 && sets.at(-1)?.v === end, sets.map((c) => c.v).join(', '));
+    }
+    const t = now();
+    dialDown(EXPOSURE);
+    await sleep(80);
+    dialUp(EXPOSURE);
+    await waitFor('a press puts Exposure back to 0', () => cmdsSince(t, (c) => c.t === 'reset').length === 1 && value('Exposure') === 0 && stripsMatch(), 2000, stripsWhy);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('15. Presets that change sliders');
+  {
+    await sleep(600);
+    const T = st().target;
+    const sliders = (preset) => Object.entries(preset.values).map(([p, v]) => `${p} ${v}`).join(', ');
+    const lands = (preset) => Object.entries(preset.values).every(([p, v]) => value(p, T) === v) && st().photos[T].applied.at(-1) === preset.uuid;
+    let t = now();
+    await press(KEYS.sliders);
+    await waitFor(`Apply Preset with "${PUNCHY.name}" sets ${T}'s ${sliders(PUNCHY)} in the mock, and the key shows ok`, () => lands(PUNCHY) && fromPluginSince(t, (m) => m.event === 'showOk' && m.context === KEYS.sliders.context).length === 1, 3000, describeMock);
+    await tapRound(`the vals that follow reach the strips (${sliders(PUNCHY)})`);
+
+    // The key now applies Soft Matte, as if picked in its Property Inspector. It's pressed just after a Contrast
+    // turn's done, so the preset's vals for Contrast arrive inside the deck's 300 ms echo window (PROTOCOL.md,
+    // Gestures: Echoes), and must still win when the window closes.
+    KEYS.sliders.settings = { uuid: SOFT.uuid, name: SOFT.name };
+    toPlugin({ event: 'didReceiveSettings', action: `${UUID}.preset`, context: KEYS.sliders.context, device: DEVICE, payload: payload('Keypad', KEYS.sliders.coordinates, KEYS.sliders.settings) });
+    await sleep(300);
+    const cBase = value('Contrast');
+    t = now();
+    for (let i = 0; i < 3; i += 1) {
+      rotate(CONTRAST, 1);
+      await sleep(50);
+    }
+    await waitFor(`a Contrast turn (${cBase} to ${cBase + 3}) ends with done`, () => cmdsSince(t, (c) => c.t === 'done').length === 1 && value('Contrast') === cBase + 3, 2000, describeMock);
+    const doneAt = received.find((r) => r.at >= t && r.cmd?.t === 'done')?.at ?? now();
+    t = now();
+    await press(KEYS.sliders);
+    await waitFor(`straight after it, Apply Preset with "${SOFT.name}" sets ${T}'s ${sliders(SOFT)}, and the key shows ok`, () => lands(SOFT) && fromPluginSince(t, (m) => m.event === 'showOk' && m.context === KEYS.sliders.context).length === 1, 3000, describeMock);
+    const valsAt = sent.find((s) => s.at >= doneAt && s.obj.t === 'vals' && s.obj.vals.Contrast === SOFT.values.Contrast)?.at;
+    check(`its vals for Contrast reached the deck inside the echo window (${valsAt === undefined ? 'none' : `${Math.round(valsAt - doneAt)} ms after done`})`, valsAt !== undefined && valsAt - doneAt < 280);
+    const text = display(slotAt(0, CONTRAST), SOFT.values.Contrast, [-100, 100]);
+    await waitFor(`when the window closes the Contrast strip shows the preset's ${text}, not the turn's ${cBase + 3}`, () => shown(CONTRAST) === text && stripsMatch(), 1500, stripsWhy);
+    const firstAt = stripEvents.find((e) => e.at >= doneAt && e.context === dialContext(CONTRAST) && e.payload.value?.value === text)?.at;
+    check(`and not before the window closed (${firstAt === undefined ? 'never' : `${Math.round(firstAt - doneAt)} ms after done`})`, firstAt !== undefined && firstAt - doneAt >= 280);
+    await tapRound(`the other sliders reach the strips too (${sliders(SOFT)})`);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('16. Held ticks dropped after 2 s outside Develop');
+  {
+    await sleep(600);
+    // The switch to Develop takes 2.5 s, and Lightroom's handler waits 3 s for it, so nothing answers for 2.5 s.
+    mock.control.options({ moduleDelayMs: 2500, moduleWaitMs: 3000 });
+    let t = now();
+    mock.control.user({ module: 'library' });
+    await waitFor('the user moves the mock to Library: the strips dim', () => sentSince(t, (o) => o.t === 'state' && o.module === 'library').length === 1 && DIALS.every(dimmed) && stripsMatch(), 1000, stripsWhy);
+    const base = value('Exposure');
+    const alerts0 = alerts().length;
+    t = now();
+    for (let i = 0; i < 3; i += 1) {
+      rotate(EXPOSURE, 1);
+      await sleep(50);
+    }
+    await waitFor('a turn there sends module develop, once, and holds its ticks while the slow switch is on its way', () => cmdsSince(t, (c) => c.t === 'module' && c.v === 'develop').length === 1 && st().switching === 'develop' && cmdsSince(t, (c) => c.t === 'set').length === 0, 1000, () => `${describeCmds(t)}; switching ${st().switching}`);
+    await waitFor('2 s without values, the deck drops the held ticks and alerts the dial', () => alertsOn(dialContext(EXPOSURE), t) === 1, 3000);
+    const alertAt = alerts().find((m) => m.at >= t && m.msg.context === dialContext(EXPOSURE))?.at ?? now();
+    check(`the alert came 2 s after the first tick (${Math.round(alertAt - t)} ms), before the switch landed, and the plugin logged the drop`,
+      alertAt - t >= 1900 && alertAt - t <= 2400 && st().module === 'library' && logCount(/dropped held ticks for Exposure: no values from Lightroom within 2000 ms/) === 1, `module ${st().module}; ${logCount(/dropped held ticks/)} drop lines`);
+    await waitFor('when the switch lands at 2.5 s, the strips light up with the mock\'s values', () => st().module === 'develop' && stripsMatch() && DIALS.every(lit), 2000, stripsWhy);
+    await sleep(500);
+    alertWindows.push({ from: t, to: now(), contexts: [dialContext(EXPOSURE)] });
+    check(`the dropped ticks never apply: no set went out, Exposure is still ${base}, and that's the only alert`,
+      cmdsSince(t, (c) => c.t === 'set').length === 0 && cmdsSince(t, (c) => c.t === 'module').length === 1 && value('Exposure') === base && alerts().length === alerts0 + 1, `${describeCmds(t)}; ${value('Exposure')}; ${JSON.stringify(alertCounts(t))}`);
+    mock.control.options({ moduleDelayMs: 0, moduleWaitMs: 1000 });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  section('17. The whole session');
   {
     const invalid = received.filter((r) => !r.cmd || validateCommand(r.cmd).length > 0).map((r) => `${r.line}: ${r.cmd ? validateCommand(r.cmd).join('; ') : 'not JSON'}`);
     check(`every command the mock received is valid per PROTOCOL.md (the deck's validate.ts; ${received.length} commands)`, received.length > 0 && invalid.length === 0, invalid.slice(0, 5).join(' | '));
+    // PROTOCOL.md, Gestures: every set and reset carries ph, the photo of the latest state the deck had. A state
+    // the mock wrote less than 50 ms before a command arrived may not have reached the deck in time, so its photo
+    // will do too.
+    const phBad = [];
+    let phChecked = 0;
+    for (const r of received) {
+      if (r.cmd?.t !== 'set' && r.cmd?.t !== 'reset') continue;
+      phChecked += 1;
+      const states = sent.filter((s) => s.gen === r.gen && s.obj.t === 'state' && s.at <= r.at);
+      const settled = states.filter((s) => s.at < r.at - 50).at(-1);
+      const photos = new Set([settled, ...states.filter((s) => s.at >= r.at - 50)].filter(Boolean).map((s) => s.obj.photo));
+      if (!photos.has(r.cmd.ph)) phBad.push(`${r.cmd.t} ${r.cmd.p} with ph ${r.cmd.ph ?? 'none'}; latest state ${[...photos].join(' or ') || 'none'}`);
+    }
+    check(`every set and reset carried ph, the photo of the latest state the mock had sent (${phChecked} commands)`, phChecked > 0 && phBad.length === 0, phBad.slice(0, 5).join(' | '));
     const firsts = new Map();
     for (const r of received) if (!firsts.has(`${r.gen}:${r.conn}`)) firsts.set(`${r.gen}:${r.conn}`, r.cmd?.t);
     check(`every connection starts with hello (${firsts.size} connections)`, [...firsts.values()].every((t) => t === 'hello'), JSON.stringify([...firsts]));
@@ -756,23 +1284,28 @@ try {
     }
     check('set goes out at most 30 times a second per param', tooSoon.length === 0, `${tooSoon.join(', ')}${tooSoon.length ? '; ' : ''}closest ${Math.round(minGap)} ms apart`);
 
-    // PROTOCOL.md, Gestures: each gesture ends with one done. One that Lightroom refused as stale ends with none,
-    // or with one late done if the deck saw the new photo first.
-    const staleIds = new Set(sent.filter((s) => s.obj.t === 'err' && s.obj.code === 'stale').map((s) => `${s.gen}:${s.obj.id}`));
+    // PROTOCOL.md, Gestures: each gesture ends with one done. One Lightroom refused as stale ends with none, or
+    // with one late done if the deck saw the new photo first. One refused as locked ends with one (Locked photos),
+    // and a read-only probe, one set that err guard answers, with none (Guard).
+    const codes = new Map(sent.filter((s) => s.obj.t === 'err' && s.obj.id !== undefined).map((s) => [`${s.gen}:${s.obj.id}`, s.obj.code]));
     const gestures = new Map();
     for (const r of received) {
       if ((r.cmd?.t !== 'set' && r.cmd?.t !== 'done') || r.cmd.g === undefined) continue;
       const key = `${r.gen}:${r.cmd.g}`;
-      const e = gestures.get(key) ?? { sets: 0, dones: 0, stale: false };
+      const e = gestures.get(key) ?? { sets: 0, dones: 0, refused: [] };
       if (r.cmd.t === 'done') e.dones += 1;
       else {
         e.sets += 1;
-        if (staleIds.has(`${r.gen}:${r.cmd.id}`)) e.stale = true;
+        const code = codes.get(`${r.gen}:${r.cmd.id}`);
+        if (code !== undefined && !e.refused.includes(code)) e.refused.push(code);
       }
       gestures.set(key, e);
     }
-    const badGestures = [...gestures].filter(([, e]) => e.sets === 0 || (e.stale ? e.dones > 1 : e.dones !== 1));
-    check(`each of the deck's ${gestures.size} gestures sent its sets and then one done (one Lightroom refused as stale: none, or one late)`, gestures.size > 0 && badGestures.length === 0, badGestures.map(([k, e]) => `${k} ${JSON.stringify(e)}`).join(', '));
+    const allowedDones = (e) => (e.refused.includes('stale') ? [0, 1] : e.refused.includes('guard') ? [0] : [1]);
+    const badGestures = [...gestures].filter(([, e]) => e.sets === 0 || !allowedDones(e).includes(e.dones));
+    const refusedAs = (code) => [...gestures.values()].filter((e) => e.refused.includes(code)).length;
+    check(`each of the deck's ${gestures.size} gestures sent its sets and then one done; refused as stale (${refusedAs('stale')}): none, or one late; as locked (${refusedAs('locked')}): one; a read-only probe (${refusedAs('guard')}): none`,
+      gestures.size > 0 && badGestures.length === 0, badGestures.map(([k, e]) => `${k} ${JSON.stringify(e)}`).join(', '));
     histories.push(st().history);
     const ended = histories.flat().filter((h) => h.kind === 'gesture');
     const notDone = ended.filter((h) => h.why !== 'done' && !h.stale);
@@ -826,13 +1359,14 @@ try {
     check(`the mock sent vals at most 20 a second (closest ${Math.round(Math.min(...valsGaps))} ms apart)`, valsGaps.every((g) => g >= 49), valsGaps.filter((g) => g < 49).map(Math.round).join(', '));
 
     const errs = sent.filter((s) => s.obj.t === 'err');
-    const unexpected = errs.filter((e) => !(e.obj.code === 'stale' && staleWindow && e.at >= staleWindow[0] && e.at <= staleWindow[1]));
-    check('the mock answered no command with err, apart from stale for step 6\'s old gesture', unexpected.length === 0, unexpected.map((e) => JSON.stringify(e.obj)).join(' | '));
+    const unexpected = errs.filter((e) => !errWindows.some((w) => e.at >= w.from && e.at <= w.to && w.codes.includes(e.obj.code)));
+    check(`the mock answered with err only where a step expects it: stale in steps 6 and 9, locked in 10, guard in 11 (${errs.length} errs)`, unexpected.length === 0, unexpected.map((e) => JSON.stringify(e.obj)).join(' | '));
     const unserved = mockLog.filter((l) => /waits, unserved/.test(l.text));
     check('the deck never left an event connection waiting unserved (the pair rule)', unserved.length === 0, `${unserved.length} times`);
     const mockErrors = mockLog.filter((l) => l.kind === 'error');
     check('the mock logged no errors of its own', mockErrors.length === 0, mockErrors.map((l) => l.text).join(' | '));
-    check('no alert in a session where everything succeeded', alerts().length === 0, alerts().map((m) => m.msg.context).join(', '));
+    const stray = alerts().filter((m) => !alertWindows.some((w) => m.at >= w.from && m.at <= w.to && w.contexts.includes(m.msg.context)));
+    check(`the only alerts are the ${alerts().length} that steps 10, 11, 12 and 16 expect, each on a dial or key used there`, stray.length === 0, stray.map((m) => `${m.msg.context} at ${Math.round(m.at)}`).join(', '));
     check('the plugin process is still running', exited === null, exited ? JSON.stringify(exited) : '');
   }
 } catch (err) {
@@ -843,11 +1377,13 @@ try {
   await sleep(300);
   const log = logText();
   check('the plugin logged its startup and the connection going online', log.includes('STARTUP') && log.includes('offline → online'));
-  // Step 8b's stale event socket is the one warning a good session has.
-  // Debug lines count too: a field the deck's parser dropped, an event type it ignored, an alert it held back.
+  check('it logged at debug, as the copy\'s log-level.txt asks, so the check below sees its debug lines too', /STARTUP \{[^\n]*"log":"debug"/.test(log));
+  // Step 8b's stale event socket is the one warning a session where everything succeeds has, and step 12's
+  // mismatch adds another. Debug lines count too: a field the deck's parser dropped, an event type it ignored, an
+  // alert it raised or held back. Alerts count only in the steps that expect them, for the dials used there.
   const noisy = log.split('\n').filter((l) => /^\S+ (WARN |ERROR)/.test(l) || /dropped badly typed fields|ignoring unknown event type|ignoring an invalid event|alert for /.test(l));
-  const unexpectedLog = noisy.filter((l) => !/the event socket is stale/.test(l));
-  check('the plugin\'s log has no warnings or errors, apart from step 8\'s stale event socket', unexpectedLog.length === 0, unexpectedLog.slice(0, 4).join(' | '));
+  const unexpectedLog = noisy.filter((l) => !/the event socket is stale/.test(l) && !expectedLogLine(l));
+  check('the plugin\'s log has no warnings, errors or alerts beyond the ones steps 8, 10, 11, 12 and 16 expect', unexpectedLog.length === 0, unexpectedLog.slice(0, 4).join(' | '));
   check('the plugin wrote nothing to stdout or stderr (no crash, no uncaught warning)', childOutput.trim() === '', childOutput.trim().split('\n').slice(0, 3).join(' | '));
   if (results.some((r) => !r.ok)) {
     console.log(`\n--- plugin log (last 80 lines) ---\n${log.split('\n').slice(-81).join('\n')}`);

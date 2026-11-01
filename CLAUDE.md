@@ -82,7 +82,7 @@ Work in this folder, not a worktree. Lightroom and the Stream Deck app load the 
 ## Logs agents can read
 
 - Lua plugin: `~/Library/Logs/Adobe/Lightroom/LrClassicLogs/DeckBridge.log`
-- Deck plugin: `lightroom/deck/com.karimdhanji.lightroom.sdPlugin/logs/com.karimdhanji.lightroom.0.log` (0 is newest)
+- Deck plugin: `lightroom/deck/com.karimdhanji.lightroom.sdPlugin/logs/com.karimdhanji.lightroom.0.log` (0 is newest). It logs at info. For debug, write `debug` to `com.karimdhanji.lightroom.sdPlugin/log-level.txt`, which git ignores, and restart the plugin. The file is read only at startup.
 - Stream Deck app: `~/Library/Logs/ElgatoStreamDeck/StreamDeck.log` (on 7.6 it's `StreamDeck.log`, older files are `StreamDeck.1.log`)
 
 ## Commands
@@ -101,4 +101,4 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 **Spikes**
 - `node spikes/lr-harness/test.mjs`: harness self-test against the fake Lightroom, about 100 s
 - `node spikes/lr-harness/harness.mjs`: the live spike harness; results go to `spikes/results/<timestamp>/summary.md`
-- `node spikes/s4-ticks/analyze.mjs` (from `lightroom/deck`): tick statistics from the deck plugin's log
+- `node spikes/s4-ticks/analyze.mjs` (from `lightroom/deck`): tick statistics from the deck plugin's log. Needs the debug level, because TICK and INPUT lines are debug.

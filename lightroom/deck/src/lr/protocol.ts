@@ -19,9 +19,10 @@ export type ViewName = "before" | "after";
 export type HelloCmd = { t: "hello"; v: 1; client: string; ver: string; id?: number };
 export type PingCmd = { t: "ping"; id: number };
 export type WatchCmd = { t: "watch"; ps: string[]; id?: number };
-export type SetCmd = { t: "set"; p: string; v: number; g: number; id?: number };
+/** `ph`: the photo the deck worked from, the `photo` of the latest `state` (PROTOCOL.md, Gestures). Lightroom refuses another photo's as stale. */
+export type SetCmd = { t: "set"; p: string; v: number; g: number; ph?: string; id?: number };
 export type DoneCmd = { t: "done"; g?: number; id?: number };
-export type ResetCmd = { t: "reset"; p: string; id?: number };
+export type ResetCmd = { t: "reset"; p: string; ph?: string; id?: number };
 export type ModuleCmd = { t: "module"; v: ModuleName; id?: number };
 export type FlagCmd = { t: "flag"; v: FlagValue; advance?: boolean; id?: number };
 export type NavCmd = { t: "nav"; v: NavDirection; id?: number };
@@ -83,6 +84,8 @@ export type StateEvt = {
 	rating?: number;
 	label?: string;
 	sel?: number;
+	/** A background AI process holds the target photo (PROTOCOL.md, Locked photos). */
+	locked?: boolean;
 };
 
 export type Range = readonly [min: number, max: number];
@@ -95,11 +98,12 @@ export type AppliedEvt = { t: "applied"; id?: number; uuid?: string; n: number; 
 export type ReloadedEvt = { t: "reloaded"; id?: number; mods?: string[]; ok: boolean; msg?: string };
 export type PongEvt = { t: "pong"; id?: number; lt?: number };
 /**
- * PROTOCOL.md's Errors table. `stale` answers a `set` whose gesture ended when the photo or module changed;
- * the deck goes on with a new gesture and raises no alert (see LrModel). The parser takes any non-empty
- * code, so a code added later still reaches the err callbacks.
+ * PROTOCOL.md's Errors table. `stale` answers a `set` whose gesture ended when the photo or module changed, or
+ * a `set` or `reset` whose `ph` isn't the target photo; the deck goes on without an alert (see LrModel).
+ * `locked` answers a write to a photo a background AI process holds. The parser takes any non-empty code, so
+ * a code added later still reaches the err callbacks.
  */
-export type ErrCode = "guard" | "bad" | "unknown" | "noDevelop" | "noPhoto" | "stale" | "notFound" | "busy" | "failed";
+export type ErrCode = "guard" | "bad" | "unknown" | "noDevelop" | "noPhoto" | "stale" | "locked" | "notFound" | "busy" | "failed";
 export type ErrEvt = { t: "err"; id?: number; cmd?: string; code: string; msg?: string };
 
 export type LrEvent =
@@ -171,6 +175,7 @@ export function parseEvent(raw: unknown): ParseResult {
 			assign(evt, "rating", opt("rating", (v): v is number => isNum(v) && v >= 0 && v <= 5));
 			assign(evt, "label", opt("label", isStr));
 			assign(evt, "sel", opt("sel", (v): v is number => isNum(v) && v >= 0));
+			assign(evt, "locked", opt("locked", (v): v is boolean => typeof v === "boolean"));
 			return event(evt);
 		}
 		case "ranges": {

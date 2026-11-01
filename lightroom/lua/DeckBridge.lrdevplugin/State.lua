@@ -34,7 +34,7 @@ return {
   lastValsAt = nil, -- when vals last went out
   flushAt = nil, -- when a vals push the rate limit held back is due
   gesture = nil, -- the open gesture: { p, g, photo = id it started on, at = time of its last set }
-  staleG = nil, -- g of a gesture that ended because the photo or module changed: its later sets get err stale
+  staleG = nil, -- g of a gesture ended by a photo or module change or a wrong ph: its later sets get err stale
   observer = nil, -- the registered adjustment observer
   obsCount = 0, -- adjustment-observer callbacks so far
   obsTask = false, -- an observer task is on its way
@@ -43,6 +43,10 @@ return {
   lastState = nil, -- the state last sent
   lastModule = nil, -- module and target photo at the last poll, to spot changes
   lastPhoto = nil,
+  -- The latest isAvailableForEditing reading, { photo = id it was read for, locked }. set
+  -- and reset go by it. Added in Phase 6, so a hot reload into an older instance starts
+  -- with nil here, which locks nothing.
+  lockReading = nil,
   ticks = 0,
 
   -- Guard

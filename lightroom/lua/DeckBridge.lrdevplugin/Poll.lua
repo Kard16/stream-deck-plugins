@@ -1,7 +1,7 @@
 -- The 200 ms poll. Lightroom has no events for the module, the target photo, flags,
--- ratings or labels, so this reads them and sends state when something changed. On
--- entering Develop or a new photo it sends ranges and every watched value, retrying any
--- Lightroom couldn't read yet; otherwise, in Develop, it polls the watched values for
+-- ratings, labels or locks, so this reads them and sends state when something changed.
+-- On entering Develop or a new photo it sends ranges and every watched value, retrying
+-- any Lightroom couldn't read yet; otherwise, in Develop, it polls the watched values for
 -- edits the observer didn't report. It also ends gestures that went quiet, and stops
 -- this instance if a newer one started.
 --
@@ -18,10 +18,11 @@ local Log = require 'Log'
 local State = require 'State'
 local Server = require 'Server'
 local Develop = require 'Develop'
+local Presets = require 'Presets'
 
 local Poll = {}
 
-Poll.FIELDS = { 'module', 'photo', 'file', 'flag', 'rating', 'label', 'sel' }
+Poll.FIELDS = { 'module', 'photo', 'file', 'flag', 'rating', 'label', 'sel', 'locked' }
 
 local LABELS = { red = true, yellow = true, green = true, blue = true, purple = true }
 
@@ -37,7 +38,8 @@ function Poll.label(name)
   return 'none'
 end
 
--- Photo metadata reads fail outside a task on 15.3, so this must run in one.
+-- Photo metadata reads fail outside a task on 15.3, so this must run in one. That also
+-- keeps isAvailableForEditing out of onMessage, as PROTOCOL.md asks.
 function Poll.readState()
   local catalog = LrApplication.activeCatalog()
   local st = {
@@ -46,6 +48,7 @@ function Poll.readState()
     rating = 0,
     label = 'none',
     sel = 0, -- with no target photo, commands act on nothing
+    locked = false,
   }
   local photo = catalog:getTargetPhoto()
   if photo then
@@ -56,6 +59,9 @@ function Poll.readState()
     st.label = Poll.label(photo:getRawMetadata('colorNameForLabel'))
     local targets = catalog:getTargetPhotos()
     st.sel = type(targets) == 'table' and #targets or 1
+    -- A background AI process such as Denoise holds the photo it works on. Without
+    -- isAvailableForEditing, no photo is locked.
+    st.locked = not Presets.available(photo)
   end
   return st
 end
@@ -82,6 +88,7 @@ function Poll.stateMessage(st)
     rating = st.rating,
     label = st.label,
     sel = st.sel,
+    locked = st.locked,
   }
 end
 
@@ -100,6 +107,8 @@ function Poll.sync(opts)
     Log.every('state', 60, 'warn', 'state read failed: %s', tostring(st))
     return nil
   end
+  -- set and reset go by this reading, but only for the photo it was read for.
+  State.lockReading = { photo = st.photo, locked = st.locked }
   local inDevelop = st.module == 'develop'
   local entered = inDevelop and State.lastModule ~= 'develop'
   local left = State.lastModule == 'develop' and not inDevelop

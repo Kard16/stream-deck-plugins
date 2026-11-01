@@ -1,0 +1,22 @@
+{"note":"Every set and reset carries ph, the photo the deck worked from. Here the user moved to photo 102 in Lightroom, and the deck turned a dial and pressed it before 102's state reached it, so both still carry 101. Lightroom refuses each one with stale and changes nothing, and that set's g stays stale even with the right photo. The deck's next gesture carries 102 and goes through. A ph that isn't a string is bad, and a set without ph isn't checked."}
+{"setup":{"module":"develop","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}},{"id":"102","file":"DSC0102.ARW","fmt":"RAW","flag":0,"rating":2,"label":"red","values":{"Temperature":5200,"Tint":4,"Exposure":-0.4,"Contrast":0,"Highlights":0,"Shadows":0,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"target":"101","watch":["Exposure"]}}
+{"user":{"photo":"102"}}
+{"lr":{"t":"state","module":"develop","photo":"102","file":"DSC0102.ARW","flag":0,"rating":2,"label":"red","sel":1}}
+{"deck":{"t":"set","p":"Exposure","v":0.38,"g":4,"ph":"101"}}
+{"lr":{"t":"err","cmd":"set","code":"stale"}}
+{"deck":{"t":"reset","p":"Exposure","ph":"101","id":9}}
+{"lr":{"t":"err","id":9,"cmd":"reset","code":"stale"}}
+{"expect":{"module":"develop","tracking":false,"values":{"101":{"Exposure":0.35},"102":{"Exposure":-0.4}}}}
+{"deck":{"t":"set","p":"Exposure","v":-0.37,"g":4,"ph":"102"}}
+{"lr":{"t":"err","cmd":"set","code":"stale"}}
+{"deck":{"t":"set","p":"Exposure","v":-0.37,"g":5,"ph":"102"}}
+{"lr":{"t":"ack","p":"Exposure","v":-0.37,"g":5}}
+{"deck":{"t":"done","g":5}}
+{"wait":400}
+{"deck":{"t":"set","p":"Exposure","v":-0.2,"g":6,"ph":102}}
+{"lr":{"t":"err","cmd":"set","code":"bad"}}
+{"deck":{"t":"set","p":"Exposure","v":-0.3,"g":7}}
+{"lr":{"t":"ack","p":"Exposure","v":-0.3,"g":7}}
+{"deck":{"t":"done","g":7}}
+{"wait":400}
+{"expect":{"tracking":false,"values":{"101":{"Exposure":0.35},"102":{"Exposure":-0.3}}}}

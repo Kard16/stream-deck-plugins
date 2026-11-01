@@ -102,6 +102,7 @@ export function connectHello(setup: Setup, inst: string): Obj {
 	};
 }
 
+/** The state Lightroom sends on connect. A setup has no locked photos, and `locked` is false without a target photo anyway. */
 export function connectState(setup: Setup): Obj {
 	const photo = targetPhoto(setup);
 	return {
@@ -113,6 +114,7 @@ export function connectState(setup: Setup): Obj {
 		rating: photo?.rating ?? 0,
 		label: photo?.label ?? "none",
 		sel: selectedIds(setup).length,
+		locked: false,
 	};
 }
 

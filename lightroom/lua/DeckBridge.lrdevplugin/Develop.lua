@@ -7,7 +7,14 @@
 -- p or g differs from the open gesture ends it and starts another. Two seconds without
 -- a set, or the client leaving, ends it too. While a gesture tracks p, vals leave p out:
 -- the deck owns that value. A gesture also belongs to the photo it started on: once the
--- photo or module changes under it, its later sets are refused with err stale.
+-- photo or module changes under it, its later sets are refused with err stale. So is a
+-- set or reset whose ph, the photo the deck worked from, isn't the target photo, and one
+-- whose target photo changed while Lightroom switched to Develop for it.
+--
+-- Locked photos (PROTOCOL.md, Locked photos): set and reset on a photo that a background
+-- AI process holds get err locked, and are checked again after a switch to Develop. They
+-- go by the poll's latest reading for that photo (Poll.sync), so they never call
+-- isAvailableForEditing, which onMessage mustn't.
 --
 -- Reloadable: all state lives in State.lua, and nothing runs at load time.
 local LrApplication = import 'LrApplication'
@@ -120,6 +127,51 @@ local function rangeFailed(m, p)
     return Proto.err(m, 'noPhoto', 'no target photo')
   end
   return Proto.err(m, 'bad', 'unknown param ' .. p)
+end
+
+-- set and reset may carry ph, the photo from the latest state the deck has. It is
+-- optional, but a string when present.
+local function badPh(m)
+  return m.ph ~= nil and type(m.ph) ~= 'string'
+end
+
+-- Whether a set or reset's ph rules it out as stale: it isn't photo, the target photo's
+-- id as state carries it, compared as a string. No target photo is a mismatch, and so is
+-- one Lightroom couldn't read. Commands without ph aren't checked.
+local function wrongPhoto(m, photo)
+  return m.ph ~= nil and m.ph ~= photo
+end
+
+-- Whether the poll's latest reading says photo, the target photo's id, is locked. Only a
+-- reading taken for that photo counts. Reads State only, so it is safe in onMessage.
+function Develop.isLocked(photo)
+  local reading = State.lockReading -- nil until a poll has read a lock
+  return photo ~= nil and reading ~= nil and reading.photo == photo and reading.locked == true
+end
+
+-- Switches to Develop for a set or reset that arrived outside it. While Lightroom
+-- switches, the user can pick another photo, and the poll can read a lock, so once there
+-- this reads the target photo again (PROTOCOL.md, Gestures: the photo the deck worked
+-- from). photo is the one the command's earlier checks were made against. Returns nil
+-- when the command may go on, or the err code and message to refuse it with. A command
+-- that arrives in Develop asks Lightroom nothing more: set runs that way, straight from
+-- onMessage, for every dial tick.
+local function switchToDevelop(photo)
+  if Develop.inDevelop() then
+    return nil
+  end
+  if not Develop.ensureDevelop() then
+    return 'noDevelop', 'could not switch to Develop'
+  end
+  local after = Develop.photoId() or nil
+  if after ~= photo then
+    return 'stale', 'the target photo changed while Lightroom switched to Develop ('
+      .. tostring(photo or 'none') .. ' to ' .. tostring(after or 'none') .. ')'
+  end
+  if Develop.isLocked(photo) then
+    return 'locked', 'photo ' .. photo .. ' was locked by a background process while Lightroom switched to Develop'
+  end
+  return nil
 end
 
 -- Gestures ------------------------------------------------------------------------
@@ -407,9 +459,15 @@ function Develop.watch(m)
   end
 end
 
--- set {p, v, g}: guarded. Clamps v to getRange(p), sets it inside gesture g, and acks
--- with the value read straight back. A set for a gesture that ended when the photo or
--- module changed gets err stale and changes nothing, not even the module.
+-- set {p, v, g, ph}: guarded. Clamps v to getRange(p), sets it inside gesture g, and
+-- acks with the value read straight back. Refused with err stale: a set for a gesture
+-- that ended when the photo or module changed, and one whose ph isn't the target photo,
+-- which makes its g stale too. Refused with err locked on a locked photo. Those refusals
+-- change nothing, not even the module. A set that had to switch to Develop is checked
+-- again once there: another target photo is stale, with or without ph, and makes its g
+-- stale too, and a lock the poll read meanwhile is locked; only the module has changed
+-- (PROTOCOL.md, Guard, has the order of checks). Runs straight from onMessage in
+-- Develop, so it reads nothing that needs a task.
 function Develop.set(m)
   local p, v, g = m.p, m.v, m.g
   if type(p) ~= 'string' or p == '' then
@@ -420,6 +478,9 @@ function Develop.set(m)
   end
   if not Proto.isNumber(g) then
     return Proto.err(m, 'bad', 'set needs g, the gesture number')
+  end
+  if badPh(m) then
+    return Proto.err(m, 'bad', 'ph must be a string, the photo id from state')
   end
   if not Guard.check(m) then
     return
@@ -433,8 +494,23 @@ function Develop.set(m)
   if g == State.staleG then
     return Proto.err(m, 'stale', 'gesture ' .. tostring(g) .. ' ended when the photo or module changed')
   end
-  if not Develop.ensureDevelop() then
-    return Proto.err(m, 'noDevelop', 'could not switch to Develop')
+  if wrongPhoto(m, photo) then
+    -- The deck worked out this gesture from another photo's values, so its later sets
+    -- are refused too. An open gesture is left alone: this set changes nothing.
+    State.staleG = g
+    return Proto.err(m, 'stale', 'ph ' .. m.ph .. " isn't the target photo (" .. tostring(photo or 'none') .. ')')
+  end
+  if Develop.isLocked(photo) then
+    return Proto.err(m, 'locked', 'photo ' .. photo .. ' is locked by a background process')
+  end
+  local code, msg = switchToDevelop(photo)
+  if code == 'stale' then
+    -- Worked out from the photo the deck saw, as with a wrong ph: its later sets are
+    -- refused too, and an open gesture is left alone.
+    State.staleG = g
+  end
+  if code then
+    return Proto.err(m, code, msg)
   end
   local lo, hi = Develop.range(p)
   if not lo then
@@ -473,17 +549,33 @@ function Develop.done(m)
   Develop.endGesture('done')
 end
 
--- reset {p}: guarded. Ends any gesture, resets p and acks the value after, without g.
+-- reset {p, ph}: guarded. Ends any gesture, resets p and acks the value after, without
+-- g. A ph that isn't the target photo gets err stale, and a locked photo err locked; each
+-- refusal changes nothing, not even the module or an open gesture. A reset that had to
+-- switch to Develop is checked again once there, as set is: another target photo is
+-- stale, with or without ph, and a lock the poll read meanwhile is locked. Those change
+-- nothing but the module.
 function Develop.reset(m)
   local p = m.p
   if type(p) ~= 'string' or p == '' then
     return Proto.err(m, 'bad', 'reset needs p, a param name')
   end
+  if badPh(m) then
+    return Proto.err(m, 'bad', 'ph must be a string, the photo id from state')
+  end
   if not Guard.check(m) then
     return
   end
-  if not Develop.ensureDevelop() then
-    return Proto.err(m, 'noDevelop', 'could not switch to Develop')
+  local photo = Develop.photoId() or nil
+  if wrongPhoto(m, photo) then
+    return Proto.err(m, 'stale', 'ph ' .. m.ph .. " isn't the target photo (" .. tostring(photo or 'none') .. ')')
+  end
+  if Develop.isLocked(photo) then
+    return Proto.err(m, 'locked', 'photo ' .. photo .. ' is locked by a background process')
+  end
+  local code, msg = switchToDevelop(photo)
+  if code then
+    return Proto.err(m, code, msg)
   end
   if not Develop.range(p) then
     return rangeFailed(m, p)

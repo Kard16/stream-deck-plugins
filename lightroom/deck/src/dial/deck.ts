@@ -25,7 +25,8 @@ type Dial = {
 /**
  * The Develop Dial behaviour, without the SDK: each dial takes its slot from its column and the shared bank.
  * Turn adjusts (accelerated); push + turn adjusts in fine steps; a press without turning resets, and so does
- * a long touch; a tap moves every dial to the next bank.
+ * a long touch; a tap moves every dial to the next bank. While the photo is locked the model drops turns and
+ * resets, but taps still change banks.
  */
 export class DialDeck {
 	readonly #config: BankConfig;
@@ -158,6 +159,7 @@ export class DialDeck {
 				conn: model.conn,
 				writable: model.writable,
 				inDevelop: model.inDevelop,
+				locked: model.state.locked,
 			}),
 		);
 	}

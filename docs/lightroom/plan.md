@@ -1,6 +1,6 @@
 # Lightroom Classic build plan
 
-**Status:** Phases 0–5 are done, with Phase 5 as scoped at kickoff. Phase 6, hardening, is next. Written 2026-10-31 at the end of the research session.
+**Status:** Phases 0–5 are done, with Phase 5 as scoped at kickoff. Phase 6, hardening, is built and verified short of the hardware checklist. Written 2026-10-31 at the end of the research session.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -463,6 +463,68 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - A long-touch on the strip. All 34 touches were short taps.
   - The deck logs no key presses and Lightroom logs no commands, so Pick, Reject, Unflag, Next, Previous and Before/After rest on the user's report.
 - 2026-10-31, Phase 5 is done as scoped at kickoff (answer 5): the Apply Preset key, verified on hardware. The other one-click tools wait, by the user's choice. The Hotkey write-up for Sync and Auto Sync moves to Phase 6's README.
+- 2026-10-31, Phase 6 started.
+  - **Protocol amendment, still v1** (Amendments ▸ "for Phase 6" in `PROTOCOL.md`):
+    - `set` and `reset` carry `ph`, the photo the deck worked from, and a wrong `ph` gets `stale`. This closes the last stale-gesture gap.
+    - `state.locked` and `err locked`, for photos a background AI process such as Denoise holds.
+    - New fixtures `stale-photo.jsonl` and `locked.jsonl`. Before any code, both runners failed exactly these two and passed the other 19.
+  - **The workflow `lightroom-phase6`** (run `wf_9f3275d1-b94`):
+    - Builders: the Lua track, the deck track and the mock, in parallel. The deck also moves to info-level logs by default.
+    - Integration: deck-vs-mock gains scenarios for the `ph` race, locked photos, read-only mode, a version mismatch, two dials at once, clamping, presets that change sliders, and held ticks dropped after 2 s.
+    - Then an independent review per track, and fixers for blockers and majors.
+  - **Constraints:** no new Lua files, and Lua code changes only in hot-reloadable modules, so the main thread can load them into the running Lightroom without a relaunch.
+  - **Next checklist, after the build:** a Stream Deck app restart, a long-touch, a locked photo during Denoise, many selected photos with Auto Sync, and a reboot last.
+- 2026-10-31, Phase 6 built (workflow `wf_9f3275d1-b94`: 9 agents, none failed). The main thread re-ran every check, and the results matched:
+  - **Lua:**
+    - `set` and `reset` check `ph`.
+    - The poll reads `isAvailableForEditing` for the target photo inside a task, and keeps each reading with the photo it was read for. That reading becomes `state.locked`.
+    - `err locked` comes after the stale checks and before the switch to Develop. It reads only the stored reading, so the onMessage fast path stays task-free.
+    - Code changed only in Develop and Poll.
+    - 91 unit tests and 21/21 fixtures. The tests caught all 23 of the builder's deliberate breaks. They caught 12 of the reviewer's 17 at first, and all 17 after the fixer's new tests.
+  - **Deck:**
+    - `ph` on every `set` and `reset`.
+    - While locked: the strips say Locked, dimmed; turns and presses send nothing and alert once per burst; taps still change banks.
+    - Info-level logs by default, with `log-level.txt` to raise them.
+    - 214 tests, smoke 36/36, and validate passes.
+  - **Mock and tools:**
+    - The plugin's rules.
+    - A control API for deck scenarios: `holdPoll`, `nextPoll`, `delayEvents`, `protocolVersion`, `moduleDelayMs`, and another catalog.
+    - `ph` in the fake deck and the latency harness.
+    - 183 tests, and fixtures 42/42 on both clocks.
+  - **Deck vs mock:**
+    - 177 checks, up from 93. They cover the `ph` race, locked photos, read-only mode, a version mismatch, two dials at once, clamping, presets that change sliders, and held ticks dropped after 2 s.
+    - 177/177 on every run, three by the agents and one by the main thread.
+    - Negative controls: without the mock's `ph` check 169/177, without its lock check 173/177, and with `state.locked` never true 159/177.
+  - **Reviews found four majors:**
+    - no Lua test for the `ph` race;
+    - the mock's delayed events could arrive out of order on the real clock;
+    - three of the mock's lock-reading rules had no test;
+    - nothing checked the photo again after a switch to Develop.
+
+    The fixers handled the first three and 6 minors.
+  - **Settled by the main thread** (`PROTOCOL.md`, Amendments ▸ "Settled in review"):
+    - A null `ph` counts as absent.
+    - After a switch to Develop, `set` and `reset` check the target photo again. Otherwise a press in Library could reset a photo clicked during the switch.
+    - With no photo in its `state`, the deck sends no `set` or `reset`. The fixer found a real path for a `set` without `ph`: Lightroom's `watch` reply can bring `ranges` and `vals` before the new photo's `state`.
+    - Lightroom keeps only the latest stale `g`.
+    - `err locked` usually arrives just after `state.locked`.
+  - **Known limit, unchanged:** two dials turned at once make every dial event its own gesture, because Lightroom tracks one param at a time. 10 + 10 interleaved ticks make 20 history steps, and Exposure moves about 10% less than the ticks ask for.
+  - **Lightroom already runs the new Lua.** It quit and relaunched at 19:46:27–46, after the Lua track had written Develop, Poll, Presets and State, so it loaded that code, alongside the old deck plugin. Since then neither log has a warning, and no dial was used.
+  - **The fix for the switch to Develop** came from one more fixer.
+    - **Lightroom:** Develop.lua is the only plugin file changed, and the dial-tick fast path asks Lightroom nothing new.
+    - **The deck** also sends no `set` without a photo.
+    - **Checks after it:** Lua 96 unit tests and 21/21 fixtures; deck 217/217 and smoke 36/36; tools 185/185, fixtures 42/42 and deck-vs-mock 177/177, re-run by the main thread. Every deliberate break of the new rules was caught: 4 in Lua, 4 in the mock, 3 in the deck.
+    - **Rehearsed offline:** booting the exact 19 files Lightroom loaded at 19:46, then hot-reloading only the new Develop, passes 21/21 fixtures. A control that reloads the old Develop fails all 21 on the swap check.
+- 2026-10-31, Phase 6 live (ladder step 4). The deck plugin was stopped from 22:11:13 to 22:12:33, with the user's approval.
+  - **`reload` of Develop** into the running Lightroom: 2 ms.
+  - **A one-off live script** on the tools' `LrClient`, dry-run against the mock first and not kept: 25/25 checks.
+    - `state.locked` is false on photos 569 and 570.
+    - After `nav` to 570, a `set` and a `reset` carrying 569 get `stale`, and so does that `g` with 570's `ph`. Neither photo's Exposure moved.
+    - A `set` and a `reset` sent from Library switch to Develop, check the photo again and land, in 71 and 56 ms. Exposure ends where it started.
+  - **`smoke.json`:** PASS, 57 steps in 4.4 s.
+  - **Latency** at 15, 30 and 60 sets/s: ack median 2.7, 1.6 and 1.2 ms, max 11 ms. No backlog, leaks or errors, and Exposure was put back.
+  - **Lightroom's log:** 26 lines, all INFO.
+  - **The deck plugin** restarted on the new build: STARTUP at log level info, and online 6 ms later.
 
 ## Progress
 
@@ -473,4 +535,4 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Protocol amendments, all three tracks, 2026-10-31 · [x] the fake deck against the real Lightroom (ladder step 4), 2026-10-31 · [x] the deck plugin against the mock (step 5), 2026-10-31
 - [x] Phase 4: integration on hardware, 2026-10-31. A Stream Deck app restart and a long-touch move to the next checklist.
 - [x] Phase 5: presets, as scoped at kickoff, 2026-10-31. The other one-click tools wait.
-- [ ] Phase 6: hardening
+- [ ] Phase 6: hardening. Built and verified offline and in Lightroom (ladder steps 1–5), 2026-10-31. Checklist 3 on hardware is next.

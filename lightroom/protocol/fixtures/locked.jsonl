@@ -1,0 +1,19 @@
+{"note":"A background AI process such as Denoise holds photo 101, so isAvailableForEditing() is false and state says locked. set and reset get err locked and change nothing, not even the module: the set comes in Library, and Lightroom stays there. When the process finishes, state says locked is false and the dial works again."}
+{"setup":{"module":"library","photos":[{"id":"101","file":"DSC0101.ARW","fmt":"RAW","flag":0,"rating":0,"label":"none","values":{"Temperature":5500,"Tint":10,"Exposure":0.35,"Contrast":0,"Highlights":-20,"Shadows":15,"Whites":0,"Blacks":0,"Texture":0,"Clarity":0,"Vibrance":0,"Saturation":0,"PostCropVignetteAmount":0}}],"target":"101","watch":["Exposure"]}}
+{"user":{"locked":["101"]}}
+{"lr":{"t":"state","module":"library","photo":"101","locked":true}}
+{"deck":{"t":"set","p":"Exposure","v":0.5,"g":1,"ph":"101"}}
+{"lr":{"t":"err","cmd":"set","code":"locked"}}
+{"expect":{"module":"library","tracking":false}}
+{"deck":{"t":"module","v":"develop"}}
+{"lr":{"t":"state","module":"develop","photo":"101","locked":true}}
+{"deck":{"t":"reset","p":"Exposure","ph":"101","id":3}}
+{"lr":{"t":"err","id":3,"cmd":"reset","code":"locked"}}
+{"expect":{"module":"develop","tracking":false,"values":{"101":{"Exposure":0.35}}}}
+{"user":{"locked":[]}}
+{"lr":{"t":"state","module":"develop","photo":"101","locked":false}}
+{"deck":{"t":"set","p":"Exposure","v":0.5,"g":2,"ph":"101"}}
+{"lr":{"t":"ack","p":"Exposure","v":0.5,"g":2}}
+{"deck":{"t":"done","g":2}}
+{"wait":400}
+{"expect":{"tracking":false,"values":{"101":{"Exposure":0.5}}}}

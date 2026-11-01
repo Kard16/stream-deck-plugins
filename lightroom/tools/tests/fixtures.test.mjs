@@ -10,8 +10,8 @@ import { DATA, runNode } from './helpers.mjs';
 
 const files = listFixtures();
 
-test('there are 19 fixtures', () => {
-  assert.equal(files.length, 19);
+test('there are 21 fixtures', () => {
+  assert.equal(files.length, 21);
 });
 
 describe('fixtures against the mock, manual clock', () => {
@@ -103,7 +103,7 @@ describe('fixtures/run.mjs', () => {
   test('exits 0 when every fixture passes', async () => {
     const r = await runNode(['fixtures/run.mjs', '--quiet']);
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /fixtures: 19\/19 passed \(manual clock/);
+    assert.match(r.stdout, /fixtures: 21\/21 passed \(manual clock/);
   });
 
   test('exits 1 when one fails, and says where', async () => {

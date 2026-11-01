@@ -3,7 +3,9 @@
  * send anything this rejects, and the tests run every command the plugin sends through it.
  *
  * It is stricter than Lightroom needs to be: our own commands carry no unknown fields, `set` carries `g`,
- * and `set.v` is already rounded (Exposure to 0.01, everything else to whole numbers).
+ * `set.v` is already rounded (Exposure to 0.01, everything else to whole numbers), and a `ph` is a photo's
+ * `localIdentifier`, never empty. `ph` stays optional, as in PROTOCOL.md: the deck leaves it out while it
+ * knows of no target photo, and older fixtures and clients send none.
  */
 
 type Obj = Record<string, unknown>;
@@ -33,9 +35,9 @@ const RULES: Record<string, Record<string, FieldRule>> = {
 	hello: { v: req((v) => (v === 1 ? null : "must be 1")), client: req(name), ver: req(name), id: opt(integer) },
 	ping: { id: req(integer) },
 	watch: { ps: req(names), id: opt(integer) },
-	set: { p: req(name), v: req(finite), g: req(integer), id: opt(integer) },
+	set: { p: req(name), v: req(finite), g: req(integer), ph: opt(name), id: opt(integer) },
 	done: { g: opt(integer), id: opt(integer) },
-	reset: { p: req(name), id: opt(integer) },
+	reset: { p: req(name), ph: opt(name), id: opt(integer) },
 	module: { v: req(oneOf("develop", "library")), id: opt(integer) },
 	flag: { v: req(oneOf("pick", "reject", "none")), advance: opt(bool), id: opt(integer) },
 	nav: { v: req(oneOf("next", "prev")), id: opt(integer) },

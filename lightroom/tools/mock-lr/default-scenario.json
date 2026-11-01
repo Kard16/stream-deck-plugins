@@ -1,5 +1,5 @@
 {
-  "about": "The mock's default scenario: the test catalog open in Develop, 10 photos from a Sony shoot (ARW raws, a DNG and two JPEGs) with flags, ratings and labels, and 6 Develop presets. The first 4 presets are the profile-only Cobalt presets the deck's Apply Preset keys pick from. Photo 107 is locked by a background AI update, so presets skip it. Same shape as a fixture's setup line, plus the mock's own fields: defaults (each photo's as-shot values, for reset), locked, and preset values.",
+  "about": "The mock's default scenario: the test catalog open in Develop, 10 photos from a Sony shoot (ARW raws, a DNG and two JPEGs) with flags, ratings and labels, and 6 Develop presets. The first 4 presets are the profile-only Cobalt presets the deck's Apply Preset keys pick from. Photo 107 is locked by a background AI process, so presets skip it, and set and reset on it get err locked. The last 2 presets change sliders, so vals follow when one is applied. Same shape as a fixture's setup line, plus the mock's own fields: defaults (each photo's as-shot values, for reset), locked, and preset values.",
   "catalog": "/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat",
   "module": "develop",
   "target": "101",

@@ -1,6 +1,6 @@
 # DeckBridge protocol, version 1
 
-The wire protocol between the Lua plugin inside Lightroom Classic (`lightroom/lua/DeckBridge.lrdevplugin`) and the Stream Deck plugin (`lightroom/deck`). Frozen on 2026-10-31 from the Phase 1 spike results in `docs/lightroom/plan.md`. Amended the same day with what the three Phase 3 tracks found; [Amendments](#amendments) lists the changes.
+The wire protocol between the Lua plugin inside Lightroom Classic (`lightroom/lua/DeckBridge.lrdevplugin`) and the Stream Deck plugin (`lightroom/deck`). Frozen on 2026-10-31 from the Phase 1 spike results in `docs/lightroom/plan.md`. Amended the same day with what the three Phase 3 tracks found, and again for Phase 6; [Amendments](#amendments) lists the changes.
 
 Changes go through the main thread. A change that breaks either side bumps `v`.
 
@@ -46,9 +46,9 @@ Any command may carry an integer `id`. Replies to it (`pong`, `presets`, `applie
 | `hello` | `v: 1`, `client`, `ver` | Sends `hello`, `state`, then `ranges` and `vals` as in lifecycle step 2. A deck `v` other than 1 still gets Lightroom's v1 `hello`, and is logged. | (those events) |
 | `ping` | `id` | Nothing | `pong {id, lt}` |
 | `watch` | `ps: [param]` | Replaces the watched params. Watching costs about 0.006 ms per param per read, so the deck watches every param in its banks, not just the visible four. An unknown param is dropped from the list, with `err {code: "bad"}` carrying the watch's `id`. `getRange` only works in Develop, so outside it Lightroom checks the list on entering Develop and sends that `err` then, still with the watch's `id`. Entries that aren't strings are dropped with `err bad` at once. | `ranges`, `vals` (Develop only) |
-| `set` | `p`, `v`, `g` (all required) | Guarded. Switches to Develop if needed. Starts a gesture on `p` (see [Gestures](#gestures)), clamps `v` to `getRange(p)`, then `setValue(p, v)`. A missing `p`, a `v` or `g` that isn't a number, or a `p` that `getRange` rejects gets `err {code: "bad"}`. A set for a gesture that ended when the photo or module changed gets `err {code: "stale"}` and changes nothing, not even the module. | `ack {p, v, g}`, where `v` is `getValue(p)` straight after the set |
+| `set` | `p`, `v`, `g` (all required); `ph` (optional) | Guarded. Switches to Develop if needed. Starts a gesture on `p` (see [Gestures](#gestures)), clamps `v` to `getRange(p)`, then `setValue(p, v)`. A missing `p`, a `v` or `g` that isn't a number, a `ph` that isn't a string, or a `p` that `getRange` rejects gets `err {code: "bad"}`. A set for a gesture that ended when the photo or module changed, or whose `ph` isn't the target photo, gets `err {code: "stale"}`, and so does one whose target photo changed during the switch to Develop. One on a [locked photo](#locked-photos) gets `err {code: "locked"}`. No refusal changes a value, and only those after the switch to Develop leave Lightroom in Develop ([Guard](#guard) has the order). | `ack {p, v, g}`, where `v` is `getValue(p)` straight after the set |
 | `done` | `g` (optional) | Ends the gesture: `stopTracking()`. Lightroom's observer then fires, and `vals` carries the final value if it differs from the last value Lightroom sent for `p`. A `done` whose `g` isn't the open gesture's is late and ignored; one without `g` ends whatever gesture is open. | none |
-| `reset` | `p` | Guarded. Switches to Develop if needed, ends any gesture, `resetToDefault(p)`. | `ack {p, v}` with the value after the reset |
+| `reset` | `p`; `ph` (optional) | Guarded. Switches to Develop if needed, ends any gesture, `resetToDefault(p)`. A `ph` that isn't a string gets `err {code: "bad"}`, and one that isn't the target photo gets `err {code: "stale"}`, as does a reset whose target photo changed during the switch to Develop. A [locked photo](#locked-photos) gets `err {code: "locked"}`. No refusal changes a value, and only those after the switch leave Lightroom in Develop. | `ack {p, v}` with the value after the reset |
 | `module` | `v`: `"develop"` or `"library"` | `switchToModule(v)` | `state` once the module has changed, and also when Lightroom is already there; in Develop, `ranges` and every watched value too |
 | `flag` | `v`: `"pick"`, `"reject"` or `"none"`; `advance` (bool, default false) | Guarded. `LrSelection.flagAsPick`, `flagAsReject` or `removeFlag`. With `advance`, waits 150 ms and calls `nextPhoto()` unless the target photo already changed, which means Lightroom's own Auto Advance moved on. | `state`, even when nothing changed. With `advance`, the `state` after the move always comes, preceded by one when the flag changed. |
 | `nav` | `v`: `"next"` or `"prev"` | `LrSelection.nextPhoto()` or `previousPhoto()` | `state`, even at either end of the filmstrip |
@@ -64,7 +64,7 @@ Params are `LrDevelopController` parameter names, for example `Exposure`, not th
 | `t` | Fields | When |
 |---|---|---|
 | `hello` | `v: 1`, `lr` (version string), `catalog` (file name), `path` (full `.lrcat` path), `guard` (`"on"` or `"off"`), `writable` (bool), `inst` (random id, new on every plugin load; always present) | On every connect to the event socket, and in answer to `hello` |
-| `state` | `module`, `photo` (`localIdentifier` as a string, or null), `file` (file name or null), `flag` (-1, 0, 1), `rating` (0–5), `label` (`"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"` or `"none"`), `sel` (number of target photos; 0 when there is no target photo, although `getTargetPhotos()` then returns the whole filmstrip) | After `hello`, and whenever a field changes: from a 200 ms poll, and in Develop also within milliseconds of a photo change, through the adjustment observer |
+| `state` | `module`, `photo` (`localIdentifier` as a string, or null), `file` (file name or null), `flag` (-1, 0, 1), `rating` (0–5), `label` (`"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"` or `"none"`), `sel` (number of target photos; 0 when there is no target photo, although `getTargetPhotos()` then returns the whole filmstrip), `locked` (true while the target photo is [locked](#locked-photos); false without a target photo) | After `hello`, and whenever a field changes: from a 200 ms poll, and in Develop also within milliseconds of a photo change, through the adjustment observer |
 | `ranges` | `ranges: {param: [min, max]}` | In Develop: after `hello`, after `watch`, on entering Develop, on every photo change. Ranges depend on the file type. A range Lightroom can't read yet, for example while Develop is still loading the photo, follows in a later `ranges`. |
 | `vals` | `vals: {param: number}` | In Develop: the changed watched params, from the adjustment observer and a 200 ms value poll, diffed against what was last sent. All watched params after `hello`, after `watch`, on entering Develop and on every photo change, except the param of an open gesture. A value Lightroom can't read yet follows in a later `vals`, so these can arrive in parts. Never outside Develop. |
 | `ack` | `p`, `v`, `g` (absent after `reset`) | Answers `set` and `reset` |
@@ -106,15 +106,35 @@ Spike S2 showed that a gesture must be tracked to become a history step, and tha
   - the deck sends `nav`, or a flag's `advance` moves on, even at an end of the filmstrip where nothing moves;
   - Develop is left;
   - the plugin shuts down.
-- **A gesture belongs to the photo it started on.** When Lightroom ends a gesture for one of the photo or module reasons above, later `set`s with that `g` carry values the deck worked out for the old photo. Lightroom refuses each one with `err {code: "stale"}`, and it switches no module and changes no value. It also catches a photo change that a `set` reaches before the poll does. Lightroom forgets the stale `g` when the next gesture starts or a client connects.
+- **A gesture belongs to the photo it started on.** When Lightroom ends a gesture for one of the photo or module reasons above, later `set`s with that `g` carry values the deck worked out for the old photo. Lightroom refuses each one with `err {code: "stale"}`, and it switches no module and changes no value. It also catches a photo change that a `set` reaches before the poll does. Lightroom keeps only the latest stale `g`, and forgets it when the next gesture starts or a client connects. One is enough, because the deck never goes back to a gesture it has ended.
 - **The deck on `stale`:**
   - It ends that gesture without sending `done`, and raises no alert.
   - If it hasn't yet seen `state` for the new photo, it holds turns, as it does before its own `nav`. The hold lasts until it has `state`, `ranges` and `vals` for the new photo, or until 500 ms pass. It also ends any other open gesture, since that one started from the old photo's values too.
   - If it has already seen that `state`, it ended its gestures there, as on any photo change. The `done` it sent then is late, and Lightroom ignores it.
   - Either way, the next turn starts a new `g` from the new photo's values.
-- **Not covered yet:** a new gesture that starts in the few milliseconds between a photo change in Lightroom and the deck receiving its `state`. Its first `set` still uses the old photo's value. Closing this gap would need `set` to carry the photo the deck worked from; that's a Phase 6 hardening item.
+- **The photo the deck worked from.** A photo change in Lightroom reaches the deck a few milliseconds after it happens, so a new gesture can start from the old photo's value in between. To catch that, the deck puts `ph`, the `photo` from the latest `state` it has, on every `set` and `reset`.
+  - A `set` whose `ph` isn't the target photo's id is stale. Lightroom refuses it with `err {code: "stale"}`, changes nothing, and treats its `g` as stale from then on, as above. The deck handles it like any other `stale`.
+  - A `reset` with the wrong `ph` gets the same refusal. The deck drops that reset and raises no alert.
+  - A `ph` is wrong when there's no target photo, too.
+  - **During a switch to Develop** the user can pick another photo, and a press in Library sends its `reset` from there. So when a `set` or `reset` makes Lightroom switch, Lightroom reads the target photo again once it's in Develop. If the photo changed, the command is stale, with or without `ph`: a `set`'s `g` becomes stale, and nothing changes but the module. If it's the same photo but the poll has read it as locked meanwhile, the command gets `err {code: "locked"}`.
+  - Commands without `ph` aren't checked against the deck's photo, so older fixtures and clients still work. A `ph` of `null` counts as absent.
+  - **With no photo:** the deck sends `ph` whenever its latest `state` names a photo. While it names none, it sends no `set` or `reset`, as Lightroom's `noPhoto` would refuse them. A press or turn alerts the dial, once per burst, and held turns wait for a photo. Otherwise a write could land, unchecked, on a photo Lightroom had just gained, since Lightroom's `watch` reply can bring `ranges` and `vals` before that photo's `state`. The read-only probe (see [Guard](#guard)) still goes without `ph`, because the guard refuses it before any photo check.
 - **Echoes:** while a gesture tracks `p`, Lightroom leaves `p` out of `vals`, even in a push of every watched value; the deck owns that value. For 300 ms after the deck sends `done`, it holds any `vals` for `p` instead of applying them, then applies the latest one when the window closes; if none came, it keeps the last `ack`'s value. Lightroom only resends values that changed, so a `vals` discarded in that window would never come again.
 - One gesture makes one history step.
+
+### Locked photos
+
+A background AI process, such as Denoise, locks the photo it works on: `photo:isAvailableForEditing()` is false until it finishes.
+
+- **Lightroom** reads this for the target photo in its 200 ms poll. `state.locked` carries the latest reading for the current target photo, and is false until the poll has read that photo. Where `isAvailableForEditing` doesn't exist, `locked` is always false.
+- **`set` and `reset`** on a locked target photo get `err {code: "locked"}` and change nothing, not even the module. Lightroom goes by the poll's latest reading for that photo, so a write can still land in the 200 ms after a lock starts.
+- **Other commands:** `flag` isn't checked. `preset` skips locked photos and counts them, as before.
+- **The deck, while `state.locked` is true:**
+  - It ends any open gesture with `done`.
+  - It sends no `set` or `reset`, and no `module` for a dial turn outside Develop. It drops turns and presses rather than holding them.
+  - Its strips show that the photo is locked. A dial that's turned or pressed shows an alert, once per burst.
+  - Tapping the strip still changes the bank.
+- **`err locked`** answers a `set` or `reset` the deck sent before `state.locked` reached it, so it usually arrives just after that `state`. The deck shows an alert on that dial. Lightroom may still be tracking a gesture: the `set`'s own, or the one a `reset` ended without `done`. If the deck hasn't sent that gesture's `done` yet, it sends it then.
 
 ## Guard
 
@@ -123,7 +143,14 @@ While `Config.GUARD` is true, writes only go through when the active catalog's p
 - **Writes:** `set`, `reset`, `flag` and `preset`. `reload` is refused at the same times, because it can swap the write handlers.
 - **A refused write** gets `err {code: "guard"}`. Lightroom also shows a bezel saying why, at most every 5 s, and the deck shows an alert on the key or dial that sent it.
 - **`hello.writable`** says up front whether writes will go through. When it's false, a dial still sends the first `set` of each burst and keeps the rest, so Lightroom's bezel says why nothing moves and `err guard` alerts the dial.
-- **Order of checks** for a write: fields (`bad`), the guard (`guard`), then for `set` a stale gesture (`stale`), the switch to Develop if needed (`noDevelop`), then the target photo and param (`noPhoto`, `bad`, `notFound`). A refused write changes no value. A `bad` field, `guard` or `stale` refusal comes before the module switch, so it leaves the module alone; a `noPhoto` or unknown-param refusal comes after it, so Lightroom may already be in Develop.
+- **Order of checks** for a write:
+  1. fields (`bad`);
+  2. the guard (`guard`);
+  3. for `set` and `reset`, a stale gesture or photo (`stale`), then a locked photo (`locked`);
+  4. the switch to Develop if needed (`noDevelop`). After a switch, `set` and `reset` check the target photo again: another photo is `stale`, and a lock the poll read meanwhile is `locked`;
+  5. the target photo and param (`noPhoto`, `bad`, `notFound`).
+
+  A refused write changes no value. Refusals at steps 1–3 come before the module switch, so they leave the module alone. Refusals at steps 4 and 5 come after it, so Lightroom may already be in Develop.
 
 ## Errors
 
@@ -136,7 +163,8 @@ While `Config.GUARD` is true, writes only go through when the active catalog's p
 | `unknown` | Unknown command type |
 | `noDevelop` | Couldn't switch to Develop |
 | `noPhoto` | No target photo, for `set`, `reset`, `flag` and `preset` |
-| `stale` | The `set`'s gesture ended when the photo or module changed; nothing changed. The deck goes on with a new gesture and raises no alert (see [Gestures](#gestures)) |
+| `stale` | The `set`'s gesture ended when the photo or module changed, a `set` or `reset` carried a `ph` that isn't the target photo, or the target photo changed while Lightroom switched to Develop for it. No value changed. The deck goes on with a new gesture and raises no alert (see [Gestures](#gestures)) |
+| `locked` | A background AI process holds the target photo. Nothing changed. The deck shows an alert (see [Locked photos](#locked-photos)) |
 | `notFound` | No preset with that `uuid` |
 | `busy` | The catalog was busy; `withWriteAccessDo` timed out |
 | `failed` | The handler raised an error; `msg` has it |
@@ -165,7 +193,7 @@ Spike S2 measured `set` at 60 a second on a 47.7 MB raw: about 1 ms in Lightroom
 | `{"raw": "…"}` | A raw line the deck sends, for malformed input |
 | `{"lr": {…}}` | A message Lightroom must send next |
 | `{"never": {…}}` | No message matching this may arrive after the previous `lr` match (or the start), up to the message that matches the next `lr` line. That includes messages that arrived before the `never` line was read. The message that matches the next `lr` line isn't checked. After the last `lr` line, `never` lines hold to the end of the fixture. |
-| `{"user": {…}}` | Something the user does in Lightroom. Offline runners apply it to their fake Lightroom: `{"photo": "102"}` makes that photo the only selected one and the target, `{"module": "library"}` switches modules, `{"edit": {"Exposure": 0.5}}` is a mouse edit on the target photo, and `{"selected": ["101", "102"]}` changes the selection, with the first id as the target. An empty `selected` leaves no target photo. |
+| `{"user": {…}}` | Something the user does in Lightroom. Offline runners apply it to their fake Lightroom: `{"photo": "102"}` makes that photo the only selected one and the target, `{"module": "library"}` switches modules, `{"edit": {"Exposure": 0.5}}` is a mouse edit on the target photo, and `{"selected": ["101", "102"]}` changes the selection, with the first id as the target. An empty `selected` leaves no target photo. `{"locked": ["101"]}` makes exactly these photos locked, as if an AI process held them, and `[]` unlocks every photo. |
 | `{"wait": ms}` | Lets time pass, for example for the 2 s gesture timeout |
 | `{"expect": {…}}` | Lightroom's state must now be this. Offline runners check whichever fields they model: `values` (`{photo: {param: v}}`), `flags` (`{photo: flag}`), `target`, `module`, `view` (`"before"` or `"loupe"`), `tracking` (false when no gesture is open), `applied` (`{photo: [uuid]}`). `values` and `flags` are partial: only the listed photos and params are checked. `applied` is exact: exactly the listed photos have presets applied, with these uuids in order, so `"applied": {}` means none. |
 
@@ -204,3 +232,9 @@ Every runner reads the same files: the Lua unit tests with stubbed `Lr*` modules
 - **Guard:** `reload` is refused whenever writes would be. Writes are checked in a fixed order.
 - **Rates:** pushes of every watched value keep to the `vals` limit. One early final `set` per gesture is allowed when the deck ends a gesture to start another.
 - **Fixtures:** the `setup` line comes after any notes. `never` windows are defined, along with what happens after the last `lr` line. `applied` is matched exactly. There's a greeting rule for socket runners, and `target` defaults to the first selected photo.
+
+2026-10-31, for Phase 6. Nothing here changes `v` either: Lightroom ignores fields it doesn't know, and an older deck ignores `state.locked` and shows an alert for `locked`.
+- **New:** `ph` on `set` and `reset`, the photo the deck worked from. A wrong `ph` gets `stale`. This closes the gap between a photo change in Lightroom and its `state` reaching the deck (see [Gestures](#gestures)). Fixture `stale-photo.jsonl`.
+- **New:** `state.locked` and `err {code: "locked"}`, for photos a background AI process holds (see [Locked photos](#locked-photos)). Fixture `locked.jsonl`.
+- **Fixtures:** the `user` line `{"locked": […]}`.
+- **Settled in review:** a `null` `ph` counts as absent. After a switch to Develop, `set` and `reset` check the target photo again. With no photo in its `state`, the deck sends no `set` or `reset`. Lightroom keeps only the latest stale `g`. `err locked` usually arrives just after `state.locked`.

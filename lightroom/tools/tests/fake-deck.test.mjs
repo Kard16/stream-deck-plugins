@@ -36,6 +36,8 @@ describe('fake deck: smoke.json against the mock', () => {
   test('the CLI passes in Develop and leaves the photo as it found it', async () => {
     await withMock({}, async (mock) => {
       const before = photoState(mock);
+      const sets = [];
+      mock.control.on('command', (m) => { if (m.t === 'set' || m.t === 'reset') sets.push(m); });
       const r = await runNode(['fake-deck/fake-deck.mjs', SMOKE, '--ports', `${mock.cmdPort},${mock.evtPort}`]);
       assert.equal(r.code, 0, r.stdout + r.stderr);
       assert.match(r.stdout, /^smoke: PASS \(/m);
@@ -48,6 +50,26 @@ describe('fake deck: smoke.json against the mock', () => {
       assert.equal(steps[0].kind, 'gesture');
       assert.equal(steps[0].from, steps[0].to, '+0.1 and back');
       assert.deepEqual(mock.control.state().watch, smoke.steps.find((s) => s.send && s.send.t === 'watch').send.ps);
+      assert.deepEqual(sets.map((m) => [m.t, m.ph]), [['set', '101'], ['set', '101']], 'each set carries ph, the photo its values came from');
+    });
+  });
+
+  // The manual clock: Lightroom's poll never runs, so no state tells the fake deck that the user clicked another
+  // photo. Without ph, cleanup's set would start a new gesture there and write 101's Exposure onto 102.
+  test('cleanup after a photo change it hasn\'t heard of: its set carries ph, so Lightroom refuses it and 102 is untouched', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const before = mock.control.state().photos;
+      mock.control.on('sent', (m) => { if (m.t === 'ack' && m.g === 1) setImmediate(() => mock.control.user({ photo: '102' })); });
+      const sets = [];
+      mock.control.on('command', (m) => { if (m.t === 'set') sets.push(m); });
+      const script = failAfter((s) => s.expect && s.expect.t === 'ack' && s.expect.v === '$exp1');
+      const r = await runScript(script, { cmdPort: mock.cmdPort, evtPort: mock.evtPort, quiet: true });
+      assert.equal(r.ok, false);
+      assert.deepEqual(r.failures.map((f) => f.error.match(/injected failure|"code":"stale"/)?.[0]), ['injected failure', '"code":"stale"'], JSON.stringify(r.failures));
+      assert.deepEqual(sets.map((m) => [m.g, m.ph]), [[1, '101'], [99, '101']]);
+      const s = mock.control.state();
+      assert.deepEqual(s.photos[102].values, before[102].values, 'nothing landed on 102');
+      assert.equal(s.staleG, 99);
     });
   });
 

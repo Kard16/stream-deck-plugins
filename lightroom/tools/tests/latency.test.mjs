@@ -11,7 +11,11 @@ describe('latency harness against the mock', () => {
   test('a short run: every set acked with its value, nothing leaked, the value put back', async () => {
     await withMock({}, async (mock) => {
       const before = mock.control.state().photos[101].values.Exposure;
+      const sets = [];
+      mock.control.on('command', (m) => { if (m.t === 'set') sets.push(m); });
       const r = await runLatency({ cmdPort: mock.cmdPort, evtPort: mock.evtPort, rates: [15, 60], burstMs: 600, gapMs: 200 });
+      assert.ok(sets.length >= 7 && sets.every((m) => m.ph === '101'), `every set carries ph 101, the run's photo: ${JSON.stringify(sets.filter((m) => m.ph !== '101'))}`);
+      assert.deepEqual([...new Set(sets.map((m) => m.g))], [1, 2, 3], 'two bursts and the restore');
       assert.equal(r.bursts.length, 2);
       assert.equal(r.base, before);
       for (const b of r.bursts) {

@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { DEFAULT_BANKS, type Slot } from "../src/banks.js";
+import { DEFAULT_BANKS, type Slot, watchList } from "../src/banks.js";
+import { DialDeck } from "../src/dial/deck.js";
+import { LrClient } from "../src/lr/client.js";
 import type { Command, SetCmd } from "../src/lr/protocol.js";
 import { LrModel } from "../src/model/model.js";
 import { accelerate } from "../src/model/steps.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { FakeLink } from "./helpers/fake-link.js";
+import { FakeLr, standardLightroom } from "./helpers/fake-lr.js";
+import { sleep, waitFor } from "./helpers/wait.js";
 
 const slots = new Map<string, Slot>();
 for (const bank of DEFAULT_BANKS.banks) for (const s of bank) if (s) slots.set(s.param, s);
@@ -21,6 +25,16 @@ const JPG_RANGES = { Temperature: [-100, 100], Tint: [-100, 100], Exposure: [-5,
 const RAW_VALUES = { Temperature: 5500, Tint: 10, Exposure: 0.35, Contrast: 0, Shadows: 15 };
 
 const DIAL = "dial-0";
+
+const STATE_101 = { t: "state", module: "develop", photo: "101", file: "DSC0101.ARW", flag: 0, rating: 0, label: "none", sel: 1, locked: false };
+const STATE_102 = { t: "state", module: "develop", photo: "102", file: "DSC0102.ARW", flag: 0, rating: 2, label: "red", sel: 1, locked: false };
+
+/** Photo 102's state, ranges and vals, in the order Lightroom sends them after a photo change. */
+function arrive102(link: FakeLink, extra: Record<string, unknown> = {}): void {
+	link.lr({ ...STATE_102, ...extra });
+	link.lr({ t: "ranges", ranges: RAW_RANGES });
+	link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+}
 
 function setup(opts: { module?: string; writable?: boolean; values?: boolean } = {}) {
 	const clock = new FakeClock();
@@ -53,7 +67,7 @@ describe("value model: gestures", () => {
 	test("a turn moves the value at once and sends set with the absolute value and a gesture number", () => {
 		const { link, model } = setup();
 		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "applied");
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.38, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" }]);
 		assert.ok(Math.abs((model.view("Exposure").value ?? 0) - (0.35 + 1 / 30)) < 1e-9);
 		assert.equal(model.view("Exposure").adjusting, true);
 		noProblems(link);
@@ -99,7 +113,7 @@ describe("value model: gestures", () => {
 	test("push + turn: fine steps of a quarter step, and done on dial-up rather than after 800 ms", () => {
 		const { clock, link, model } = setup();
 		model.turn("Contrast", 4, true, slot("Contrast"), DIAL); // 4 fine ticks = 1 unit
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1, ph: "101" }]);
 		clock.advance(100);
 		model.release(DIAL);
 		assert.deepEqual(link.take(), [{ t: "done", g: 1 }]);
@@ -112,9 +126,9 @@ describe("value model: gestures", () => {
 		clock.advance(10);
 		model.turn("Contrast", 4, true, slot("Contrast"), DIAL); // within the 34 ms set interval
 		model.release(DIAL);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1 }], "the second set waits for the rate limit");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1, ph: "101" }], "the second set waits for the rate limit");
 		clock.advance(40);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 2, g: 1 }, { t: "done", g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 2, g: 1, ph: "101" }, { t: "done", g: 1 }]);
 		noProblems(link);
 	});
 
@@ -126,13 +140,13 @@ describe("value model: gestures", () => {
 		clock.advance(2);
 		model.turn("Contrast", 4, true, slot("Contrast"), DIAL); // a new gesture 5 ms after the last set
 		assert.deepEqual(strip(link.take()), [
-			{ t: "set", p: "Contrast", v: 1, g: 1 },
+			{ t: "set", p: "Contrast", v: 1, g: 1, ph: "101" },
 			{ t: "done", g: 1 },
 		]);
 		clock.advance(28);
 		assert.deepEqual(link.take(), [], "not before 34 ms after Contrast's last set");
 		clock.advance(1);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 2, g: 2 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 2, g: 2, ph: "101" }]);
 		noProblems(link);
 	});
 
@@ -142,7 +156,7 @@ describe("value model: gestures", () => {
 			model.turn("Contrast", dir, true, slot("Contrast"), DIAL); // ±0.25: rounds to 0, nothing to send
 			assert.deepEqual(link.take(), []);
 			model.turn("Contrast", dir, true, slot("Contrast"), DIAL); // ±0.5: rounds away from zero
-			assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: dir, g: 1 }], `direction ${dir}`);
+			assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: dir, g: 1, ph: "101" }], `direction ${dir}`);
 			noProblems(link);
 		}
 	});
@@ -155,10 +169,10 @@ describe("value model: gestures", () => {
 		clock.advance(5);
 		model.turn("Contrast", 1, false, slot("Contrast"), "dial-3");
 		assert.deepEqual(strip(link.take()), [
-			{ t: "set", p: "Exposure", v: 0.38, g: 1 },
-			{ t: "set", p: "Exposure", v: 0.42, g: 1 },
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "set", p: "Exposure", v: 0.42, g: 1, ph: "101" },
 			{ t: "done", g: 1 },
-			{ t: "set", p: "Contrast", v: 1, g: 2 },
+			{ t: "set", p: "Contrast", v: 1, g: 2, ph: "101" },
 		]);
 		noProblems(link);
 	});
@@ -189,7 +203,7 @@ describe("value model: gestures", () => {
 		assert.deepEqual(link.take(), []);
 		clock.advance(50);
 		model.turn("Contrast", 1, true, slot("Contrast"), DIAL); // 0.5 rounds to 1
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1, ph: "101" }]);
 		clock.advance(1000);
 		link.take();
 		model.turn("Exposure", 1, true, slot("Exposure"), DIAL); // 0.35 + 1/120
@@ -229,7 +243,7 @@ describe("value model: echoes and acks", () => {
 		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
 		clock.advance(800); // done
 		assert.deepEqual(strip(link.take()), [
-			{ t: "set", p: "Exposure", v: 0.38, g: 1 },
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
 			{ t: "done", g: 1 },
 		]);
 		link.lr({ t: "vals", vals: { Exposure: 0.35 } }); // an echo from before the gesture settled
@@ -271,7 +285,7 @@ describe("value model: outside Develop", () => {
 		link.lr({ t: "ranges", ranges: RAW_RANGES });
 		assert.deepEqual(link.take(), [], "ranges alone don't release the ticks");
 		link.lr({ t: "vals", vals: RAW_VALUES });
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.42, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.42, g: 1, ph: "101" }]);
 		assert.deepEqual(model.held, []);
 		noProblems(link);
 	});
@@ -311,7 +325,7 @@ describe("value model: outside Develop", () => {
 		assert.deepEqual(link.take(), [], "no module command: already in Develop");
 		link.lr({ t: "ranges", ranges: JPG_RANGES });
 		link.lr({ t: "vals", vals: { Temperature: 0, Tint: 0, Exposure: 0, Contrast: 5 } });
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.03, g: 2 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.03, g: 2, ph: "104" }]);
 		noProblems(link);
 	});
 
@@ -324,7 +338,7 @@ describe("value model: outside Develop", () => {
 		assert.equal(model.turn("Temperature", 1, false, slot("Temperature"), DIAL), "held", "the raw file's Kelvin range would step 50 K and clamp to 2000");
 		assert.deepEqual(link.take(), []);
 		link.lr({ t: "ranges", ranges: { Temperature: [-100, 100] } });
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Temperature", v: 1, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Temperature", v: 1, g: 1, ph: "104" }]);
 		assert.equal(model.turn("Contrast", 1, false, slot("Contrast"), DIAL), "applied", "Contrast had its new range all along");
 		noProblems(link);
 	});
@@ -338,8 +352,8 @@ describe("value model: outside Develop", () => {
 		model.beforePhotoChange();
 		link.send({ t: "nav", v: "next" });
 		assert.deepEqual(strip(link.take()), [
-			{ t: "set", p: "Exposure", v: 0.38, g: 1 },
-			{ t: "set", p: "Exposure", v: 0.42, g: 1 },
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "set", p: "Exposure", v: 0.42, g: 1, ph: "101" },
 			{ t: "done", g: 1 },
 			{ t: "nav", v: "next" },
 		]);
@@ -354,7 +368,7 @@ describe("value model: outside Develop", () => {
 		assert.deepEqual(link.take(), [], "still waiting for the new photo's vals");
 		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
 		clock.advance(40);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2 }], "the held tick applies to the new photo's value");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2, ph: "102" }], "the held tick applies to the new photo's value");
 		noProblems(link);
 	});
 
@@ -368,7 +382,7 @@ describe("value model: outside Develop", () => {
 		clock.advance(499);
 		assert.deepEqual(link.take(), []);
 		clock.advance(1);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 1, ph: "101" }]);
 		assert.equal(model.turn("Contrast", 1, false, slot("Contrast"), DIAL), "applied", "turns apply at once again");
 		noProblems(link);
 	});
@@ -381,7 +395,7 @@ describe("value model: outside Develop", () => {
 		link.lr({ t: "vals", vals: RAW_VALUES });
 		assert.deepEqual(link.take(), [], "a value without its range doesn't release the tick");
 		link.lr({ t: "ranges", ranges: RAW_RANGES });
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Temperature", v: 5550, g: 1 }], "50 K a tick on a raw file, not 1");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Temperature", v: 5550, g: 1, ph: "101" }], "50 K a tick on a raw file, not 1");
 		noProblems(link);
 	});
 
@@ -395,8 +409,6 @@ describe("value model: outside Develop", () => {
 });
 
 describe("value model: stale gestures (err stale, PROTOCOL.md Gestures)", () => {
-	const STATE_102 = { t: "state", module: "develop", photo: "102", file: "DSC0102.ARW", flag: 0, rating: 2, label: "red", sel: 1 };
-
 	/** Three turns of Exposure 40 ms apart: gesture 1 sends 0.38, which Lightroom acks, then 0.42 and 0.45. */
 	function threeSets(clock: FakeClock, link: FakeLink, model: LrModel): [SetCmd, SetCmd] {
 		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
@@ -437,7 +449,7 @@ describe("value model: stale gestures (err stale, PROTOCOL.md Gestures)", () => 
 		assert.deepEqual(link.take(), [], "no done when the state comes either, and still waiting for 102's vals");
 		assert.equal(model.view("Exposure").fresh, false);
 		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2 }], "the held turn applies to 102's value");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2, ph: "102" }], "the held turn applies to 102's value");
 		clock.advance(1000);
 		assert.deepEqual(link.take(), [{ t: "done", g: 2 }]);
 		assert.deepEqual(alerts, [], "a stale set raises no alert");
@@ -456,7 +468,7 @@ describe("value model: stale gestures (err stale, PROTOCOL.md Gestures)", () => 
 		assert.deepEqual(model.view("Exposure"), { value: -1, range: [-5, 5], fresh: true, adjusting: false });
 		clock.advance(40);
 		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "applied", "no wait: the deck already has 102's values");
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2, ph: "102" }]);
 		// The err for gesture 1's last set can come after gesture 2 began: it leaves gesture 2 alone.
 		link.err(third, "stale");
 		assert.equal(model.gesture?.g, 2);
@@ -478,7 +490,7 @@ describe("value model: stale gestures (err stale, PROTOCOL.md Gestures)", () => 
 		clock.advance(399);
 		assert.deepEqual(link.take(), [], "500 ms from the first err; the second doesn't restart the wait");
 		clock.advance(1);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.41, g: 2 }], "from the acked 0.38, not the refused 0.45");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.41, g: 2, ph: "101" }], "from the acked 0.38, not the refused 0.45");
 		assert.deepEqual(alerts, []);
 		noProblems(link);
 	});
@@ -493,23 +505,25 @@ describe("value model: stale gestures (err stale, PROTOCOL.md Gestures)", () => 
 		model.turn("Contrast", 1, false, slot("Contrast"), "dial-3"); // ends gesture 1 first
 		const sent = link.take();
 		assert.deepEqual(strip(sent), [
-			{ t: "set", p: "Exposure", v: 0.38, g: 1 },
-			{ t: "set", p: "Exposure", v: 0.42, g: 1 },
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "set", p: "Exposure", v: 0.42, g: 1, ph: "101" },
 			{ t: "done", g: 1 },
-			{ t: "set", p: "Contrast", v: 1, g: 2 },
+			{ t: "set", p: "Contrast", v: 1, g: 2, ph: "101" },
 		]);
-		const [, second] = sent;
-		assert.ok(second);
-		// Lightroom was on photo 102 when 0.42 arrived. It refused that, then took Contrast 1 as a new gesture there.
+		const [, second, , contrast] = sent;
+		assert.ok(second && contrast);
+		// Lightroom was on photo 102 when 0.42 arrived, and refused it. It refuses Contrast 1 too, since its ph is 101.
 		link.err(second, "stale");
 		assert.equal(model.gesture, null);
 		assert.deepEqual(link.take(), [{ t: "done", g: 2 }]);
+		link.err(contrast, "stale");
+		assert.deepEqual(link.take(), [], "nothing more to end");
 		assert.equal(model.turn("Contrast", 1, false, slot("Contrast"), "dial-3"), "held");
 		clock.advance(40);
 		link.lr(STATE_102);
 		link.lr({ t: "ranges", ranges: RAW_RANGES });
-		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1, Contrast: 1 } });
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 2, g: 3 }], "a new gesture from Lightroom's value for 102");
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Contrast", v: 1, g: 3, ph: "102" }], "a new gesture from Lightroom's value for 102");
 		assert.equal(model.view("Exposure").value, -1);
 		assert.deepEqual(alerts, []);
 		noProblems(link);
@@ -520,11 +534,11 @@ describe("value model: reset, errors, guard, connection", () => {
 	test("reset sends reset; turns wait for its ack and start from the reset value", () => {
 		const { link, model } = setup();
 		assert.equal(model.reset("Exposure", DIAL), true);
-		assert.deepEqual(strip(link.take()), [{ t: "reset", p: "Exposure" }]);
+		assert.deepEqual(strip(link.take()), [{ t: "reset", p: "Exposure", ph: "101" }]);
 		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held");
 		link.lr({ t: "ack", p: "Exposure", v: 0 });
 		assert.equal(model.view("Exposure").value, 0.03333333333333333);
-		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.03, g: 1 }]);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.03, g: 1, ph: "101" }]);
 		noProblems(link);
 	});
 
@@ -598,5 +612,455 @@ describe("value model: reset, errors, guard, connection", () => {
 		assert.deepEqual(alerts, [DIAL]);
 		assert.equal(model.view("Contrast").value, 3);
 		assert.equal(model.view("Contrast").fresh, false);
+	});
+});
+
+describe("value model: ph, the photo the deck worked from (PROTOCOL.md, Gestures)", () => {
+	test("every set and reset carries the photo of the latest state, read as it goes out", () => {
+		const { clock, link, model } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		clock.advance(10);
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2"); // waits for the set interval
+		model.turn("Contrast", 1, false, slot("Contrast"), "dial-3"); // takes over: Exposure's final set goes out early
+		model.reset("Contrast", "dial-3");
+		assert.deepEqual(strip(link.take()), [
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "set", p: "Exposure", v: 0.42, g: 1, ph: "101" },
+			{ t: "done", g: 1 },
+			{ t: "set", p: "Contrast", v: 1, g: 2, ph: "101" },
+			{ t: "reset", p: "Contrast", ph: "101" },
+		]);
+		link.lr({ t: "ack", p: "Contrast", v: 0 });
+		clock.advance(1000);
+		// Next: a turn before Lightroom says where it went waits, and goes out with the photo it applies to.
+		model.beforePhotoChange();
+		link.send({ t: "nav", v: "next" });
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), "dial-2"), "held");
+		link.lr(STATE_102);
+		model.reset("Tint", "dial-1"); // before 102's values: it's 102's reset already
+		link.lr({ t: "ranges", ranges: RAW_RANGES });
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+		assert.deepEqual(strip(link.take()), [
+			{ t: "nav", v: "next" },
+			{ t: "reset", p: "Tint", ph: "102" },
+			{ t: "set", p: "Exposure", v: -0.97, g: 3, ph: "102" },
+		]);
+		noProblems(link);
+	});
+
+	test("the read-only probe carries it too", () => {
+		const { link, model } = setup({ writable: false });
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" }]);
+		noProblems(link);
+	});
+
+	test("with no target photo there's no id to send: a press sends no reset and the dial alerts, as Lightroom's noPhoto would", () => {
+		const { link, model, alerts } = setup();
+		link.lr({ ...STATE_101, photo: null, file: null, sel: 0 });
+		// Unchecked, a reset could land on a photo Lightroom has just gained (PROTOCOL.md, Gestures: with no photo).
+		assert.equal(model.reset("Exposure", DIAL), false);
+		assert.deepEqual(link.take(), [], "nothing sent");
+		assert.deepEqual(alerts, [DIAL], "one alert");
+		link.lr(STATE_101); // Lightroom has a photo again
+		assert.equal(model.reset("Exposure", DIAL), true);
+		assert.deepEqual(strip(link.take()), [{ t: "reset", p: "Exposure", ph: "101" }]);
+		noProblems(link);
+	});
+
+	test("with no target photo a refused press changes nothing: held turns stay held", () => {
+		const { link, model, alerts } = setup({ module: "library" });
+		link.lr({ ...STATE_101, module: "library", photo: null, file: null, sel: 0 });
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held", "a turn still asks for Develop");
+		assert.deepEqual(strip(link.take()), [{ t: "module", v: "develop" }]);
+		assert.equal(model.reset("Exposure", "dial-3"), false);
+		assert.deepEqual(link.take(), [], "no reset");
+		assert.deepEqual(alerts, ["dial-3"]);
+		assert.deepEqual(model.held, ["Exposure"], "the held turn is untouched");
+		noProblems(link);
+	});
+
+	test("with no target photo a turn sends no set either, even when values came ahead of their photo's state: the dial alerts once per burst", () => {
+		const { clock, link, model, alerts } = setup();
+		link.lr({ ...STATE_101, photo: null, file: null, sel: 0 }); // Develop, with no photo
+		// Lightroom gained photo 102, and its answer to watch carried 102's ranges and vals ahead of 102's state.
+		link.lr({ t: "ranges", ranges: RAW_RANGES });
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+		for (let i = 0; i < 5; i++) {
+			assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "noPhoto");
+			clock.advance(50);
+		}
+		assert.deepEqual(link.take(), [], "no set, which would have gone without ph");
+		assert.deepEqual(alerts, [DIAL], "one alert for the burst");
+		assert.equal(model.gesture, null);
+		assert.equal(model.view("Exposure").value, -1, "the value didn't move");
+		clock.advance(800);
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		assert.deepEqual(alerts, [DIAL, DIAL], "after a pause, a new burst");
+		arrive102(link);
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "applied", "once the state names the photo");
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 1, ph: "102" }]);
+		noProblems(link);
+	});
+
+	test("turns held for Develop send no set while the state names no photo, even when values come first: they go with the photo's state, with its ph", () => {
+		const { link, model, alerts } = setup({ module: "library" });
+		link.lr({ ...STATE_101, module: "library", photo: null, file: null, sel: 0 });
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held");
+		assert.deepEqual(strip(link.take()), [{ t: "module", v: "develop" }]);
+		link.lr({ ...STATE_101, photo: null, file: null, sel: 0 }); // in Develop, still with no photo
+		link.lr({ t: "ranges", ranges: RAW_RANGES }); // values for a photo whose state hasn't come yet
+		link.lr({ t: "vals", vals: { ...RAW_VALUES, Exposure: -1 } });
+		assert.deepEqual(link.take(), [], "no set, which would have gone without ph");
+		assert.deepEqual(model.held, ["Exposure"], "still held");
+		arrive102(link);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 1, ph: "102" }], "the held tick applies to 102's value");
+		assert.deepEqual(alerts, []);
+		noProblems(link);
+	});
+
+	test("a gesture that starts just before a photo change reaches the deck is refused, and the next starts from the new photo", () => {
+		for (const order of ["the err first", "the state first"] as const) {
+			const { clock, link, model, alerts } = setup();
+			// The user moved to photo 102 in Lightroom, and its state is on the way: a new gesture starts from 101's value.
+			model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+			const [set] = link.take();
+			assert.ok(set);
+			assert.deepEqual(strip([set]), [{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" }], order);
+			if (order === "the state first") arrive102(link);
+			link.err(set, "stale");
+			const result = model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+			assert.equal(result, order === "the err first" ? "held" : "applied", `${order}: wait only for a photo the deck hasn't seen`);
+			if (order === "the err first") arrive102(link);
+			clock.advance(40);
+			assert.deepEqual(
+				sets(link.take()).map((s) => strip([s])[0]),
+				[{ t: "set", p: "Exposure", v: -0.97, g: 2, ph: "102" }],
+				`${order}: one tick from 102's -1, never 101's value`,
+			);
+			assert.deepEqual(alerts, [], order);
+			noProblems(link);
+		}
+	});
+
+	test("a reset refused as stale is dropped without an alert; a turn waiting for it then goes, and its own ph catches it", () => {
+		const { clock, link, model, alerts } = setup();
+		// The user moved to photo 102 in Lightroom a moment ago, and the deck hasn't heard.
+		model.reset("Exposure", DIAL);
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held", "turns wait for the reset's answer");
+		const [reset] = link.take();
+		assert.ok(reset);
+		link.err(reset, "stale");
+		assert.deepEqual(alerts, []);
+		const [set] = link.take();
+		assert.ok(set);
+		assert.deepEqual(strip([set]), [{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" }], "the reset is gone; the held turn goes");
+		link.err(set, "stale");
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held", "now turns wait for the new photo");
+		arrive102(link);
+		clock.advance(40);
+		assert.deepEqual(strip(link.take()), [{ t: "set", p: "Exposure", v: -0.97, g: 2, ph: "102" }]);
+		assert.deepEqual(alerts, []);
+		noProblems(link);
+	});
+});
+
+describe("value model: locked photos (PROTOCOL.md, Locked photos)", () => {
+	const locked = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ ...STATE_101, locked: true, ...extra });
+
+	test("the lock ends the open gesture with done, and its pending final set never goes out", () => {
+		const { clock, link, model } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL); // 0.38 goes at once
+		link.lr({ t: "ack", p: "Exposure", v: 0.38, g: 1 });
+		clock.advance(10);
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL); // 0.42 waits for the set interval
+		link.lr(locked());
+		assert.equal(model.state.locked, true);
+		assert.equal(model.gesture, null);
+		clock.advance(1000);
+		assert.deepEqual(strip(link.take()), [
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "done", g: 1 },
+		]);
+		assert.equal(model.view("Exposure").value, 0.38, "what Lightroom has, not the 0.42 that never went out");
+		noProblems(link);
+	});
+
+	test("while locked, turns and resets send nothing and hold nothing, and each dial alerts once per burst", () => {
+		const { clock, link, model, alerts } = setup();
+		link.lr(locked());
+		for (let i = 0; i < 40; i++) {
+			assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), "dial-2"), "locked"); // a 2 s spin
+			clock.advance(50);
+		}
+		assert.equal(model.reset("Exposure", "dial-2"), false, "a press straight after: the same burst");
+		assert.deepEqual(alerts, ["dial-2"], "one alert for the whole burst");
+		model.turn("Contrast", 1, false, slot("Contrast"), "dial-3");
+		assert.deepEqual(alerts, ["dial-2", "dial-3"], "another dial has bursts of its own");
+		clock.advance(800);
+		assert.equal(model.reset("Exposure", "dial-2"), false);
+		assert.deepEqual(alerts, ["dial-2", "dial-3", "dial-2"], "after a pause, a new burst");
+		assert.deepEqual(link.take(), []);
+		assert.deepEqual(model.held, []);
+		assert.equal(model.view("Exposure").value, 0.35);
+	});
+
+	test("read-only as well: the lock comes first, so not even the guard's probe set goes out", () => {
+		const { link, model, alerts } = setup({ writable: false });
+		link.lr(locked());
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "locked");
+		assert.deepEqual(link.take(), []);
+		assert.deepEqual(alerts, [DIAL]);
+	});
+
+	test("outside Develop while locked, a turn sends no module develop", () => {
+		const { link, model, alerts } = setup({ module: "library" });
+		link.lr(locked({ module: "library" }));
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "locked");
+		assert.deepEqual(link.take(), []);
+		assert.deepEqual(model.held, []);
+		assert.deepEqual(alerts, [DIAL]);
+	});
+
+	test("turns held when the lock comes are dropped with an alert, and nothing goes out for them later", () => {
+		const { clock, link, model, alerts } = setup({ module: "library" });
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		assert.deepEqual(strip(link.take()), [{ t: "module", v: "develop" }]);
+		link.lr(locked()); // in Develop now, on a locked photo
+		link.lr({ t: "ranges", ranges: RAW_RANGES });
+		link.lr({ t: "vals", vals: RAW_VALUES });
+		assert.deepEqual(model.held, []);
+		clock.advance(2500);
+		assert.deepEqual(link.take(), [], "no set, then or when the hold would have run out");
+		assert.deepEqual(alerts, [DIAL], "one alert");
+	});
+
+	test("moving onto a locked photo: the gesture ends with done, and the turns held for the new photo are dropped", () => {
+		const { clock, link, model, alerts } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		model.beforePhotoChange(); // Next
+		link.send({ t: "nav", v: "next" });
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "held");
+		arrive102(link, { locked: true });
+		clock.advance(1000);
+		assert.deepEqual(strip(link.take()), [
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "done", g: 1 },
+			{ t: "nav", v: "next" },
+		]);
+		assert.deepEqual(alerts, [DIAL]);
+	});
+
+	test("when the lock ends everything works at once, and nothing carries over, not even a burst", () => {
+		const { clock, link, model, alerts } = setup();
+		link.lr(locked());
+		for (let i = 0; i < 10; i++) {
+			model.turn("Exposure", 1, false, slot("Exposure"), DIAL); // one burst, 0 to 900 ms: one alert
+			clock.advance(100);
+		}
+		link.lr(STATE_101);
+		assert.equal(model.turn("Exposure", 1, false, slot("Exposure"), DIAL), "applied", "no wait");
+		assert.equal(model.reset("Contrast", "dial-3"), true);
+		assert.deepEqual(strip(link.take()), [
+			{ t: "set", p: "Exposure", v: 0.38, g: 1, ph: "101" },
+			{ t: "done", g: 1 },
+			{ t: "reset", p: "Contrast", ph: "101" },
+		], "one tick from 0.35, none of the locked turns, and the reset ends that gesture as usual");
+		clock.advance(100);
+		// Locked again 200 ms after the last locked turn: a new lock's first turn alerts, though it's within 800 ms.
+		link.lr(locked());
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		assert.deepEqual(alerts, [DIAL, DIAL]);
+		noProblems(link);
+	});
+
+	test("err locked on a set, before the deck has seen the lock: that dial alerts, and its gesture ends with done", () => {
+		const { clock, link, model, alerts } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		link.lr({ t: "ack", p: "Exposure", v: 0.38, g: 1 });
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		const [, second, third] = link.take();
+		assert.ok(second && third);
+		link.err(second, "locked");
+		link.err(third, "locked");
+		assert.deepEqual(link.take(), [{ t: "done", g: 1 }], "one done");
+		assert.deepEqual(alerts, ["dial-2"]);
+		assert.equal(model.gesture, null);
+		assert.equal(model.view("Exposure").value, 0.38, "the value Lightroom last confirmed");
+		link.lr(locked()); // the state from the poll that saw the lock
+		assert.deepEqual(link.take(), [], "nothing more to end");
+	});
+
+	test("err locked on sets after state.locked, the order Lightroom sends them in: one done, from the state, and the errs bring back the value Lightroom confirmed", () => {
+		const { clock, link, model, alerts } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		link.lr({ t: "ack", p: "Exposure", v: 0.38, g: 1 });
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		clock.advance(40);
+		model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+		const [, second, third] = link.take();
+		assert.ok(second && third);
+		// Lightroom's poll read the lock while 0.42 and 0.45 were on their way: its state.locked is ahead of their errs on the event socket.
+		link.lr(locked());
+		assert.deepEqual(link.take(), [{ t: "done", g: 1 }], "the state ends the gesture");
+		link.err(second, "locked");
+		link.err(third, "locked");
+		assert.deepEqual(link.take(), [], "no done for the errs");
+		assert.deepEqual(alerts, ["dial-2"]);
+		assert.equal(model.view("Exposure").value, 0.38, "the value Lightroom last confirmed, not the refused 0.45");
+		clock.advance(400);
+		link.lr(STATE_101); // the lock ends; Exposure didn't change, so no vals follow
+		assert.equal(model.view("Exposure").value, 0.38);
+		noProblems(link);
+	});
+
+	test("err locked on a reset: the dial alerts, and the gesture the reset ended gets its done", () => {
+		const { link, model, alerts } = setup();
+		model.turn("Exposure", 1, false, slot("Exposure"), DIAL);
+		model.reset("Exposure", DIAL); // ends gesture 1 without done: Lightroom's reset would end it
+		const sent = link.take();
+		assert.deepEqual(
+			sent.map((c) => c.t),
+			["set", "reset"],
+		);
+		const reset = sent[1];
+		assert.ok(reset);
+		link.err(reset, "locked");
+		assert.deepEqual(link.take(), [{ t: "done", g: 1 }], "Lightroom changed nothing, so it still tracks gesture 1");
+		assert.deepEqual(alerts, [DIAL]);
+		noProblems(link);
+	});
+});
+
+describe("the deck where the deck-vs-mock integration didn't reach (plan.md, ladder step 5)", () => {
+	test("hello.v other than 1: the strips say Mismatch, inputs alert, and nothing but hello and ping goes out", async () => {
+		const v2 = { t: "hello", v: 2, lr: "16.0", guard: "on", writable: true, inst: "v2" };
+		const lr = await FakeLr.start(
+			standardLightroom(v2, STATE_101, (cmd, fake) => {
+				// A v2 Lightroom may well send values: they change nothing.
+				if (cmd.t === "hello") {
+					fake.send({ t: "ranges", ranges: RAW_RANGES });
+					fake.send({ t: "vals", vals: RAW_VALUES });
+				}
+			}),
+		);
+		const client = new LrClient({ cmdPort: lr.cmdPort, evtPort: lr.evtPort, ver: "test", watch: watchList(DEFAULT_BANKS), timing: { pingIntervalMs: 100, tickMs: 20 } });
+		const model = new LrModel(client);
+		const deck = new DialDeck(DEFAULT_BANKS, model);
+		const alerts: string[] = [];
+		for (let c = 0; c < 4; c++) deck.add(`dial-${c}`, c, { setFeedback: () => undefined, showAlert: () => alerts.push(`dial-${c}`) });
+		try {
+			client.start();
+			await waitFor(() => client.state === "mismatch" && model.view("Exposure").value === 0.35, "the mismatch, and Lightroom's values");
+			assert.equal(model.hello?.v, 2);
+			assert.equal(deck.rotate("dial-2", 1, false), "offline");
+			deck.down("dial-3");
+			deck.up("dial-3");
+			deck.tap("dial-1", true);
+			model.beforePhotoChange();
+			assert.equal(client.send({ t: "nav", v: "next" }), false, "what a Next key sends is refused too");
+			await sleep(300);
+			assert.deepEqual([...new Set(lr.commands().map((c) => c.t))].sort(), ["hello", "ping"]);
+			assert.ok(lr.commands("ping").length >= 2, "the heartbeat goes on");
+			assert.deepEqual(alerts, ["dial-2", "dial-3", "dial-1"]);
+			assert.deepEqual(
+				[0, 1, 2, 3].map((c) => (deck.painted(`dial-${c}`)?.value as { value?: unknown } | undefined)?.value),
+				["Mismatch", "Mismatch", "Mismatch", "Mismatch"],
+			);
+			assert.deepEqual(model.held, []);
+		} finally {
+			client.stop();
+			await lr.close();
+		}
+	});
+
+	test("two dials turned at once: each takeover sends the other gesture's final set at once, once, and both values land", () => {
+		const { clock, link, model } = setup();
+		// A Lightroom that acks every set and, after done, sends that gesture's param in vals.
+		const values: Record<string, number> = { Exposure: 0.35, Contrast: 0 };
+		const paramOf = new Map<number, string>();
+		let seen = 0;
+		const lightroom = (): void => {
+			for (; seen < link.sent.length; seen++) {
+				const cmd = link.sent[seen]?.cmd;
+				if (cmd?.t === "set") {
+					values[cmd.p] = cmd.v;
+					paramOf.set(cmd.g, cmd.p);
+					link.lr({ t: "ack", p: cmd.p, v: cmd.v, g: cmd.g });
+				} else if (cmd?.t === "done" && cmd.g !== undefined) {
+					const p = paramOf.get(cmd.g);
+					if (p) link.lr({ t: "vals", vals: { [p]: values[p] } });
+				}
+			}
+		};
+		// Dials 2 and 3 turned together: their ticks interleave, 10 ms apart, so each param's come every 20 ms.
+		for (let i = 0; i < 20; i++) {
+			if (i % 2 === 0) model.turn("Exposure", 1, false, slot("Exposure"), "dial-2");
+			else model.turn("Contrast", 1, false, slot("Contrast"), "dial-3");
+			lightroom();
+			clock.advance(10);
+			lightroom();
+		}
+		clock.advance(1200);
+		lightroom();
+
+		const wire = link.sent.map((s) => ({ ...s.cmd, at: s.at }) as Command & { at: number });
+		const problems: string[] = [];
+		const early: string[] = [];
+		const ended = new Set<number>();
+		const lastSet = new Map<string, number>();
+		wire.forEach((cmd, i) => {
+			if (cmd.t === "done" && cmd.g !== undefined) ended.add(cmd.g);
+			if (cmd.t !== "set") return;
+			if (ended.has(cmd.g)) problems.push(`a set of gesture ${cmd.g} after its done`);
+			const gap = cmd.at - (lastSet.get(cmd.p) ?? Number.NEGATIVE_INFINITY);
+			lastSet.set(cmd.p, cmd.at);
+			if (gap >= Math.ceil(1000 / 30)) return;
+			// Sooner than 30 a second allows: only as a gesture's final set, straight before its done, when another dial took over.
+			const next = wire[i + 1];
+			const later = wire.slice(i + 1).some((c) => c.t === "set" && c.g === cmd.g);
+			if (next?.t !== "done" || next.g !== cmd.g || later || wire[i + 2]?.t !== "set" || (wire[i + 2] as SetCmd).p === cmd.p) {
+				problems.push(`set ${cmd.p} g ${cmd.g} came ${gap} ms after the last one, and isn't an early final set`);
+			} else early.push(`${cmd.p} g ${cmd.g}`);
+		});
+		assert.deepEqual(problems, []);
+		assert.ok(early.length >= 10, `the takeovers sent ${early.length} early final sets`);
+		assert.equal(new Set(early).size, early.length, "at most one per gesture");
+		const gestures = new Set(wire.flatMap((c) => (c.t === "set" ? [c.g] : [])));
+		assert.deepEqual([...gestures].filter((g) => !ended.has(g)), [], "every gesture ended with done");
+		// Both values land: Lightroom holds each param's last set, the deck shows the same, and both moved.
+		assert.deepEqual([model.view("Exposure").value, model.view("Contrast").value], [values.Exposure, values.Contrast]);
+		assert.equal(values.Contrast, 10, "ten whole-number ticks");
+		assert.ok((values.Exposure ?? 0) > 0.6, `Exposure moved to ${values.Exposure}`);
+		assert.equal(model.gesture, null);
+		noProblems(link);
+	});
+
+	test("clamping at both ends of a range: pinned at a limit, more ticks send nothing, and one tick back moves at once", () => {
+		const { clock, link, model } = setup();
+		link.lr({ t: "vals", vals: { Shadows: -98, Temperature: 49_900 } });
+		model.turn("Shadows", -10, false, slot("Shadows"), "dial-1");
+		assert.deepEqual(sets(link.take()).map((s) => s.v), [-100]);
+		clock.advance(50);
+		model.turn("Shadows", -10, false, slot("Shadows"), "dial-1");
+		clock.advance(50);
+		assert.deepEqual(link.take(), [], "nothing new to send at the bottom");
+		model.turn("Shadows", 1, false, slot("Shadows"), "dial-1");
+		assert.deepEqual(sets(link.take()).map((s) => s.v), [-99]);
+		clock.advance(1000);
+		link.take();
+		model.turn("Temperature", 4, false, slot("Temperature"), "dial-0"); // 4 × 50 K past 49 900
+		clock.advance(50);
+		model.turn("Temperature", 4, false, slot("Temperature"), "dial-0");
+		clock.advance(50);
+		assert.deepEqual(sets(link.take()).map((s) => s.v), [50_000], "pinned at the top: one set");
+		assert.equal(model.view("Temperature").value, 50_000);
+		model.turn("Temperature", -1, false, slot("Temperature"), "dial-0");
+		assert.deepEqual(sets(link.take()).map((s) => s.v), [49_950]);
+		noProblems(link);
 	});
 });

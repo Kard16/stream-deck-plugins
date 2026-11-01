@@ -36,18 +36,22 @@ export type StripInput = {
 	conn: ConnState;
 	writable: boolean | null;
 	inDevelop: boolean;
+	/** `state.locked`: a background AI process holds the photo, so turns and presses do nothing (PROTOCOL.md, Locked photos). */
+	locked: boolean;
 };
 
 const STATUS: Partial<Record<ConnState, string>> = { offline: "Offline", busy: "Busy", mismatch: "Mismatch" };
+export const LOCKED_STATUS = "Locked";
 
-/** Dimmed when Lightroom is offline, busy, mismatched, read-only (hello.writable false) or not in Develop. */
-export function isDimmed(i: Pick<StripInput, "conn" | "writable" | "inDevelop">): boolean {
-	return i.conn !== "online" || i.writable === false || !i.inDevelop;
+/** Dimmed when Lightroom is offline, busy, mismatched, read-only (hello.writable false), not in Develop, or the photo is locked. */
+export function isDimmed(i: Pick<StripInput, "conn" | "writable" | "inDevelop" | "locked">): boolean {
+	return i.conn !== "online" || i.writable === false || !i.inDevelop || i.locked;
 }
 
 /**
  * One dial's strip: the slot's label, the bank as "n/4", the value, and a bar over the param's range.
- * Without a connection the value area says why ("Offline", "Busy", "Mismatch"). Empty slots show "—".
+ * Without a connection the value area says why ("Offline", "Busy", "Mismatch"); online, it says "Locked"
+ * while the photo is locked. The rest is dimmed then, as outside Develop. Empty slots show "—".
  */
 export function stripFor(i: StripInput): StripFeedback {
 	const dim = isDimmed(i);
@@ -62,7 +66,7 @@ export function stripFor(i: StripInput): StripFeedback {
 	}
 	const range = i.view?.range ?? null;
 	const value = i.view?.value ?? null;
-	const status = STATUS[i.conn] ?? null;
+	const status = STATUS[i.conn] ?? (i.locked ? LOCKED_STATUS : null);
 	let valueItem: StripItem;
 	if (status) valueItem = { value: status, color: STRIP_COLORS.status, font: STATUS_FONT };
 	else if (value === null) valueItem = { value: "—", color: dim ? STRIP_COLORS.dimValue : STRIP_COLORS.value, font: VALUE_FONT };

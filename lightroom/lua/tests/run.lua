@@ -828,6 +828,383 @@ test('reset ends any gesture, resets to the default and acks without g', functio
   noErrors(env)
 end)
 
+-- ph: the photo the deck worked from ----------------------------------------------------------
+
+-- Sends cmd and says how Lightroom answered it: the err's code, 'ack', or nil.
+local function answered(env, cmd)
+  env.clearEvents()
+  env.cmd(cmd)
+  local e, a = env.last('err'), env.last('ack')
+  return (e and e.code) or (a and 'ack') or nil
+end
+
+test('set and reset with a ph that is not a string answer err bad, and change nothing', function()
+  local env = boot({ module = 'library' })
+  for i, ph in ipairs({ 101, true, { '101' } }) do
+    env.clearEvents()
+    env.cmd({ t = 'set', id = i, p = 'Exposure', v = 1, g = i, ph = ph })
+    local e = env.last('err'); ok(e, 'set case ' .. i .. ' answers err')
+    eq(e.code, 'bad', 'set case ' .. i); eq(e.cmd, 'set'); eq(e.id, i)
+    env.cmd({ t = 'reset', id = 10 + i, p = 'Exposure', ph = ph })
+    e = env.last('err'); eq(e.code, 'bad', 'reset case ' .. i); eq(e.cmd, 'reset'); eq(e.id, 10 + i)
+  end
+  env.advance(0.5)
+  eq(env.module, 'library', 'no switch to Develop'); eq(env.count('module:'), 0)
+  eq(env.count('start:'), 0, 'nothing tracked'); eq(env.count('set:'), 0); eq(env.count('reset:'), 0)
+  eq(require('State').staleG, nil, 'and no g is stale')
+  noErrors(env)
+end)
+
+test('a set whose ph is not the target photo is stale, changes nothing, and its g stays stale', function()
+  -- The user moved to 102 in Lightroom, and the deck turned a dial before 102's state
+  -- reached it, so the set still carries 101 (PROTOCOL.md, Gestures).
+  local env = boot({ module = 'library', watch = WATCH })
+  local State = require 'State'
+  env.select({ '102' })
+  env.step()
+  env.clearEvents()
+  env.cmd({ t = 'set', id = 7, p = 'Exposure', v = 1, g = 4, ph = '101' })
+  local e = env.last('err'); ok(e, 'err'); eq(e.code, 'stale'); eq(e.cmd, 'set'); eq(e.id, 7)
+  env.advance(0.5)
+  eq(env.module, 'library', 'no switch to Develop'); eq(env.count('module:'), 0)
+  eq(env.count('start:'), 0, 'nothing tracked'); eq(env.count('set:'), 0, 'nothing set')
+  eq(State.staleG, 4, 'g 4 is stale')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 4, ph = '102' }), 'stale', 'from then on, even with the right photo')
+  eq(env.count('set:'), 0)
+  eq(answered(env, { t = 'set', p = 'Exposure', v = -0.2, g = 5, ph = '102' }), 'ack', "the deck's next gesture")
+  eq(env.module, 'develop'); eq(State.staleG, nil, 'forgotten once the next gesture starts')
+  near(env.byId['102'].values.Exposure, -0.2); near(env.byId['101'].values.Exposure, 0.35)
+  noErrors(env)
+end)
+
+test('a ph-stale set leaves the open gesture alone', function()
+  local env = boot({ watch = WATCH })
+  eq(answered(env, { t = 'set', p = 'Contrast', v = 10, g = 1, ph = '101' }), 'ack')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 2, g = 2, ph = '104' }), 'stale')
+  eq(tracking(env), 'start:Contrast', 'no tracking change'); eq(env.tracking, 'Contrast')
+  near(env.target.values.Exposure, 0.35, 'no value')
+  eq(answered(env, { t = 'set', p = 'Contrast', v = 12, g = 1, ph = '101' }), 'ack', 'the open gesture carries on')
+  eq(tracking(env), 'start:Contrast'); near(env.target.values.Contrast, 12)
+  noErrors(env)
+end)
+
+test('a reset whose ph is not the target photo is stale: nothing resets, and an open gesture stays open', function()
+  local env = boot({ watch = WATCH })
+  env.target.values.Exposure = 1.5
+  eq(answered(env, { t = 'set', p = 'Contrast', v = 10, g = 1, ph = '101' }), 'ack')
+  env.clearEvents()
+  env.cmd({ t = 'reset', id = 4, p = 'Exposure', ph = '102' })
+  local e = env.last('err'); ok(e, 'err'); eq(e.code, 'stale'); eq(e.cmd, 'reset'); eq(e.id, 4)
+  eq(env.count('reset:'), 0, 'nothing reset'); near(env.target.values.Exposure, 1.5)
+  eq(env.tracking, 'Contrast', 'the Contrast gesture is still open'); eq(env.count('stop'), 0)
+  eq(require('State').staleG, nil, 'a reset has no g to make stale')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '101' }), 'ack', 'with the right photo it resets')
+  eq(env.last('ack').v, 0); eq(env.tracking, nil, 'and ends the gesture, as before')
+  noErrors(env)
+end)
+
+test('with no target photo every ph is wrong: set and reset are stale, before the switch to Develop', function()
+  local env = boot({ module = 'library' })
+  env.select({})
+  env.step()
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 3, ph = '101' }), 'stale', 'set')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '101' }), 'stale', 'reset')
+  env.advance(0.5)
+  eq(env.module, 'library'); eq(env.count('module:'), 0)
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 4 }), 'noPhoto', 'without ph: noPhoto, after the switch, as before')
+  eq(env.module, 'develop')
+  noErrors(env)
+end)
+
+test('ph is compared with the target photo as a string, the way state carries it', function()
+  local env = boot()
+  for i, ph in ipairs({ '101.0', '0101', ' 101', '' }) do
+    eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = i, ph = ph }), 'stale', '"' .. ph .. '"')
+  end
+  eq(env.count('set:'), 0)
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 9, ph = '101' }), 'ack', '"101"')
+  noErrors(env)
+end)
+
+test('ph is checked against the target photo, even before the observer or the poll has seen it change', function()
+  -- The race ph exists for (PROTOCOL.md, Gestures): the user moves to 102, and a set or
+  -- reset the deck worked out from 101 arrives before the observer's sync, 5 ms later, or
+  -- the poll has seen 102. Checked against the photo the poll last saw, it would go
+  -- through, and 101's value would land on 102.
+  local env = boot({ watch = WATCH })
+  env.select({ '102' })
+  eq(require('State').lastPhoto, '101', 'neither the observer nor the poll has seen 102')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '101' }), 'stale', 'set')
+  near(env.byId['102'].values.Exposure, 0.35, 'nothing set on 102'); near(env.byId['101'].values.Exposure, 0.35)
+  eq(env.count('start:'), 0, 'nothing tracked'); eq(env.count('set:'), 0)
+  env.step() -- the deck gets 102's state
+  eq(env.last('state').photo, '102')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = -0.2, g = 2, ph = '102' }), 'ack', "the deck's next gesture")
+  near(env.byId['102'].values.Exposure, -0.2)
+  noErrors(env)
+  env = boot({ watch = WATCH })
+  env.byId['102'].values.Exposure = 1.5
+  env.select({ '102' })
+  eq(require('State').lastPhoto, '101')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '101' }), 'stale', 'reset')
+  near(env.byId['102'].values.Exposure, 1.5, '102 is not reset'); eq(env.count('reset:'), 0)
+  noErrors(env)
+end)
+
+test('set and reset without ph are not checked against the photo, as before', function()
+  local env = boot({ watch = WATCH })
+  env.select({ '102' }) -- an older deck, straight after a photo change it hasn't seen
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1 }), 'ack', 'set')
+  near(env.byId['102'].values.Exposure, 1)
+  eq(answered(env, { t = 'reset', p = 'Contrast' }), 'ack', 'reset')
+  env.select({})
+  eq(answered(env, { t = 'reset', p = 'Contrast' }), 'noPhoto', 'no target photo: noPhoto, not stale')
+  noErrors(env)
+end)
+
+-- Locked photos -------------------------------------------------------------------------------
+
+test('state says whether the target photo is locked, and a change in it pushes state', function()
+  local env = boot({ keepEvents = true })
+  eq(env.events('state')[1].locked, false, 'the greeting says unlocked')
+  env.clearEvents()
+  env.setLocked({ '101' }) -- Denoise starts on the target photo
+  env.step()
+  local st = env.last('state'); ok(st, 'state on locking'); eq(st.photo, '101'); eq(st.locked, true)
+  env.clearEvents()
+  env.step()
+  eq(#env.events('state'), 0, 'no change, no state')
+  env.setLocked({ '102' }) -- and moves on to another photo
+  env.step()
+  st = env.last('state'); ok(st, 'state on unlocking'); eq(st.locked, false)
+  env.select({ '102' })
+  env.step()
+  st = env.last('state'); eq(st.photo, '102'); eq(st.locked, true, 'a new target photo brings its own reading')
+  env.select({})
+  env.step()
+  st = env.last('state'); eq(st.photo, nil); eq(st.locked, false, 'false without a target photo')
+  eq(env.availableOutsideTask, 0)
+  noErrors(env)
+end)
+
+test('set and reset on a locked photo answer err locked before the switch to Develop, and change nothing', function()
+  local setup = Stubs.defaultSetup()
+  setup.photos[1].locked = true -- a background AI process such as Denoise holds 101
+  local env = boot({ setup = setup, module = 'library', watch = WATCH })
+  env.cmd({ t = 'set', id = 2, p = 'Exposure', v = 1, g = 1, ph = '101' })
+  local e = env.last('err'); ok(e, 'err'); eq(e.code, 'locked'); eq(e.cmd, 'set'); eq(e.id, 2)
+  env.cmd({ t = 'reset', id = 3, p = 'Exposure', ph = '101' })
+  e = env.last('err'); eq(e.code, 'locked'); eq(e.cmd, 'reset'); eq(e.id, 3)
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 2 }), 'locked', 'a set without ph')
+  eq(answered(env, { t = 'reset', p = 'Exposure' }), 'locked', 'a reset without ph')
+  env.advance(0.5)
+  eq(env.module, 'library', 'no switch to Develop'); eq(env.count('module:'), 0)
+  eq(env.count('start:'), 0, 'nothing tracked'); eq(env.count('set:'), 0); eq(env.count('reset:'), 0)
+  near(env.target.values.Exposure, 0.35); eq(require('State').staleG, nil, 'and no g is stale')
+  env.setLocked({})
+  env.step() -- the process finished, and the poll reads it
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 2, ph = '101' }), 'ack', 'free again')
+  eq(env.module, 'develop')
+  noErrors(env)
+end)
+
+test('in Develop a locked photo refuses set and reset straight from onMessage, without asking Lightroom there', function()
+  local env = boot({ watch = WATCH })
+  eq(answered(env, { t = 'set', p = 'Contrast', v = 10, g = 1, ph = '101' }), 'ack')
+  env.setLocked({ '101' }) -- Denoise starts while the dial turns
+  env.step()
+  eq(env.last('state').locked, true)
+  eq(answered(env, { t = 'set', p = 'Contrast', v = 12, g = 1, ph = '101' }), 'locked', "the open gesture's next set")
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 2, ph = '101' }), 'locked', 'a new gesture')
+  eq(answered(env, { t = 'reset', p = 'Contrast', ph = '101' }), 'locked', 'reset')
+  near(env.target.values.Contrast, 10, 'nothing changed'); near(env.target.values.Exposure, 0.35)
+  eq(tracking(env), 'start:Contrast', 'no tracking change'); eq(env.count('reset:'), 0)
+  local State = require 'State'
+  eq(State.alwaysTask.set, nil, 'set stays on the fast path'); eq(State.alwaysTask.reset, nil, 'so does reset')
+  eq(env.availableOutsideTask, 0, 'isAvailableForEditing never ran outside a task')
+  env.cmd({ t = 'done', g = 1 }) -- the deck ends its gesture on err locked
+  eq(env.tracking, nil)
+  noErrors(env)
+end)
+
+test('a lock reading belongs to the photo it was read for', function()
+  local env = boot({ module = 'library' })
+  env.setLocked({ '102' })
+  env.cmd({ t = 'nav', v = 'next' }) -- the state read that answers nav is the first for 102
+  local st = env.last('state'); eq(st.photo, '102'); eq(st.locked, true)
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '102' }), 'locked', 'locked from its first reading')
+  -- Until the next state read, the reading is still 102's, and it locks no other photo.
+  env.select({ '103' })
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 2 }), 'ack', "102's reading doesn't lock 103")
+  near(env.byId['103'].values.Exposure, 1); near(env.byId['102'].values.Exposure, 0.35)
+  eq(require('State').lockReading.photo, '102', "the reading is still 102's")
+  eq(answered(env, { t = 'reset', p = 'Exposure' }), 'ack', 'nor a reset on 103')
+  near(env.byId['103'].values.Exposure, 0)
+  noErrors(env)
+end)
+
+test('without isAvailableForEditing no photo is locked', function()
+  local setup = Stubs.defaultSetup()
+  setup.photos[1].locked = true
+  local env = boot({ setup = setup })
+  for _, photo in ipairs(env.photoList) do photo.isAvailableForEditing = nil end -- a Lightroom without the call
+  env.step()
+  local st = env.last('state'); ok(st and st.locked == false, 'state says unlocked')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '101' }), 'ack', 'set')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '101' }), 'ack', 'reset')
+  noErrors(env)
+end)
+
+test('before any lock reading, as after a hot reload into an older instance, nothing is locked', function()
+  -- A hot reload keeps the running State.lua, so lockReading starts out nil there.
+  local setup = Stubs.defaultSetup()
+  setup.photos[1].locked = true
+  local env = boot({ setup = setup })
+  require('State').lockReading = nil
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '101' }), 'ack', 'set')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '101' }), 'ack', 'reset')
+  env.step()
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 2, ph = '101' }), 'locked', 'once the poll has read it')
+  noErrors(env)
+end)
+
+test('the order of checks: fields, the guard, stale, then locked, each before the switch to Develop', function()
+  local setup = Stubs.defaultSetup()
+  setup.photos[1].locked = true
+  local env = boot({ setup = setup, module = 'library', catalog = '/Users/karimdhanji/Pictures/Lightroom/Main.lrcat' })
+  local State = require 'State'
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = 101 }), 'bad', 'set: a bad ph before the guard')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = 101 }), 'bad', 'reset: a bad ph before the guard')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '102' }), 'guard', 'set: the guard before stale and locked')
+  eq(State.staleG, nil, 'a set the guard refused makes no g stale')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '102' }), 'guard', 'reset: the guard before stale and locked')
+  env.catalog.path = Stubs.TEST_CATALOG
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '102' }), 'stale', 'set: a wrong ph before locked')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 1, ph = '101' }), 'stale', 'a stale g before locked')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '102' }), 'stale', 'reset: a wrong ph before locked')
+  eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 2, ph = '101' }), 'locked', 'set: then locked')
+  eq(answered(env, { t = 'reset', p = 'Exposure', ph = '101' }), 'locked', 'reset: then locked')
+  env.advance(0.5)
+  eq(env.module, 'library', 'none of them switched to Develop'); eq(env.count('module:'), 0)
+  eq(env.count('start:'), 0); eq(env.count('set:'), 0); eq(env.count('reset:'), 0)
+  noErrors(env)
+end)
+
+-- After a switch to Develop: the target photo again (PROTOCOL.md, Gestures and Guard) -----------
+
+test('a set that switched to Develop reads the target photo again: another photo picked meanwhile is stale, and so is its g', function()
+  -- A dial turned in Library sends its set from there, and the user clicks another photo
+  -- while Lightroom switches. With ph or without it, the set changes nothing but the module.
+  for _, ph in ipairs({ '101', false }) do
+    local what = ph and 'with ph' or 'without ph'
+    local env = boot({ module = 'library', watch = WATCH, switchDelay = 0.1 })
+    local State = require 'State'
+    env.cmd({ t = 'set', id = 5, p = 'Exposure', v = 1, g = 3, ph = ph or nil })
+    eq(#env.events('ack') + #env.events('err'), 0, what .. ': still switching')
+    env.select({ '102' })
+    env.advance(0.3)
+    local e = env.last('err'); ok(e, what .. ': err'); eq(e.code, 'stale', what); eq(e.cmd, 'set'); eq(e.id, 5)
+    eq(#env.events('ack'), 0, what .. ': no ack')
+    eq(env.module, 'develop', what .. ': Lightroom stays in Develop')
+    eq(env.count('start:'), 0, what .. ': nothing tracked'); eq(env.count('set:'), 0, what .. ': nothing set')
+    near(env.byId['101'].values.Exposure, 0.35, what); near(env.byId['102'].values.Exposure, 0.35, what)
+    eq(State.gesture, nil, what .. ': no gesture'); eq(State.staleG, 3, what .. ': g 3 is stale')
+    eq(answered(env, { t = 'set', p = 'Exposure', v = 1, g = 3, ph = '102' }), 'stale', what .. ': from then on, even with the right photo')
+    eq(env.count('set:'), 0, what)
+    eq(answered(env, { t = 'set', p = 'Exposure', v = -0.2, g = 4, ph = '102' }), 'ack', what .. ": the deck's next gesture")
+    near(env.byId['102'].values.Exposure, -0.2, what); near(env.byId['101'].values.Exposure, 0.35, what)
+    noErrors(env)
+  end
+end)
+
+test('a reset that switched to Develop reads the target photo again: another photo picked meanwhile is stale, and nothing resets', function()
+  -- A dial press in Library sends its reset from there (PROTOCOL.md, Gestures).
+  for _, ph in ipairs({ '101', false }) do
+    local what = ph and 'with ph' or 'without ph'
+    local env = boot({ module = 'library', watch = WATCH, switchDelay = 0.1 })
+    env.byId['101'].values.Exposure = 1.5
+    env.byId['102'].values.Exposure = 1.5
+    env.cmd({ t = 'reset', id = 6, p = 'Exposure', ph = ph or nil })
+    env.select({ '102' })
+    env.advance(0.3)
+    local e = env.last('err'); ok(e, what .. ': err'); eq(e.code, 'stale', what); eq(e.cmd, 'reset'); eq(e.id, 6)
+    eq(#env.events('ack'), 0, what .. ': no ack')
+    eq(env.module, 'develop', what .. ': Lightroom stays in Develop')
+    eq(env.count('reset:'), 0, what .. ': nothing reset')
+    near(env.byId['101'].values.Exposure, 1.5, what); near(env.byId['102'].values.Exposure, 1.5, what)
+    eq(require('State').staleG, nil, what .. ': a reset has no g to make stale')
+    eq(answered(env, { t = 'reset', p = 'Exposure', ph = '102' }), 'ack', what .. ': the next press, in Develop, resets 102')
+    near(env.byId['102'].values.Exposure, 0, what); near(env.byId['101'].values.Exposure, 1.5, what)
+    noErrors(env)
+  end
+end)
+
+test('a set or reset that switched to Develop goes by a lock the poll read meanwhile: err locked, and only the module changed', function()
+  for _, cmd in ipairs({
+    { t = 'set', id = 7, p = 'Exposure', v = 1, g = 3, ph = '101' },
+    { t = 'reset', id = 7, p = 'Exposure', ph = '101' },
+    { t = 'set', id = 7, p = 'Exposure', v = 1, g = 3 },
+    { t = 'reset', id = 7, p = 'Exposure' },
+  }) do
+    local what = cmd.t .. (cmd.ph and ' with ph' or ' without ph')
+    local env = boot({ module = 'library', watch = WATCH, switchDelay = 0.3 })
+    env.target.values.Exposure = 1.5
+    env.cmd(cmd)
+    env.setLocked({ '101' }) -- Denoise starts on 101 while Lightroom switches
+    env.advance(0.1)
+    env.poll() -- and the poll reads the lock before the switch lands
+    eq(env.last('state').locked, true, what .. ': the poll read the lock')
+    eq(#env.events('err'), 0, what .. ': still switching')
+    env.advance(0.4)
+    local e = env.last('err'); ok(e, what .. ': err'); eq(e.code, 'locked', what); eq(e.cmd, cmd.t); eq(e.id, 7)
+    eq(#env.events('ack'), 0, what .. ': no ack')
+    eq(env.module, 'develop', what .. ': Lightroom stays in Develop')
+    near(env.target.values.Exposure, 1.5, what)
+    eq(env.count('start:'), 0, what); eq(env.count('set:'), 0, what); eq(env.count('reset:'), 0, what)
+    eq(require('State').staleG, nil, what .. ': no g is stale')
+    eq(env.availableOutsideTask, 0)
+    noErrors(env)
+  end
+end)
+
+test('a set or reset that switched to Develop goes through when the photo stayed the same and unlocked', function()
+  local env = boot({ module = 'library', watch = WATCH, switchDelay = 0.3 })
+  env.cmd({ t = 'set', id = 8, p = 'Exposure', v = 1, g = 3, ph = '101' })
+  env.advance(0.1)
+  env.poll() -- a poll during the switch reads the same photo, unlocked
+  env.advance(0.4)
+  eq(#env.events('err'), 0, 'no err'); eq(env.last('ack').g, 3)
+  near(env.byId['101'].values.Exposure, 1); eq(env.module, 'develop')
+  eq(require('State').gesture.photo, '101')
+  env.cmd({ t = 'done', g = 3 })
+  env.setModule('library')
+  env.step()
+  env.clearEvents()
+  env.cmd({ t = 'reset', id = 9, p = 'Exposure', ph = '101' })
+  env.advance(0.5)
+  eq(#env.events('err'), 0, 'no err'); eq(env.last('ack').p, 'Exposure'); eq(env.last('ack').v, 0)
+  near(env.byId['101'].values.Exposure, 0); eq(env.module, 'develop')
+  noErrors(env)
+end)
+
+test('a set or reset that arrives in Develop reads the target photo once, straight from onMessage, as before', function()
+  local env = boot({ watch = WATCH })
+  local get, reads = env.catalog.getTargetPhoto, 0
+  env.catalog.getTargetPhoto = function(self) reads = reads + 1; return get(self) end
+  env.autoRun = false -- nothing runs from the queue, so an answer now came straight from onMessage
+  env.cmd({ t = 'set', p = 'Exposure', v = 1, g = 1, ph = '101' })
+  eq(env.last('ack') and env.last('ack').g, 1, 'set acked from onMessage'); eq(reads, 1, 'set: one getTargetPhoto')
+  env.cmd({ t = 'set', p = 'Exposure', v = 1.1, g = 1, ph = '101' })
+  eq(reads, 2, 'one per set')
+  env.cmd({ t = 'reset', p = 'Contrast', ph = '101' })
+  eq(env.last('ack').p, 'Contrast', 'reset acked from onMessage'); eq(reads, 3, 'reset: one getTargetPhoto')
+  eq(require('Dispatch').queueLength(), 0, 'nothing queued')
+  eq(env.count('module:'), 0, 'no switch asked for')
+  env.autoRun = true
+  env.run()
+  noErrors(env)
+end)
+
 -- watch, vals and ranges ---------------------------------------------------------------------
 
 test('watch answers ranges and every watched value, then only changes', function()

@@ -8,6 +8,8 @@
 --   or pong that don't match; anything else fails. Trailing messages after the last lr
 --   line are held to the same rule.
 -- * A never line forbids matching messages until the next lr line is matched.
+-- * user lines act on the fake Lightroom (env.userAction): photo, selected, module, edit
+--   and locked.
 -- * expect checks the fake Lightroom: values, flags, target, module, view, tracking and
 --   applied.
 -- Run from the repo root: mise exec -- lua lightroom/lua/tests/fixtures.lua [name ...]

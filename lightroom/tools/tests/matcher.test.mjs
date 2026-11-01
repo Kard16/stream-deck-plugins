@@ -117,9 +117,9 @@ describe('inbox: the stream rules', () => {
 });
 
 describe('fixture reader', () => {
-  test('reads all 19 fixtures, each starting with a setup', () => {
+  test('reads all 21 fixtures, each starting with a setup', () => {
     const files = listFixtures();
-    assert.equal(files.length, 19);
+    assert.equal(files.length, 21);
     for (const f of files) {
       const fx = readFixture(f);
       assert.ok(fx.lines.length > 0, f);

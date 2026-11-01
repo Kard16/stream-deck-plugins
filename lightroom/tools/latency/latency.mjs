@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The S2 latency harness (spikes/lr-harness/harness.mjs, runBurst) ported to protocol v1: each burst is
-// one gesture g, with set {p, v, g} at a fixed rate, acks matched to sets in order, and done at the end.
+// one gesture g, with set {p, v, g, ph} at a fixed rate, acks matched to sets in order, and done at the end.
 // It reports, per rate: median, p95 and max ack latency; ok latency (LrSocket's "ok"); send drift;
 // backlog (ack latency in the first window against the last); drain (last set to last ack, and done
 // to the observer's vals); vals that leaked the tracked param during the burst; and errors.
@@ -8,10 +8,12 @@
 // It writes only with the test catalog open and exactly one photo selected, whatever Lightroom's guard
 // says (with Auto Sync on, every set reaches all the selected photos), and stops writing if a hello from
 // another plugin instance or catalog arrives mid-run. Against the real Lightroom, rates go up to 60.
-// It writes only to the photo it started on. A state naming another photo, or a set refused as stale,
-// stops the bursts at once. Before each burst, and before putting the value back, it asks for a fresh
-// state (hello), because Lightroom puts a new gesture on whatever photo is the target. When Lightroom is on
-// another photo by then, it skips the restore, says so, and the run fails.
+// It writes only to the photo it started on. Every set carries that photo as ph, as the deck's sets do, so
+// Lightroom refuses one that reaches another photo as stale, even before any state says the photo changed.
+// A state naming another photo, or a set refused as stale, stops the bursts at once. Before each burst,
+// and before putting the value back, it asks for a fresh state (hello), because Lightroom puts a new
+// gesture on whatever photo is the target. When Lightroom is on another photo by then, it skips the
+// restore, says so, and the run fails.
 //
 //   mise exec -- node lightroom/tools/latency/latency.mjs --mock [--mock-set-ms N] [--rates 15,30,60] [--burst-ms 5000]
 //   mise exec -- node lightroom/tools/latency/latency.mjs --ports 58780,58781 ...   (the real Lightroom, later)
@@ -42,9 +44,10 @@ async function expectMsg(client, pred, timeoutMs, what) {
   return r.msg;
 }
 
-// One burst: one gesture g on `param`, sets at `hz` for `burstMs`, then done. writeCheck() says
+// One burst: one gesture g on `param`, sets at `hz` for `burstMs`, then done. Every set carries ph, the
+// photo the run works on, as the deck's sets carry the photo they were worked out for. writeCheck() says
 // whether a set may go out now ({ ok }), or that writing must stop ({ stop }). onSet() runs for every set sent.
-async function runBurst(client, { hz, g, param, base, amplitude, dir, lo, hi, burstMs, gapMs, writeCheck, onSet = () => {} }) {
+async function runBurst(client, { hz, g, ph, param, base, amplitude, dir, lo, hi, burstMs, gapMs, writeCheck, onSet = () => {} }) {
   const period = 1000 / hz;
   const sets = [];
   const awaiting = []; // sets not yet acked, in send order
@@ -109,7 +112,7 @@ async function runBurst(client, { hz, g, param, base, amplitude, dir, lo, hi, bu
       const s = { idx: sets.length, v, target, tSent: null, tOk: null, tAck: null, ackV: null, err: null };
       const w = writeCheck();
       if (w.stop) throw new LatencyError(w.stop);
-      const rec = w.ok ? client.send({ t: 'set', p: param, v, g }, { burst: g, set: s }) : null;
+      const rec = w.ok ? client.send({ t: 'set', p: param, v, g, ph }, { burst: g, set: s }) : null;
       if (rec == null) {
         sendFailures += 1;
       } else {
@@ -279,7 +282,7 @@ export async function runLatency({
       return;
     }
     const t = now();
-    client.send({ t: 'set', p: param, v: report.base, g });
+    client.send({ t: 'set', p: param, v: report.base, g, ph: photo0 });
     const back = await client.waitFor((m) => m.t === 'ack' && m.p === param && m.g === g, 3000, t);
     client.send({ t: 'done', g });
     report.restored = !!back && typeof back.msg.v === 'number' && Math.abs(back.msg.v - report.base) <= 1e-6;
@@ -325,7 +328,7 @@ export async function runLatency({
     for (let i = 0; i < rates.length; i += 1) {
       const hz = rates[i];
       await ready();
-      const b = await runBurst(client, { hz, g: i + 1, param, base, amplitude: amp, dir, lo, hi, burstMs, gapMs, writeCheck, onSet: () => { wrote = true; } });
+      const b = await runBurst(client, { hz, g: i + 1, ph: photo0, param, base, amplitude: amp, dir, lo, hi, burstMs, gapMs, writeCheck, onSet: () => { wrote = true; } });
       report.bursts.push(b);
       log(formatBurst(b));
     }

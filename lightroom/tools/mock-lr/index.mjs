@@ -74,6 +74,9 @@ export class MockServer extends EventEmitter {
     this.bound = false;
     this.stopped = false;
     this.connections = { cmd: 0, evt: 0 };
+    this.evtDelayMs = 0; // events reach the deck this long after Lightroom sends them (delayEvents)
+    this.delayed = []; // events on their way, in the order Lightroom sent them: { s, obj, text, due }
+    this.delayTimer = null; // the one timer that writes them, armed for the first
     lr.transport = { send: (obj) => this.send(obj), connected: () => this.sender.sock != null };
     lr.on('command', (m) => this.emit('command', m));
   }
@@ -108,6 +111,9 @@ export class MockServer extends EventEmitter {
     this.cmd = null;
     this.sender = blankSender();
     this.backlog.clear();
+    if (this.delayTimer != null) this.lr.clock.clearTimeout(this.delayTimer);
+    this.delayTimer = null;
+    this.delayed = [];
     for (const s of this.sockets) s.destroy();
     this.sockets.clear();
     await Promise.all(servers.map((srv) => new Promise((resolve) => srv.close(() => resolve()))));
@@ -195,16 +201,52 @@ export class MockServer extends EventEmitter {
   }
 
   // Returns false when no client is attached (Lightroom drops the message and knows it), true otherwise,
-  // including writes that vanish into a dead or stale connection (Lightroom can't tell).
+  // including writes that vanish into a dead or stale connection (Lightroom can't tell). With delayEvents,
+  // the write happens later, in order, on the connection that was attached when Lightroom sent it.
   send(obj) {
     const s = this.sender;
     if (!s.sock) return false;
-    if (s.stale || s.sock.destroyed || !s.sock.writable) {
+    if (this.evtDelayMs > 0 || this.delayed.length > 0) {
+      this.delayed.push({ s, obj, text: JSON.stringify(obj), due: this.lr.clock.now() + this.evtDelayMs });
+      if (this.delayTimer == null) this.armDelayed();
+      return true;
+    }
+    return this.write(s, obj);
+  }
+
+  // Events reach the deck ms after Lightroom sends them, in order, as if the deck read its event socket late.
+  // A set can then meet a refusal that the deck has no state for yet. 0 sends new events at once again, after
+  // any still on their way.
+  delayEvents(ms) {
+    this.evtDelayMs = Math.max(0, Number(ms) || 0);
+  }
+
+  // One queue and one timer, armed for its first event, so the order holds on the real clock too: Node truncates
+  // a timer's delay to whole ms and keeps one list per duration, so with a timer per event a later one could fire
+  // first. Each time the timer fires, every event that is due goes out, in order. None goes before the ones ahead
+  // of it, though after delayEvents(0) its own due time can be earlier than theirs.
+  armDelayed() {
+    const clock = this.lr.clock;
+    const head = this.delayed[0];
+    this.delayTimer = clock.setTimeout(() => {
+      // The timer was for head, which goes now even if the clock reads a fraction of a ms before its due.
+      const until = Math.max(clock.now(), head.due);
+      while (this.delayed.length > 0 && this.delayed[0].due <= until) {
+        const item = this.delayed.shift();
+        this.write(item.s, item.obj, item.text);
+      }
+      this.delayTimer = null; // after the loop, so an event sent meanwhile joins the queue instead of arming a second timer
+      if (this.delayed.length > 0) this.armDelayed();
+    }, head.due - clock.now());
+  }
+
+  write(s, obj, text = JSON.stringify(obj)) {
+    if (s.stale || !s.sock || s.sock.destroyed || !s.sock.writable) {
       s.lost += 1;
       this.emit('lost', obj);
       return true;
     }
-    s.sock.write(`${JSON.stringify(obj)}\n`);
+    s.sock.write(`${text}\n`);
     s.written += 1;
     this.emit('sent', obj);
     return true;
@@ -272,7 +314,7 @@ function makeControl({ lr, server, clock }) {
     clock: clock.kind,
     // PROTOCOL.md, Fixtures: a setup line. Replaces Lightroom's whole state.
     setup: (setup) => lr.load(setup ?? {}),
-    // A user line: {photo}, {selected}, {module}, {edit}; also {flag}, {rating}, {label}.
+    // A user line: {photo}, {selected}, {module}, {edit}, {locked}; also {flag}, {rating}, {label}.
     user: (action) => lr.user(action),
     // An expect line: returns { ok, errors }.
     expect: (exp) => lr.expect(exp),
@@ -292,8 +334,14 @@ function makeControl({ lr, server, clock }) {
     },
     // One poll step: 200 ms, which runs Lightroom's poll once.
     step: () => control.advance(TIMING.pollMs),
+    // The poll runs late: for ms the mock notices no photo or module change by itself.
+    holdPoll: (ms) => lr.holdPoll(ms),
+    // Resolves just after the next poll has run.
+    nextPoll: () => lr.nextPoll(),
     pause: (ms) => lr.pause(ms),
     resume: () => lr.resume(),
+    // Events reach the deck ms late, in order; 0 sends new ones at once again.
+    delayEvents: (ms) => server.delayEvents(ms),
     stale: () => server.makeStale(),
     close: (which) => server.closeClients(which),
     relaunch: (opts) => server.relaunch(opts),
@@ -307,6 +355,7 @@ function makeControl({ lr, server, clock }) {
       stale: server.sender.stale,
       written: server.sender.written,
       lost: server.sender.lost,
+      delayed: server.delayed.length,
       backlog: server.backlog.size,
       connections: { ...server.connections },
     }),
@@ -327,8 +376,9 @@ function makeControl({ lr, server, clock }) {
 }
 
 // Starts a mock Lightroom. Ports default to DeckBridge's 58780/58781; pass 0 for ephemeral ports.
-// scenario: a fixture setup object (default: default-scenario.json). clock: 'real' or 'manual'.
-// log: optional function(kind, text). setCostMs: each set takes this long, and later lines wait.
+// scenario: a fixture setup object (default: default-scenario.json). catalog: open this catalog instead of
+// the scenario's. clock: 'real' or 'manual'. log: optional function(kind, text). setCostMs: each set takes
+// this long, and later lines wait.
 export async function startMock({
   cmdPort = CMD_PORT,
   evtPort = EVT_PORT,
@@ -336,6 +386,7 @@ export async function startMock({
   host = '127.0.0.1',
   clock = 'real',
   scenario,
+  catalog,
   log,
   setCostMs = 0,
   lrVersion = '15.3',
@@ -345,7 +396,8 @@ export async function startMock({
   const clk = makeClock(clock);
   const logger = typeof log === 'function' ? log : () => {};
   const lr = new MockLightroom({ clock: clk, log: logger, lrVersion });
-  lr.load(scenario ?? loadScenario());
+  const setup = scenario ?? loadScenario();
+  lr.load(catalog ? { ...setup, catalog } : setup);
   lr.setOptions({ setCostMs });
   const server = new MockServer({ lr, host, cmdPort, evtPort, log: logger });
   await server.bind();

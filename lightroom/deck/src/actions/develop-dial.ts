@@ -19,7 +19,10 @@ export type DialSettings = Record<string, never>;
 
 const logger = streamDeck.logger.createScope("DevelopDial");
 
-/** Input instrumentation in the format spikes/s4-ticks/analyze.mjs reads (at debug level). */
+/**
+ * Input instrumentation in the format spikes/s4-ticks/analyze.mjs reads. It's at debug, below the default
+ * info, so it's only logged when log-level.txt in the .sdPlugin folder says debug (see plugin.ts).
+ */
 function record(kind: "TICK" | "INPUT", data: Record<string, unknown>): void {
 	logger.debug(`${kind} ${JSON.stringify({ t: Date.now(), hr: Math.round(performance.now() * 1000) / 1000, ...data })}`);
 }

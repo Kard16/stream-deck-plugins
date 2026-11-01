@@ -16,7 +16,9 @@
 // naming another one fails, and a write (set, reset, flag, preset) is refused unless the latest hello
 // since the connection came up names that catalog. Paths compare without case, like the guard's.
 // Steps (one action key each):
-//   {"send": {...}}                 a command; {"raw": "text"} a raw line
+//   {"send": {...}}                 a command; {"raw": "text"} a raw line. Give set and reset a ph, as the
+//                                   deck does: the photo their values came from, such as a photo saved
+//                                   from a state. Lightroom refuses them as stale on any other photo.
 //   {"expect": {...}, "timeout": ms, "save": {"var": "path.in.message"}, "hint": "..."}
 //                                   waits for a matching event, by the fixture rules (lib/match.mjs):
 //                                   extra state/vals/ranges/pong may come first, anything else fails
@@ -211,7 +213,7 @@ function describeMsg(msg) {
   if (!isObject(msg)) return short(msg);
   switch (msg.t) {
     case 'hello': return `hello v${msg.v} ${msg.catalog ?? ''} writable ${msg.writable} inst ${msg.inst}`;
-    case 'state': return `state ${msg.module} photo ${msg.photo} (${msg.file}) flag ${msg.flag} rating ${msg.rating} ${msg.label} sel ${msg.sel}`;
+    case 'state': return `state ${msg.module} photo ${msg.photo} (${msg.file}) flag ${msg.flag} rating ${msg.rating} ${msg.label} sel ${msg.sel}${msg.locked ? ' locked' : ''}`;
     case 'ranges': return `ranges for ${Object.keys(msg.ranges ?? {}).length} params`;
     case 'vals': return `vals ${short(msg.vals, 120)}`;
     case 'presets': return `presets: ${Array.isArray(msg.items) ? msg.items.length : '?'} items`;

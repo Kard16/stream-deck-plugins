@@ -24,7 +24,7 @@ const HELP = `REPL commands (what a user does in Lightroom):
   module <name>              library, develop, map, book, slideshow, print or web
   flag pick|reject|none      flag with P, X or U; rating <0-5>; label <red|yellow|green|blue|purple|none>
   autoadvance on|off         Lightroom's own Auto Advance
-  lock <id> [on|off]         a background AI update locks the photo, so presets skip it
+  lock <id> [on|off]         a background AI process holds the photo: presets skip it, set and reset get err locked
   busy <secs>                the catalog is busy: preset waits up to 3 s, then err busy
   guard on|off               Config.GUARD (only the user turns it off)
   catalog <path>             open another catalog: Lightroom relaunches with it
@@ -104,7 +104,7 @@ function describeState() {
   const ph = s.target ? s.photos[s.target] : null;
   const c = s.clients;
   return [
-    `module ${s.module}, view ${s.view}, target ${s.target ?? 'none'}${ph ? ` (${ph.file}, flag ${ph.flag}, rating ${ph.rating}, ${ph.label})` : ''}, selected ${s.selected.join(',') || 'none'}`,
+    `module ${s.module}, view ${s.view}, target ${s.target ?? 'none'}${ph ? ` (${ph.file}, flag ${ph.flag}, rating ${ph.rating}, ${ph.label}${ph.locked ? ', locked' : ''})` : ''}, selected ${s.selected.join(',') || 'none'}`,
     ph ? `values ${Object.entries(ph.values).map(([k, v]) => `${k} ${v}`).join(', ')}` : 'no values',
     `gesture ${s.gesture ? `${s.gesture.p} g ${s.gesture.g} on ${s.gesture.photo}` : 'none'}${s.staleG != null ? ` (sets with g ${s.staleG} are stale)` : ''}, watch ${s.watch.join(',') || 'nothing'}, autoAdvance ${s.autoAdvance}, guard ${s.guard ? 'on' : 'off'}${s.writable ? '' : ' (refusing writes)'}`,
     `clients: cmd ${c.cmd ? 'yes' : 'no'}, evt ${c.evt ? (c.stale ? 'stale' : 'yes') : 'no'}${c.backlog ? `, ${c.backlog} waiting unserved` : ''}; events written ${c.written}, lost ${c.lost}${s.paused ? '; PAUSED' : ''}, inst ${s.inst}`,

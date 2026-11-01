@@ -7,7 +7,9 @@
 --   task yield through it; plain pcall doesn't.
 -- * Socket callbacks, onMessage among them, run outside any task, so they can't yield.
 -- * Photo metadata reads and catalog writes fail outside a task with "We can only wait
---   from within a task" (strictTasks, on unless a test turns it off).
+--   from within a task" (strictTasks, on unless a test turns it off). So does
+--   isAvailableForEditing here: not measured, but PROTOCOL.md keeps it out of onMessage,
+--   and env.availableOutsideTask counts any call that tries.
 -- * The adjustment observer is silent during a tracked gesture and fires once, 4 ms
 --   after stopTracking. An untracked setValue never fires it. Mouse edits, resets and
 --   photo changes in Develop do.
@@ -21,7 +23,7 @@
 --
 -- Stubs.boot(opts) loads the plugin into a fresh fake and returns `env`: the fake's
 -- state plus helpers that play the deck (connect, send a line, drop a socket) and the
--- user (select photos, edit with the mouse, switch modules).
+-- user (select photos, edit with the mouse, switch modules, lock photos).
 local Stubs = {}
 
 local here = string.match(debug.getinfo(1, 'S').source, '^@(.*)/[^/]*$') or '.'
@@ -113,6 +115,7 @@ function Stubs.new(setup, opts)
     view = 'loupe',
     applied = {}, -- photo id -> preset uuids, in order
     writes = {}, inWrite = false, catalogBusy = false,
+    availableOutsideTask = 0, -- isAvailableForEditing calls made outside any task
   }
 
   -- Scheduler -------------------------------------------------------------------------
@@ -248,6 +251,10 @@ function Stubs.new(setup, opts)
       return nil
     end
     function photo:isAvailableForEditing()
+      if not env.inTask then
+        env.availableOutsideTask = env.availableOutsideTask + 1
+      end
+      env.needTask()
       return not self.locked
     end
     function photo:applyDevelopPreset(preset)
@@ -353,12 +360,25 @@ function Stubs.new(setup, opts)
     end
   end
 
+  -- Makes exactly these photos locked, as a background AI process such as Denoise would;
+  -- an empty list unlocks every photo.
+  function env.setLocked(ids)
+    local locked = {}
+    for _, id in ipairs(ids) do
+      locked[tostring(id)] = true
+    end
+    for _, photo in ipairs(env.photoList) do
+      photo.locked = locked[photo.id] or false
+    end
+  end
+
   -- A fixture `user` line.
   function env.userAction(u)
     if u.photo ~= nil then env.select({ tostring(u.photo) }) end
     if u.selected ~= nil then env.select(u.selected) end
     if u.module ~= nil then env.setModule(u.module) end
     if u.edit ~= nil then env.edit(u.edit) end
+    if u.locked ~= nil then env.setLocked(u.locked) end
     if env.autoRun then env.run() end
   end
 

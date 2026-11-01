@@ -47,11 +47,15 @@ async function lineNow(mock, c, cmd) {
   assert.ok(await synced(mock, c));
 }
 
-// Runs one command as line() does, and returns Lightroom's answers to it: "ack <g>" and "err <code>".
+// Runs one command as line() does, and returns Lightroom's answers to it: "ack <g>" ("ack" after a reset)
+// and "err <code>".
 async function answers(mock, c, cmd, send = line) {
   const t = now();
   await send(mock, c, cmd);
-  return since(c, t).filter((m) => m.t === 'ack' || m.t === 'err').map((m) => (m.t === 'ack' ? `ack ${m.g}` : `err ${m.code}`));
+  return since(c, t).filter((m) => m.t === 'ack' || m.t === 'err').map((m) => {
+    if (m.t === 'err') return `err ${m.code}`;
+    return m.g === undefined ? 'ack' : `ack ${m.g}`;
+  });
 }
 
 describe('mock Lightroom: sockets', () => {
@@ -848,9 +852,10 @@ describe('mock Lightroom: stale gestures', () => {
   });
 });
 
-// PROTOCOL.md, Guard: "Order of checks for a write: fields (bad), the guard (guard), then for set a stale
-// gesture (stale), the switch to Develop if needed (noDevelop), then the target photo and param (noPhoto,
-// bad, notFound)." The plugin can check a param only in Develop, where getRange works.
+// PROTOCOL.md, Guard: the order of checks for a write is fields (bad), the guard (guard), for set and reset a
+// stale gesture or photo (stale) then a locked photo (locked), the switch to Develop if needed (noDevelop),
+// then the target photo and param (noPhoto, bad, notFound). The plugin can check a param only in Develop,
+// where getRange works.
 describe('mock Lightroom: the order of checks for writes', () => {
   const errs = (c, t) => since(c, t, 'err').map((m) => `${m.cmd} ${m.code}`);
 
@@ -885,6 +890,73 @@ describe('mock Lightroom: the order of checks for writes', () => {
         assert.equal(mock.control.state().staleG, 1);
         mock.control.options({ guard: true });
         assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 1 }), ['err guard']);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('a ph that isn\'t a string is a field error, before the guard; the guard comes before a wrong ph and a locked photo', async () => {
+    await withMock({ clock: 'manual', scenario: { ...loadScenario(), catalog: MAIN } }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ locked: ['101'] });
+        await mock.control.step();
+        const t = now();
+        for (const cmd of [
+          { t: 'set', p: 'Exposure', v: 1, g: 1, ph: 101 },
+          { t: 'reset', p: 'Exposure', ph: 101 },
+          { t: 'set', p: 'Exposure', v: 1, g: 1, ph: '102' },
+          { t: 'reset', p: 'Exposure', ph: '102' },
+          { t: 'set', p: 'Exposure', v: 1, g: 2, ph: '101' },
+          { t: 'reset', p: 'Exposure', ph: '101' },
+        ]) await line(mock, c, cmd);
+        assert.deepEqual(errs(c, t), ['set bad', 'reset bad', 'set guard', 'reset guard', 'set guard', 'reset guard']);
+        const s = mock.control.state();
+        assert.deepEqual([s.staleG, s.history, s.photos[101].values.Exposure], [null, [], 0.35], 'no stale g, and nothing changed');
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('a stale gesture or photo comes before a locked photo', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.5, g: 1, ph: '101' }), ['ack 1']);
+        await line(mock, c, { t: 'nav', v: 'next' });
+        mock.control.user({ locked: ['102'] });
+        await mock.control.step();
+        assert.deepEqual(mock.control.state().lockRead, { photo: '102', locked: true });
+        const t = now();
+        for (const cmd of [
+          { t: 'set', p: 'Exposure', v: 0.6, g: 1, ph: '102' }, // its gesture ended with nav
+          { t: 'set', p: 'Exposure', v: 0.6, g: 2, ph: '101' }, // worked out on 101
+          { t: 'reset', p: 'Exposure', ph: '101' },
+          { t: 'set', p: 'Exposure', v: 0.6, g: 3, ph: '102' },
+          { t: 'reset', p: 'Exposure', ph: '102' },
+        ]) await line(mock, c, cmd);
+        assert.deepEqual(errs(c, t), ['set stale', 'set stale', 'reset stale', 'set locked', 'reset locked']);
+        assert.deepEqual([mock.control.state().photos[102].values.Exposure, mock.control.state().staleG], [-0.2, 2]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('a locked photo comes before the switch to Develop and the param', async () => {
+    await withMock({ clock: 'manual', scenario: { ...loadScenario(), module: 'library' } }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ locked: ['101'] });
+        await mock.control.step();
+        const t = now();
+        await line(mock, c, { t: 'set', p: 'NoSuchSlider', v: 1, g: 1, ph: '101' });
+        await line(mock, c, { t: 'reset', p: 'NoSuchSlider' });
+        assert.deepEqual(errs(c, t), ['set locked', 'reset locked']);
+        const s = mock.control.state();
+        assert.deepEqual([s.module, s.history, s.tracking], ['library', [], false], 'nothing switched to Develop');
       } finally {
         c.stop();
       }
@@ -965,6 +1037,738 @@ describe('mock Lightroom: the order of checks for writes', () => {
         mock.control.options({ guard: false });
         const off = await c.request({ t: 'reload', mods: ['Develop'] }, 1000);
         assert.deepEqual(pick(off.reply, ['ok', 'msg']), { ok: true, msg: 'reloaded Develop' }, 'with the guard off, writes and reload go through');
+      } finally {
+        c.stop();
+      }
+    });
+  });
+});
+
+// PROTOCOL.md, Gestures: "The photo the deck worked from". set and reset carry ph, the photo from the deck's
+// latest state. One that isn't the target photo is stale and changes nothing, and a set's g stays stale.
+describe('mock Lightroom: the photo the deck worked from (ph)', () => {
+  const TWO = {
+    module: 'develop',
+    photos: [
+      { id: '101', file: 'A.ARW', fmt: 'RAW', values: { Exposure: 0.35, Contrast: 0 } },
+      { id: '102', file: 'B.ARW', fmt: 'RAW', values: { Exposure: -0.4, Contrast: 5 } },
+    ],
+    watch: ['Exposure', 'Contrast'],
+  };
+  const values = (mock, p) => Object.fromEntries(['101', '102'].map((id) => [id, mock.control.state().photos[id].values[p]]));
+
+  test('a new gesture worked out on the old photo, before its state reached the deck, is refused, and its g stays stale', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ photo: '102' }); // the poll hasn't run, so no state has said so
+        const t = now();
+        await lineNow(mock, c, { t: 'set', p: 'Exposure', v: 0.4, g: 1, ph: '101', id: 3 });
+        assert.deepEqual(since(c, t).map((m) => pick(m, ['t', 'id', 'cmd', 'code'])), [{ t: 'err', id: 3, cmd: 'set', code: 'stale' }]);
+        let s = mock.control.state();
+        assert.deepEqual([s.tracking, s.staleG, s.history], [false, 1, []], 'no gesture started, and g 1 is stale');
+        assert.deepEqual(values(mock, 'Exposure'), { 101: 0.35, 102: -0.4 });
+
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: -0.3, g: 1, ph: '102' }), ['err stale'], 'g 1 stays stale with the right ph');
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: -0.3, g: 2, ph: '102' }), ['ack 2']);
+        s = mock.control.state();
+        assert.deepEqual([s.staleG, s.gesture], [null, { p: 'Exposure', g: 2, photo: '102' }]);
+        assert.deepEqual(values(mock, 'Exposure'), { 101: 0.35, 102: -0.3 });
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('a wrong ph changes nothing: not a value, the module, or an open gesture', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Contrast', v: 9, g: 1, ph: '101' }), ['ack 1']);
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Contrast', ph: '102' }), ['err stale']);
+        let s = mock.control.state();
+        assert.deepEqual([s.gesture, s.staleG, s.history], [{ p: 'Contrast', g: 1, photo: '101' }, null, []], 'a reset has no g to make stale, and ends no gesture');
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 1, g: 5, ph: '102' }), ['err stale']);
+        s = mock.control.state();
+        assert.deepEqual([s.gesture, s.staleG], [{ p: 'Contrast', g: 1, photo: '101' }, 5], 'the open gesture is left alone');
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Contrast', v: 10, g: 1, ph: '101' }), ['ack 1'], 'and goes on');
+        assert.deepEqual(values(mock, 'Contrast'), { 101: 10, 102: 5 });
+
+        // In Library, nothing switches to Develop.
+        await line(mock, c, { t: 'done', g: 1 });
+        mock.control.user({ module: 'library' });
+        await mock.control.step();
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Contrast', ph: '102' }), ['err stale']);
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Contrast', v: 3, g: 2, ph: '102' }), ['err stale']);
+        s = mock.control.state();
+        assert.equal(s.module, 'library');
+        assert.deepEqual(values(mock, 'Contrast'), { 101: 10, 102: 5 });
+        assert.deepEqual(s.history.map((h) => [h.kind, h.g, h.why]), [['gesture', 1, 'done']]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // The set first ends the gesture the photo moved away from, as the poll would have, and only then finds its ph
+  // wrong. So the gesture doesn't track the old photo until the next poll, and the observer that stopTracking
+  // fires sends the deck the new photo's state within ms.
+  test('a set with the old photo\'s ph, for a gesture the photo moved away from, ends that gesture first: the observer sends the new photo\'s state at once', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.4, g: 1, ph: '101' }), ['ack 1']);
+        mock.control.holdPoll(1000); // the poll notices nothing by itself
+        mock.control.user({ photo: '102' });
+        const t = now();
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.45, g: 1, ph: '101' }, lineNow), ['err stale']);
+        const s = mock.control.state();
+        assert.deepEqual([s.tracking, s.staleG], [false, 1]);
+        assert.deepEqual(s.history.map((h) => pick(h, ['kind', 'g', 'photo', 'to', 'why', 'stale'])), [{ kind: 'gesture', g: 1, photo: '101', to: 0.4, why: 'the photo changed', stale: true }]);
+        await mock.control.advance(TIMING.observerMs);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t, 'state').map((m) => m.photo), ['102'], 'from the observer, with the poll held');
+        assert.deepEqual(values(mock, 'Exposure'), { 101: 0.4, 102: -0.4 });
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('with no target photo, every ph is wrong', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ selected: [] });
+        await mock.control.step();
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 1, g: 1, ph: '101' }), ['err stale']);
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph: '101' }), ['err stale']);
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 1, g: 2 }), ['err noPhoto'], 'without ph, noPhoto as before');
+        assert.equal(mock.control.state().staleG, 1);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('without ph nothing is checked, so older decks still work; null counts as no ph, as the plugin decodes it', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ photo: '102' });
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.4, g: 1 }, lineNow), ['ack 1'], 'a new gesture lands on the target photo');
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Contrast' }, lineNow), ['ack']);
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.5, g: 2, ph: null }, lineNow), ['ack 2']);
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph: null }, lineNow), ['ack']);
+        assert.deepEqual(values(mock, 'Exposure'), { 101: 0.35, 102: 0 });
+        assert.deepEqual(values(mock, 'Contrast'), { 101: 0, 102: 0 });
+        for (const ph of [102, true, ['102'], { id: '102' }]) {
+          assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 1, g: 3, ph }), ['err bad'], `set with ph ${JSON.stringify(ph)}`);
+          assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph }), ['err bad'], `reset with ph ${JSON.stringify(ph)}`);
+        }
+        assert.equal(mock.control.state().staleG, null, 'a field error leaves no stale g');
+      } finally {
+        c.stop();
+      }
+    });
+  });
+});
+
+// PROTOCOL.md, Locked photos: the poll reads isAvailableForEditing() for the target photo, state.locked carries
+// that reading, and set and reset go by it.
+describe('mock Lightroom: locked photos', () => {
+  const TWO = {
+    module: 'develop',
+    photos: [
+      { id: '101', file: 'A.ARW', fmt: 'RAW', values: { Exposure: 0.35, Contrast: 0 } },
+      { id: '102', file: 'B.ARW', fmt: 'RAW', values: { Exposure: -0.4, Contrast: 5 } },
+    ],
+    watch: ['Exposure', 'Contrast'],
+  };
+
+  test('state.locked carries the poll\'s reading for the target photo, and is false without one', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        assert.equal(c.history.find((h) => h.msg.t === 'state').msg.locked, false, 'the greeting\'s state');
+        const t = now();
+        for (const action of [{ locked: ['101'] }, { photo: '102' }, { photo: '101' }, { selected: [] }, { photo: '101' }, { locked: [] }]) {
+          mock.control.user(action);
+          await mock.control.step();
+        }
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t, 'state').map((m) => `${m.photo} ${m.locked}`), ['101 true', '102 false', '101 true', 'null false', '101 true', '101 false']);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('set and reset on a locked photo get err locked and change nothing: not a value, the module, or an open gesture', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.5, g: 1, ph: '101' }), ['ack 1']);
+        mock.control.user({ locked: ['101'] });
+        await mock.control.step();
+        const t = now();
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 1, ph: '101' }), ['err locked']);
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph: '101', id: 4 }), ['err locked']);
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Contrast', v: 3, g: 2 }), ['err locked'], 'without ph too');
+        assert.deepEqual(pick(since(c, t, 'err')[1], ['id', 'cmd', 'code']), { id: 4, cmd: 'reset', code: 'locked' });
+        let s = mock.control.state();
+        assert.deepEqual([s.gesture, s.staleG], [{ p: 'Exposure', g: 1, photo: '101' }, null], 'the open gesture is left alone, and no g is stale');
+        assert.deepEqual([s.photos[101].values.Exposure, s.photos[101].values.Contrast], [0.5, 0]);
+
+        await line(mock, c, { t: 'done', g: 1 });
+        mock.control.user({ module: 'library' });
+        await mock.control.step();
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 3, ph: '101' }), ['err locked']);
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph: '101' }), ['err locked']);
+        s = mock.control.state();
+        assert.equal(s.module, 'library', 'nothing switched to Develop');
+        assert.deepEqual(s.history.map((h) => [h.kind, h.g, h.to]), [['gesture', 1, 0.5]]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('set and reset go by the poll\'s reading: a write still lands before the poll reads a lock, and waits for it to read the unlock', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ locked: ['101'] });
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.5, g: 1, ph: '101' }, lineNow), ['ack 1'], 'the poll hasn\'t read the lock yet');
+        await mock.control.step();
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 1, ph: '101' }, lineNow), ['err locked']);
+        mock.control.user({ locked: [] });
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph: '101' }, lineNow), ['err locked'], 'nor the unlock');
+        await mock.control.step();
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 2, ph: '101' }, lineNow), ['ack 2']);
+        assert.equal(mock.control.state().photos[101].values.Exposure, 0.6);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('a reading counts only for the photo it was taken for, either way: a target the poll hasn\'t read yet is unlocked', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ locked: ['102'] });
+        await mock.control.step();
+        assert.deepEqual(mock.control.state().lockRead, { photo: '101', locked: false });
+        mock.control.user({ photo: '102' });
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.1, g: 1 }, lineNow), ['ack 1'], 'the reading is still 101\'s');
+        await mock.control.step();
+        assert.deepEqual(mock.control.state().lockRead, { photo: '102', locked: true });
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.2, g: 1 }, lineNow), ['err locked']);
+        assert.equal(mock.control.state().photos[102].values.Exposure, 0.1);
+
+        // The other way round: 102's locked reading doesn't hold for 101, so back there a set and a reset land
+        // before the poll reads 101.
+        mock.control.user({ photo: '101' });
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Contrast', v: 7, g: 2 }, lineNow), ['ack 2']);
+        assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure' }, lineNow), ['ack']);
+        const s = mock.control.state();
+        assert.deepEqual(s.lockRead, { photo: '102', locked: true }, 'the poll still hasn\'t read 101');
+        assert.deepEqual([s.photos[101].values.Contrast, s.photos[101].values.Exposure], [7, 0]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // With several photos selected, the target is the first, and only its reading counts: a locked photo elsewhere
+  // in the selection mustn't lock up the dials, which change the target photo only.
+  test('a locked photo in a multi-selection: state.locked follows the target photo, and a set on it lands', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        const t = now();
+        mock.control.user({ selected: ['108', '107'] }); // the default scenario's 107 is locked
+        await mock.control.step();
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t, 'state').map((m) => pick(m, ['photo', 'sel', 'locked'])), [{ photo: '108', sel: 2, locked: false }]);
+        assert.deepEqual(mock.control.state().lockRead, { photo: '108', locked: false });
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: -0.3, g: 1, ph: '108' }), ['ack 1']);
+        assert.deepEqual([mock.control.state().photos[108].values.Exposure, mock.control.state().photos[107].values.Exposure], [-0.3, 0.25]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // nav's own state, and a flag's advance's, come from the mock reading the state (refresh), which reads the lock
+  // too: they can't wait for the next poll, or the deck's next set would land on the locked photo.
+  test('moving onto a locked photo with nav: nav\'s own state says locked, and a set straight after gets err locked', async () => {
+    await withMock({ clock: 'manual', scenario: TWO }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ locked: ['102'] });
+        await mock.control.step();
+        const t = now();
+        await lineNow(mock, c, { t: 'nav', v: 'next' });
+        assert.deepEqual(since(c, t, 'state').map((m) => pick(m, ['photo', 'locked'])), [{ photo: '102', locked: true }], 'before any poll');
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.1, g: 1, ph: '102' }, lineNow), ['err locked']);
+        assert.equal(mock.control.state().photos[102].values.Exposure, -0.4);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('flag isn\'t checked, and a preset skips locked photos and counts them', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.user({ selected: ['107', '108'] }); // the default scenario's 107 is locked
+        await mock.control.step();
+        const t = now();
+        await line(mock, c, { t: 'flag', v: 'pick' });
+        assert.deepEqual(since(c, t, 'state').map((m) => [m.photo, m.flag, m.locked]).at(-1), ['107', 1, true]);
+        const r = await c.request({ t: 'preset', uuid: PUNCHY }, 1000);
+        assert.deepEqual(pick(r.reply, ['t', 'n', 'locked']), { t: 'applied', n: 1, locked: 1 });
+        assert.deepEqual(mock.control.state().photos[107].applied, []);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('the user line {locked}: exactly these photos, and [] for none; anything else is a setup error that changes nothing', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const lockedIds = () => Object.entries(mock.control.state().photos).filter(([, p]) => p.locked).map(([id]) => id);
+      assert.deepEqual(lockedIds(), ['107']);
+      mock.control.user({ locked: ['101', 103] });
+      assert.deepEqual(lockedIds(), ['101', '103'], 'numbers are ids too, and 107 is unlocked');
+      mock.control.user({ locked: [] });
+      assert.deepEqual(lockedIds(), []);
+      assert.throws(() => mock.control.user({ locked: '101' }), /locked must be a list of photo ids/);
+      assert.throws(() => mock.control.user({ locked: ['101', '999'] }), /no photo 999/);
+      assert.deepEqual(lockedIds(), []);
+      mock.control.options({ lock: { 104: true } });
+      mock.control.options({ lock: { 105: true } });
+      assert.deepEqual(lockedIds(), ['104', '105'], 'options({ lock }) changes one photo at a time');
+    });
+  });
+});
+
+// The control calls deck-vs-mock scenarios use beyond the fixture lines (lightroom/tools/README.md).
+describe('mock Lightroom: control calls for deck scenarios', () => {
+  const LIB = {
+    module: 'library',
+    photos: [{ id: '1', file: 'A.ARW', fmt: 'RAW', values: { Exposure: 0.35 } }],
+    watch: ['Exposure'],
+  };
+  const kinds = (list) => list.map((m) => (m.t === 'state' ? `state ${m.module}` : m.t === 'err' ? `err ${m.code}` : m.t));
+
+  test('protocolVersion: hello says another v, on connect and in answer to hello, across setup()', async () => {
+    const logs = [];
+    await withMock({ clock: 'manual', log: (kind, text) => logs.push({ kind, text }) }, async (mock) => {
+      mock.control.options({ protocolVersion: 2 });
+      const c = await ready(mock);
+      try {
+        assert.equal(c.history.find((h) => h.msg.t === 'hello').msg.v, 2, 'the greeting on connect');
+        let t = now();
+        await line(mock, c, { t: 'hello', v: 1, client: 'test', ver: '0.1.0' });
+        assert.deepEqual(since(c, t, 'hello').map((m) => m.v), [2]);
+        assert.ok(logs.some((l) => l.kind === 'warn' && l.text === 'the deck speaks protocol v1; this plugin speaks v2'), JSON.stringify(logs.filter((l) => l.kind === 'warn')));
+        mock.control.setup(loadScenario());
+        t = now();
+        await line(mock, c, { t: 'hello', v: 1, client: 'test', ver: '0.1.0' });
+        assert.deepEqual(since(c, t, 'hello').map((m) => m.v), [2], 'setup() keeps it');
+        mock.control.options({ protocolVersion: 1 });
+        t = now();
+        await line(mock, c, { t: 'hello', v: 1, client: 'test', ver: '0.1.0' });
+        assert.deepEqual(since(c, t, 'hello').map((m) => m.v), [1]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('catalog: started in another catalog, hello says writable false and every write is refused', async () => {
+    await withMock({ clock: 'manual', catalog: MAIN }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        const hello = c.history.find((h) => h.msg.t === 'hello').msg;
+        assert.deepEqual(pick(hello, ['catalog', 'path', 'guard', 'writable']), { catalog: 'Main.lrcat', path: MAIN, guard: 'on', writable: false });
+        const t = now();
+        for (const cmd of [
+          { t: 'set', p: 'Exposure', v: 1, g: 1, ph: '101' },
+          { t: 'reset', p: 'Exposure', ph: '101' },
+          { t: 'flag', v: 'pick' },
+          { t: 'preset', id: 2, uuid: PUNCHY },
+        ]) await line(mock, c, cmd);
+        assert.deepEqual(since(c, t, 'err').map((m) => `${m.cmd} ${m.code}`), ['set guard', 'reset guard', 'flag guard', 'preset guard']);
+        assert.equal((await c.request({ t: 'reload' }, 1000)).reply.ok, false);
+        const s = mock.control.state();
+        assert.deepEqual([s.history, s.bezels, s.photos[101].values.Exposure, s.order.length], [[], 1, 0.35, 10], 'one bezel in 5 s, nothing changed, and otherwise the default scenario');
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('moduleDelayMs: module develop answers once the switch lands, and lines queue behind it, all but ping', async () => {
+    await withMock({ clock: 'manual', scenario: LIB }, async (mock) => {
+      mock.control.options({ moduleDelayMs: 600 });
+      const c = await ready(mock);
+      try {
+        const t = now();
+        c.send({ t: 'module', v: 'develop' });
+        c.send({ t: 'set', p: 'Exposure', v: 0.5, g: 1, ph: '1' });
+        c.send({ t: 'presets', id: 6 });
+        c.send({ t: 'ping', id: 5 });
+        c.send({ t: 'explode' });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['pong', 'err unknown'], 'ping and a line the plugin can\'t route, at once');
+        assert.deepEqual(pick(mock.control.state(), ['module', 'switching', 'waiting']), { module: 'library', switching: 'develop', waiting: 'develop' });
+        await mock.control.advance(400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['pong', 'err unknown', 'state develop', 'ranges', 'vals', 'ack', 'presets'], 'the rest in order, once the switch landed');
+        assert.deepEqual(pick(mock.control.state(), ['module', 'switching', 'waiting']), { module: 'develop', switching: null, waiting: null });
+        assert.equal(mock.control.state().photos[1].values.Exposure, 0.5);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('moduleDelayMs beyond the plugin\'s 1 s wait: err noDevelop, then the switch lands and the poll reports it', async () => {
+    await withMock({ clock: 'manual', scenario: LIB }, async (mock) => {
+      mock.control.options({ moduleDelayMs: 2500 });
+      const c = await ready(mock);
+      try {
+        const t = now();
+        c.send({ t: 'module', v: 'develop', id: 7 });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(TIMING.moduleWaitMs);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t).map((m) => pick(m, ['t', 'id', 'cmd', 'code'])), [{ t: 'err', id: 7, cmd: 'module', code: 'noDevelop' }]);
+        assert.equal(mock.control.state().module, 'library');
+        const t2 = now();
+        await mock.control.advance(1800);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t2)), ['state develop', 'ranges', 'vals'], 'the poll noticed Develop');
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // Library.switchTo asks Lightroom for nothing when it's already in the module, so it can't call off a switch.
+  test('moduleDelayMs: module library while a switch to Develop is on its way answers at once, and that switch still lands', async () => {
+    await withMock({ clock: 'manual', scenario: LIB }, async (mock) => {
+      mock.control.options({ moduleDelayMs: 2500 });
+      const c = await ready(mock);
+      try {
+        const t = now();
+        c.send({ t: 'module', v: 'develop' });
+        c.send({ t: 'module', v: 'library' });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(2400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['err noDevelop', 'state library'], 'library answers once the develop handler gives up');
+        assert.deepEqual(pick(mock.control.state(), ['module', 'switching']), { module: 'library', switching: 'develop' });
+        await mock.control.advance(400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['err noDevelop', 'state library', 'state develop', 'ranges', 'vals'], 'the poll reports Develop');
+        assert.deepEqual(pick(mock.control.state(), ['module', 'switching']), { module: 'develop', switching: null });
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('moduleWaitMs above moduleDelayMs: nothing at all comes back until the switch lands, as the deck\'s 2 s drop of held ticks needs', async () => {
+    await withMock({ clock: 'manual', scenario: LIB }, async (mock) => {
+      mock.control.options({ moduleDelayMs: 2500, moduleWaitMs: 3000 });
+      const c = await ready(mock);
+      try {
+        const t = now();
+        c.send({ t: 'module', v: 'develop' });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(2400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t), []);
+        await mock.control.advance(200);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['state develop', 'ranges', 'vals']);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('moduleDelayMs: set, reset and view outside Develop wait for the switch too, or get err noDevelop and change nothing', async () => {
+    await withMock({ clock: 'manual', scenario: LIB }, async (mock) => {
+      mock.control.options({ moduleDelayMs: 300 });
+      const c = await ready(mock);
+      try {
+        let t = now();
+        c.send({ t: 'set', p: 'Exposure', v: 0.5, g: 1, ph: '1' });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(200);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t), [], 'still switching');
+        await mock.control.advance(200);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['state develop', 'ranges', 'vals', 'ack']);
+
+        await line(mock, c, { t: 'done', g: 1 });
+        mock.control.user({ module: 'library' });
+        await mock.control.step();
+        assert.ok(await synced(mock, c));
+        mock.control.options({ moduleDelayMs: 1500 });
+        t = now();
+        c.send({ t: 'reset', p: 'Exposure', ph: '1', id: 8 });
+        c.send({ t: 'view', v: 'before' });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(TIMING.moduleWaitMs);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t).map((m) => pick(m, ['t', 'id', 'cmd', 'code'])), [{ t: 'err', id: 8, cmd: 'reset', code: 'noDevelop' }]);
+        assert.deepEqual(pick(mock.control.state(), ['module', 'view', 'waiting']), { module: 'library', view: 'loupe', waiting: 'develop' }, 'view waits for the same switch');
+        await mock.control.advance(600);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(pick(mock.control.state(), ['module', 'view', 'waiting']), { module: 'develop', view: 'before', waiting: null }, 'which keeps its time: 1.5 s after the reset asked');
+        const s = mock.control.state();
+        assert.equal(s.photos[1].values.Exposure, 0.5, 'the reset changed nothing');
+        assert.deepEqual(s.history.map((h) => h.kind), ['gesture']);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // PROTOCOL.md, Gestures (the photo the deck worked from): a set or reset that makes Lightroom switch to Develop
+  // reads the target photo again once there, as the plugin does (Develop.set and Develop.reset). Another photo by then
+  // is stale, with or without ph, and makes a set's g stale; a lock the poll read meanwhile is locked. Either way
+  // nothing changes but the module.
+  const TWO_LIB = { ...LIB, photos: [...LIB.photos, { id: '2', file: 'B.ARW', values: { Exposure: -1 } }] };
+
+  test('moduleDelayMs: another photo picked during the switch to Develop: the set gets err stale, with or without ph, and its g stays stale; only the module changed', async () => {
+    for (const ph of ['1', undefined]) {
+      await withMock({ clock: 'manual', scenario: TWO_LIB }, async (mock) => {
+        mock.control.options({ moduleDelayMs: 300 });
+        const c = await ready(mock);
+        const what = ph ? 'with ph' : 'without ph';
+        try {
+          const t = now();
+          c.send({ t: 'set', id: 3, p: 'Exposure', v: 0.5, g: 1, ...(ph ? { ph } : {}) });
+          assert.ok(await c.waitOks());
+          mock.control.user({ photo: '2' });
+          await mock.control.advance(300);
+          assert.ok(await synced(mock, c));
+          assert.deepEqual(kinds(since(c, t)), ['state library', 'state develop', 'ranges', 'vals', 'err stale'], what);
+          assert.deepEqual(pick(since(c, t, 'err')[0], ['id', 'cmd', 'code']), { id: 3, cmd: 'set', code: 'stale' }, what);
+          const s = mock.control.state();
+          assert.deepEqual(pick(s, ['module', 'tracking', 'gesture', 'staleG']), { module: 'develop', tracking: false, gesture: null, staleG: 1 }, `${what}: Lightroom stays in Develop, with no gesture, and g 1 is stale`);
+          assert.deepEqual([s.photos[1].values.Exposure, s.photos[2].values.Exposure, s.history], [0.35, -1, []], `${what}: no value changed`);
+          assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 1, ph: '2' }), ['err stale'], `${what}: from then on, even with the right photo`);
+          assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.6, g: 2, ph: '2' }), ['ack 2'], `${what}: the deck's next gesture`);
+          assert.deepEqual([mock.control.state().photos[1].values.Exposure, mock.control.state().photos[2].values.Exposure], [0.35, 0.6], what);
+        } finally {
+          c.stop();
+        }
+      });
+    }
+  });
+
+  test('moduleDelayMs: another photo picked during the switch to Develop: the reset gets err stale, with or without ph, and nothing resets', async () => {
+    for (const ph of ['1', undefined]) {
+      await withMock({ clock: 'manual', scenario: TWO_LIB }, async (mock) => {
+        mock.control.options({ moduleDelayMs: 300 });
+        const c = await ready(mock);
+        const what = ph ? 'with ph' : 'without ph';
+        try {
+          const t = now();
+          c.send({ t: 'reset', id: 4, p: 'Exposure', ...(ph ? { ph } : {}) }); // a dial press in Library
+          assert.ok(await c.waitOks());
+          mock.control.user({ photo: '2' });
+          await mock.control.advance(300);
+          assert.ok(await synced(mock, c));
+          assert.deepEqual(kinds(since(c, t)), ['state library', 'state develop', 'ranges', 'vals', 'err stale'], what);
+          assert.deepEqual(pick(since(c, t, 'err')[0], ['id', 'cmd', 'code']), { id: 4, cmd: 'reset', code: 'stale' }, what);
+          const s = mock.control.state();
+          assert.deepEqual(pick(s, ['module', 'staleG']), { module: 'develop', staleG: null }, `${what}: Lightroom stays in Develop, and a reset makes no g stale`);
+          assert.deepEqual([s.photos[1].values.Exposure, s.photos[2].values.Exposure, s.history], [0.35, -1, []], `${what}: nothing reset`);
+          assert.deepEqual(await answers(mock, c, { t: 'reset', p: 'Exposure', ph: '2' }), ['ack'], `${what}: the next press, in Develop, resets photo 2`);
+          assert.deepEqual([mock.control.state().photos[1].values.Exposure, mock.control.state().photos[2].values.Exposure], [0.35, 0], what);
+        } finally {
+          c.stop();
+        }
+      });
+    }
+  });
+
+  test('moduleDelayMs: a lock the poll read during the switch to Develop: set and reset get err locked, and only the module changed', async () => {
+    for (const cmd of [
+      { t: 'set', id: 5, p: 'Exposure', v: 0.5, g: 1, ph: '1' },
+      { t: 'reset', id: 5, p: 'Exposure', ph: '1' },
+      { t: 'set', id: 5, p: 'Exposure', v: 0.5, g: 1 },
+      { t: 'reset', id: 5, p: 'Exposure' },
+    ]) {
+      await withMock({ clock: 'manual', scenario: TWO_LIB }, async (mock) => {
+        mock.control.options({ moduleDelayMs: 300 });
+        const c = await ready(mock);
+        const what = `${cmd.t} ${cmd.ph ? 'with' : 'without'} ph`;
+        try {
+          const t = now();
+          c.send(cmd);
+          assert.ok(await c.waitOks());
+          mock.control.user({ locked: ['1'] }); // Denoise starts on photo 1 while Lightroom switches
+          await mock.control.step(); // and the poll reads it before the switch lands
+          assert.ok(await synced(mock, c));
+          assert.deepEqual(since(c, t).map((m) => `${m.t} ${m.module} ${m.locked}`), ['state library true'], `${what}: the poll read the lock; no answer yet`);
+          await mock.control.advance(200);
+          assert.ok(await synced(mock, c));
+          assert.deepEqual(kinds(since(c, t)), ['state library', 'state develop', 'ranges', 'vals', 'err locked'], what);
+          assert.deepEqual(pick(since(c, t, 'err')[0], ['id', 'cmd', 'code']), { id: 5, cmd: cmd.t, code: 'locked' }, what);
+          const s = mock.control.state();
+          assert.deepEqual(pick(s, ['module', 'tracking', 'staleG']), { module: 'develop', tracking: false, staleG: null }, `${what}: Lightroom stays in Develop, and no g is stale`);
+          assert.deepEqual([s.photos[1].values.Exposure, s.history], [0.35, []], `${what}: nothing changed`);
+        } finally {
+          c.stop();
+        }
+      });
+    }
+  });
+
+  test('holdPoll: a photo change stays unnoticed, so a set with the old photo\'s ph is refused before any state says so', async () => {
+    await withMock({ clock: 'manual', scenario: { ...LIB, module: 'develop', photos: [...LIB.photos, { id: '2', file: 'B.ARW', values: { Exposure: -1 } }] } }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        const t = now();
+        mock.control.holdPoll(600);
+        mock.control.user({ photo: '2' });
+        await mock.control.advance(400);
+        assert.deepEqual(await answers(mock, c, { t: 'set', p: 'Exposure', v: 0.4, g: 1, ph: '1' }, lineNow), ['err stale']);
+        assert.deepEqual([since(c, t, 'state'), mock.control.state().pollHeld], [[], true], 'no state for photo 2 yet');
+        await mock.control.advance(400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual([since(c, t, 'state').map((m) => m.photo), mock.control.state().pollHeld], [['2'], false]);
+        assert.deepEqual([mock.control.state().photos[1].values.Exposure, mock.control.state().photos[2].values.Exposure], [0.35, -1]);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // PROTOCOL.md, Locked photos: err locked answers a set the deck sent before state.locked reached it. The poll sends
+  // state.locked as it reads the lock, so that window is the state's trip to the deck, which delayEvents widens.
+  test('delayEvents: events reach the deck late and in order, so a set can meet err locked before the deck sees state.locked', async () => {
+    await withMock({ clock: 'manual', scenario: LIB }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        mock.control.delayEvents(300);
+        mock.control.user({ locked: ['1'] });
+        await mock.control.step(); // the poll reads the lock, and its state is on its way
+        const t = now();
+        c.send({ t: 'set', p: 'Exposure', v: 0.5, g: 1, ph: '1' });
+        assert.ok(await c.waitOks());
+        await sleep(50);
+        assert.deepEqual([since(c, t), mock.control.clients().delayed], [[], 2], 'nothing has reached the deck yet');
+        await mock.control.advance(300);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t).map((m) => (m.t === 'state' ? `state locked ${m.locked}` : `err ${m.code}`)), ['state locked true', 'err locked']);
+
+        // Back to 0 while an event is on its way: a new event no longer waits 300 ms, but it still goes after that one.
+        mock.control.delayEvents(300);
+        const t2 = now();
+        c.send({ t: 'ping', id: 8 });
+        assert.ok(await c.waitOks());
+        await mock.control.advance(100);
+        mock.control.delayEvents(0);
+        c.send({ t: 'ping', id: 9 });
+        assert.ok(await c.waitOks());
+        await sleep(50);
+        assert.deepEqual([since(c, t2), mock.control.clients().delayed], [[], 2], 'the pong for 9 waits behind the one for 8');
+        await mock.control.advance(200);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(since(c, t2).map((m) => `${m.t} ${m.id}`), ['pong 8', 'pong 9']);
+        const t3 = now();
+        await lineNow(mock, c, { t: 'ping', id: 10 });
+        assert.deepEqual(since(c, t3).map((m) => m.t), ['pong'], 'at once again');
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  // The manual clock runs timers in order, but the real one, which deck-vs-mock runs on, needn't: Node truncates
+  // each timer's delay to whole ms and keeps one list per duration. So the events wait in one queue, behind one
+  // timer, and this checks the order where a timer per event let a later event overtake an earlier one.
+  test('delayEvents keeps the order on the real clock too: hundreds of events 0.1 ms apart, and a switch back to 0 mid-stream', async () => {
+    await withMock({ scenario: LIB }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        const pongs = [];
+        c.on('m:pong', (m, at) => pongs.push({ id: m.id, at }));
+        mock.control.delayEvents(20);
+        const t = now();
+        let queued = 0;
+        for (let i = 1; i <= 600; i += 1) {
+          if (i === 401) {
+            queued = mock.control.clients().delayed;
+            mock.control.delayEvents(0);
+          }
+          c.send({ t: 'ping', id: i });
+          // Yields until the next ping is due, so the mock answers each one in a turn of the event loop of its own.
+          while (now() < t + i * 0.1) await new Promise((resolve) => setImmediate(resolve));
+        }
+        assert.ok(await waitUntil(() => pongs.length === 600, 3000, 5), `${pongs.length} of 600 pongs arrived`);
+        assert.ok(queued > 0 && pongs[0].at - t >= 15, `${queued} events were on their way at the switch; the first pong took ${Math.round(pongs[0].at - t)} ms`);
+        const overtaken = pongs.filter((p, i) => i > 0 && p.id < pongs[i - 1].id).map((p) => p.id);
+        assert.deepEqual(overtaken, [], 'every pong came after the one for the ping before it');
+        assert.equal(mock.control.clients().delayed, 0);
+      } finally {
+        c.stop();
+      }
+    });
+  });
+
+  test('nextPoll resolves just after the next poll, on either clock', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      let polled = false;
+      const p = mock.control.nextPoll().then(() => { polled = true; });
+      await mock.control.advance(100);
+      assert.equal(polled, false);
+      await mock.control.advance(100);
+      await p;
+      assert.equal(polled, true);
+    });
+    await withMock({}, async (mock) => {
+      await mock.control.nextPoll();
+      const first = now();
+      await mock.control.nextPoll();
+      const gap = now() - first;
+      assert.ok(gap > TIMING.pollMs / 2 && gap < TIMING.pollMs * 2, `polls about ${TIMING.pollMs} ms apart: ${Math.round(gap)} ms`);
+    });
+  });
+
+  test('a preset whose apply changes sliders: vals follow with the changed values, and a profile-only one sends none', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const c = await ready(mock);
+      try {
+        await line(mock, c, { t: 'watch', ps: ['Exposure', 'Contrast', 'Vibrance', 'Clarity'] });
+        await mock.control.advance(400);
+        assert.ok(await synced(mock, c));
+        let t = now();
+        await line(mock, c, { t: 'preset', id: 3, uuid: PUNCHY });
+        const got = since(c, t);
+        assert.deepEqual(kinds(got), ['applied', 'vals']);
+        assert.deepEqual(got[1].vals, { Contrast: 25, Vibrance: 20, Clarity: 10 }, 'only the sliders Punchy changes');
+        t = now();
+        await line(mock, c, { t: 'preset', id: 4, uuid: loadScenario().presets[0].uuid });
+        await mock.control.advance(400);
+        assert.ok(await synced(mock, c));
+        assert.deepEqual(kinds(since(c, t)), ['applied']);
       } finally {
         c.stop();
       }

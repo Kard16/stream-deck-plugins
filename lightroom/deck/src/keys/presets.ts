@@ -48,7 +48,8 @@ export class PresetCatalog {
 			const evt = await this.#link.request({ t: "presets" }, { timeoutMs: 5000 });
 			if (evt.t !== "presets") return kept("failed");
 			this.#items = sortPresets(evt.items);
-			this.#log.info(`listed ${this.#items.length} Develop presets`);
+			// Every time a Property Inspector opens: below info.
+			this.#log.debug(`listed ${this.#items.length} Develop presets`);
 			return { t: "presets", items: this.#items };
 		} catch (err) {
 			const why = err instanceof LrError ? `${err.code}: ${err.message}` : String(err);

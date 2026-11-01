@@ -87,13 +87,22 @@ const EXPECT: Record<string, (model: LrModel) => void> = {
 		// Both errs answer sets this deck never sent, so they change nothing; the last ack is photo 102's -0.3.
 		assert.deepEqual(m.view("Exposure"), { value: -0.3, range: [-5, 5], fresh: true, adjusting: false });
 	},
+	"stale-photo.jsonl": (m) => {
+		assert.deepEqual([m.state.photo, m.state.file, m.state.rating], ["102", "DSC0102.ARW", 2]);
+		// The stale and bad errs answer commands this deck never sent; the last ack, an older client's, is -0.3.
+		assert.deepEqual(m.view("Exposure"), { value: -0.3, range: [-5, 5], fresh: true, adjusting: false });
+	},
+	"locked.jsonl": (m) => {
+		assert.deepEqual([m.state.module, m.state.photo, m.state.locked], ["develop", "101", false], "the lock has ended");
+		assert.equal(value(m, "Exposure"), 0.5);
+	},
 };
 
 describe("protocol fixtures (lightroom/protocol/fixtures)", () => {
 	const fixtures = loadFixtures();
 
 	test("every fixture has a check here", () => {
-		assert.ok(fixtures.length >= 19, `found ${fixtures.length} fixtures`);
+		assert.ok(fixtures.length >= 21, `found ${fixtures.length} fixtures`);
 		assert.deepEqual(
 			fixtures.map((f) => f.name).filter((name) => !EXPECT[name]),
 			[],
