@@ -177,17 +177,17 @@ describe("Approve and Deny keys", () => {
 		assert.equal(JSON.parse(second.sent[0] ?? "null").hookSpecificOutput.decision.behavior, "allow");
 	});
 
-	test("a question or a plan shows 'needs you'; a press jumps to its session and answers nothing", () => {
+	test("a question or a plan shows 'Answer in app'; a press jumps to its session, shows the OK and answers nothing", () => {
 		const { clock, model, surface, feedback, permission, jumps, open } = setup();
 		const deny = new DecisionKeys(model, "deny", { clock, open });
 		deny.add("k", surface("k"));
 		const ask = permission(B, "AskUserQuestion", { questions: [{ question: "Red or blue?" }] });
 		clock.advance(200 + SETTLE_MS);
-		assert.match(deny.painted("k")?.svg ?? "", />needs you</);
+		assert.match(deny.painted("k")?.svg ?? "", />Answer in app</);
 		deny.press("k");
 		assert.deepEqual(jumps, [B]);
 		assert.deepEqual(ask.sent, []);
-		assert.deepEqual(feedback, []);
+		assert.deepEqual(feedback, ["k:ok"]);
 		assert.equal(model.held.size, 1);
 	});
 

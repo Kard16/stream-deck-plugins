@@ -48,10 +48,11 @@ type Key = {
 
 /**
  * The Approve or the Deny keys, without the SDK (PROTOCOL.md, Held requests). Each shows the oldest held
- * request across sessions: its session's title and what it's for, or "needs you" for a question or a plan.
- * A press acts only on the request the key last showed, and only once it has been in sight for
- * {@link SETTLE_MS}: a `tool` request is answered (allow or deny); an `ask` jumps to its session and stays
- * held. A press after the shown request ended, or before it could be seen, does nothing but alert.
+ * request across sessions: its session's title and what it's for, or "Answer in app" for a question or a
+ * plan. A press acts only on the request the key last showed, and only once it has been in sight for
+ * {@link SETTLE_MS}: a `tool` request is answered (allow or deny); an `ask` jumps to its session, shows the
+ * OK so the press reads as done, and stays held. A press after the shown request ended, or before it could
+ * be seen, does nothing but alert.
  */
 export class DecisionKeys {
 	readonly #model: DecisionModel;
@@ -118,6 +119,8 @@ export class DecisionKeys {
 			}
 			this.#log.info(`${name}: jump to ${held.host} for #${held.id} ${quote(held.tool, 40)}, which needs the user in the app`);
 			this.#open(held.host);
+			// Without feedback the press looked dead when the session was already on screen (Phase 4).
+			this.#ok(key);
 			return;
 		}
 		const why =

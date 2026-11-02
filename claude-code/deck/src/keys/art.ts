@@ -158,7 +158,7 @@ export type DecisionLook = {
 
 /**
  * Approve or Deny: the oldest held request's session and what it's for, with the count in a badge. Green
- * (Approve) or red (Deny) while a tool waits; amber with "needs you" for a question or a plan. Dimmed,
+ * (Approve) or red (Deny) while a tool waits; amber with "Answer in app" for a question or a plan. Dimmed,
  * saying "Offline", while the bridge isn't listening.
  */
 export function decisionKeySvg(look: DecisionLook, size = 144): string {
@@ -171,7 +171,7 @@ export function decisionKeySvg(look: DecisionLook, size = 144): string {
 	if (look.count <= 0 || !oldest) return key(BG, glyph(CAPTION, false) + caption(name, CAPTION), size);
 	const bg = oldest.ask ? ASK_BG : allow ? ALLOW_BG : DENY_BG;
 	const mark = oldest.ask ? question("#FFFFFF") : glyph("#FFFFFF", true);
-	return key(bg, mark + badge(look.count, "#FFFFFF", bg) + line(oldest.title, 98, "#FFFFFF", 17, 600) + line(oldest.ask ? "needs you" : oldest.summary, 126, "#E8E8E8", 17, 500), size);
+	return key(bg, mark + badge(look.count, "#FFFFFF", bg) + line(oldest.title, 98, "#FFFFFF", 17, 600) + line(oldest.ask ? "Answer in app" : oldest.summary, 126, "#E8E8E8", 17, 500), size);
 }
 
 // ---- Saved Prompt ----
