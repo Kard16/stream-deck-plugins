@@ -1,8 +1,8 @@
 // The bridge protocol's constants, and its fingerprint and summary (claude-code/protocol/PROTOCOL.md, v1).
 //
-// canonical, fnv1a32, fingerprint and summary are copies of the reference implementation in
-// claude-code/protocol/make-fixtures.mjs, not imports of it: that file rewrites the fixtures as soon as it's
-// loaded. test/protocol.test.mjs checks the copies against fixtures/vectors.json, so a drift shows there.
+// canonical, fnv1a32, fingerprint and summary are the reference implementation's own, imported from
+// claude-code/protocol/make-fixtures.mjs, which writes the fixtures only when it's run. test/protocol.test.mjs
+// checks them against fixtures/vectors.json, so vectors the generator wasn't rerun for show there.
 
 export const VERSION = 1
 
@@ -30,8 +30,15 @@ export const MAX_BODY = 8 * 1024 * 1024
 /** The long poll's `wait`, in seconds: 0 answers at once, and 20 is both the default and the most. */
 export const MAX_WAIT_S = 20
 
-/** A command answered to a poll is in flight this long at most; then it counts as failed, "no result". */
+/**
+ * A delivered command with no result this long after delivery counts as failed, "no result". A prompt's
+ * `waiting` stops that clock; a waiting prompt fails the same way once its session has gone this long without
+ * an open poll.
+ */
 export const IN_FLIGHT_MS = 60_000
+
+/** The app's `local_…` ids. A host that doesn't match counts as missing, and the sid places the request. */
+export const HOST_PATTERN = /^local_[A-Za-z0-9-]{1,64}$/
 
 /** The app's own tool that changes a session's mode. The deck's mode command calls it for `self`. */
 export const MODE_TOOL = 'mcp__ccd_session_mgmt__set_session_permission_mode'
@@ -70,90 +77,4 @@ export function answerFor(decision) {
 
 // ---- fingerprints and summaries (PROTOCOL.md, "Fingerprints and summaries") ----------------------------
 
-/** JSON with no spaces and sorted keys; undefined values left out of objects. */
-export function canonical(v) {
-  if (Array.isArray(v)) return `[${v.map((x) => (x === undefined ? 'null' : canonical(x))).join(',')}]`
-  if (v !== null && typeof v === 'object') {
-    const keys = Object.keys(v).sort().filter((k) => v[k] !== undefined)
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`
-  }
-  return JSON.stringify(v)
-}
-
-/** FNV-1a over UTF-16 code units. */
-export function fnv1a32(s) {
-  let h = 0x811c9dc5
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
-  return h
-}
-
-export const fingerprint = (tool, input) => fnv1a32(`${tool}\n${canonical(input)}`).toString(16).padStart(8, '0')
-
-const MAX = 40
-const cut = (s) => (s.length > MAX ? `${s.slice(0, MAX - 1)}…` : s)
-const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
-const lastSegment = (p) => p.split('/').filter((x) => x !== '').at(-1) ?? null
-
-function hostOf(url) {
-  const i = url.indexOf('://')
-  if (i < 0) return null
-  let rest = url.slice(i + 3)
-  const end = rest.search(/[/?#]/)
-  if (end >= 0) rest = rest.slice(0, end)
-  rest = rest.slice(rest.lastIndexOf('@') + 1).replace(/:\d*$/, '')
-  return rest === '' ? null : rest
-}
-
-/** What the deck shows for a call: at most 40 UTF-16 code units. */
-export function summary(tool, input) {
-  const i = input !== null && typeof input === 'object' && !Array.isArray(input) ? input : {}
-  let s = null
-  switch (tool) {
-    case 'Bash': {
-      const c = str(i.command)
-      s = c === null ? null : str(c.split('\n')[0].trim())
-      break
-    }
-    case 'Read':
-    case 'Write':
-    case 'Edit':
-    case 'MultiEdit': {
-      const p = str(i.file_path)
-      s = p === null ? null : lastSegment(p)
-      break
-    }
-    case 'NotebookEdit': {
-      const p = str(i.notebook_path)
-      s = p === null ? null : lastSegment(p)
-      break
-    }
-    case 'Glob':
-    case 'Grep':
-      s = str(i.pattern)
-      break
-    case 'WebFetch': {
-      const u = str(i.url)
-      s = u === null ? null : hostOf(u)
-      break
-    }
-    case 'WebSearch':
-      s = str(i.query)
-      break
-    case 'Agent':
-    case 'Task':
-      s = str(i.description) ?? str(i.subagent_type)
-      break
-    case 'AskUserQuestion':
-      s = Array.isArray(i.questions) ? str(i.questions[0]?.question) : null
-      break
-    case 'ExitPlanMode':
-      s = 'Plan ready'
-      break
-    default:
-      if (tool.startsWith('mcp__')) {
-        const name = tool.split('__').slice(2).join('__')
-        s = name === '' ? null : name.replaceAll('_', ' ')
-      }
-  }
-  return cut(s ?? tool)
-}
+export { canonical, fingerprint, fnv1a32, summary } from '../../protocol/make-fixtures.mjs'

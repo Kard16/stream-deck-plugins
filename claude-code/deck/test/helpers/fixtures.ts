@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
+import { ALLOW_DECISION, DENY_DECISION, NO_DECISION, ROUTES } from "../../src/protocol/wire.js";
 import { fixturesDir } from "./paths.js";
 
 export type Obj = Record<string, unknown>;
@@ -70,6 +72,27 @@ export function mismatches(want: unknown, got: unknown, at = "$"): string[] {
 		return Object.entries(want).flatMap(([k, w]) => (k in got ? mismatches(w, (got as Obj)[k], `${at}.${k}`) : [`${at}.${k}: missing`]));
 	}
 	return Object.is(want, got) || want === got ? [] : [`${at}: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`];
+}
+
+/** PROTOCOL.md's three answers to a PermissionRequest, from the deck's own wire module. */
+const DECISIONS: readonly unknown[] = [ALLOW_DECISION, DENY_DECISION, NO_DECISION];
+
+/**
+ * What a `reply` line finds wrong with an answer, or an empty list; `want` is undefined when the line gives no
+ * body. A 200 from `/v1/permission` is held to more than PROTOCOL.md's general matching, whatever the line
+ * expects: it must be exactly Allow, Deny or `{}`, and an expected `{}` means no decision, so no
+ * `hookSpecificOutput`. By the general rule alone, `{}` matches any answer, an Allow included, and extra fields
+ * such as `updatedPermissions` pass.
+ */
+export function replyMismatches(route: string, status: number, want: unknown, got: unknown): string[] {
+	const problems: string[] = [];
+	if (route === ROUTES.permission && status === 200) {
+		if (!DECISIONS.some((d) => isDeepStrictEqual(d, got))) problems.push(`$: expected exactly Allow, Deny or {}, got ${JSON.stringify(got)}`);
+		const none = typeof want === "object" && want !== null && Object.keys(want).length === 0;
+		if (none && typeof got === "object" && got !== null && "hookSpecificOutput" in got) problems.push(`$: expected no decision ({}), got ${JSON.stringify(got)}`);
+	}
+	if (want !== undefined) problems.push(...mismatches(want, got));
+	return problems;
 }
 
 /** Which labels a later `reply` line checks. */

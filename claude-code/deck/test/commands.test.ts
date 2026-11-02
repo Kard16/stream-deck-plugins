@@ -135,26 +135,66 @@ describe("command queue and long poll", () => {
 		assert.equal(queue.result("local_a", "ia", cmd.id, "done", null, null), false, "a late result is ignored");
 	});
 
-	test("a prompt the mod is waiting with stays in flight past 60 s, until its final result", () => {
+	test("a waiting prompt whose mod keeps polling is still waiting ten minutes on, until its final result", () => {
 		const { queue, clock } = setup();
 		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
 		queue.poll("local_a", "ia", 20, new FakePoll());
-		clock.advance(IN_FLIGHT_MS - 1000);
+		// The mod polls again as soon as a poll answers, and takes the prompt.
+		let poll = new FakePoll();
+		queue.poll("local_a", "ia", 20, poll);
 		assert.equal(queue.result("local_a", "ia", cmd.id, "waiting", null, null), true);
-		assert.equal(clock.pendingTimers, 0, "no clock runs on a waiting prompt");
-		// The session's turn runs on for ten minutes; the engine then submits the prompt.
-		clock.advance(10 * 60_000);
+		// The session's turn runs on for ten minutes. Each poll answers with none after its 20 s, and the mod
+		// polls again at once. Then the engine submits the prompt.
+		for (let i = 0; i < 30; i++) {
+			clock.advance(20_000);
+			assert.deepEqual(poll.answers, [{ cmds: [] }]);
+			poll = new FakePoll();
+			queue.poll("local_a", "ia", 20, poll);
+		}
 		assert.equal(cmd.state, "waiting");
 		assert.equal(queue.result("local_a", "ia", cmd.id, "done", null, null), true);
 		assert.deepEqual([cmd.state, cmd.error], ["done", null]);
 	});
 
-	test("a mode command keeps its 60 s, even if a waiting result comes for it", () => {
+	test("a waiting prompt fails with 'no result' once its session has gone 60 s without an open poll", () => {
+		const { queue, clock } = setup();
+		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		const held = new FakePoll();
+		queue.poll("local_a", "ia", 20, held);
+		assert.equal(queue.result("local_a", "ia", cmd.id, "waiting", null, null), true);
+		// The poll's client goes away 5 s in, and the mod doesn't poll again for 50 s: within the limit.
+		clock.advance(5000);
+		held.close();
+		clock.advance(50_000);
+		assert.equal(cmd.state, "waiting");
+		// It polls once more; that poll answers with none after its 20 s, and no other follows.
+		const last = new FakePoll();
+		queue.poll("local_a", "ia", 20, last);
+		clock.advance(20_000);
+		assert.deepEqual(last.answers, [{ cmds: [] }]);
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.equal(cmd.state, "waiting");
+		clock.advance(1);
+		assert.deepEqual([cmd.state, cmd.error], ["failed", "no result"]);
+		assert.equal(queue.result("local_a", "ia", cmd.id, "done", null, null), false, "a late result is ignored");
+		assert.equal(clock.pendingTimers, 0);
+	});
+
+	test("a mode command keeps its 60 s, even after a waiting result, and while its mod keeps polling", () => {
 		const { queue, clock } = setup();
 		const cmd = queue.queue("local_a", { t: "mode", mode: "plan" });
 		queue.poll("local_a", "ia", 20, new FakePoll());
+		queue.poll("local_a", "ia", 20, new FakePoll());
 		assert.equal(queue.result("local_a", "ia", cmd.id, "waiting", null, null), true);
-		clock.advance(IN_FLIGHT_MS);
+		// The mod polls on, each poll after the last answers, and still the change fails 60 s after delivery.
+		for (let i = 0; i < 2; i++) {
+			clock.advance(20_000);
+			queue.poll("local_a", "ia", 20, new FakePoll());
+		}
+		clock.advance(20_000 - 1);
+		assert.equal(cmd.state, "waiting");
+		clock.advance(1);
 		assert.deepEqual([cmd.state, cmd.error], ["failed", "no result"]);
 		assert.equal(queue.inFlightMode("local_a", "plan"), null, "so the bridge no longer allows that change");
 	});
@@ -197,11 +237,32 @@ describe("command queue and long poll", () => {
 		assert.deepEqual([ended.state, ended.error], ["failed", "the session ended"]);
 	});
 
+	test("a session's end answers its open poll with none, and fails every command it has", () => {
+		const { queue, clock } = setup();
+		const waiting = queue.queue("local_a", { t: "prompt", text: "one" });
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		queue.result("local_a", "ia", waiting.id, "waiting", null, null);
+		const open = new FakePoll();
+		queue.poll("local_a", "ia", 20, open);
+		const other = new FakePoll();
+		queue.poll("local_b", "ib", 20, other);
+		queue.failHost("local_a", "the session ended");
+		assert.deepEqual(open.answers, [{ cmds: [] }]);
+		assert.equal(queue.polling("local_a"), false);
+		assert.deepEqual([waiting.state, waiting.error], ["failed", "the session ended"]);
+		assert.deepEqual(other.answers, [], "another session's poll stays open");
+		clock.advance(20_000);
+		assert.deepEqual(open.answers, [{ cmds: [] }], "answered once");
+	});
+
 	test("dispose stops every timer", () => {
 		const { queue, clock } = setup();
 		queue.queue("local_a", { t: "prompt", text: "hi" });
 		queue.poll("local_a", "ia", 20, new FakePoll());
 		queue.poll("local_b", "ib", 20, new FakePoll());
+		const waiting = queue.queue("local_c", { t: "prompt", text: "waits" });
+		queue.poll("local_c", "ic", 20, new FakePoll());
+		queue.result("local_c", "ic", waiting.id, "waiting", null, null);
 		assert.ok(clock.pendingTimers > 0);
 		queue.dispose();
 		assert.equal(clock.pendingTimers, 0);

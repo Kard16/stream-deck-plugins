@@ -19,30 +19,44 @@ import { SAFE_HOST } from './registry.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * The homes whose Claude folders are protected: $HOME's, and the account's own from the user database, which
+ * a $HOME pointed elsewhere doesn't move.
+ */
+function homes() {
+  const out = [os.homedir()]
+  try {
+    out.push(os.userInfo().homedir)
+  } catch {}
+  return [...new Set(out.filter(Boolean))]
+}
+
 /** The Claude app's own folders. Fixture files are never written inside them. */
-export const PROTECTED = Object.freeze([
-  path.join(os.homedir(), '.claude'),
-  path.join(os.homedir(), 'Library', 'Application Support', 'Claude'),
-])
+export const PROTECTED = Object.freeze(homes().flatMap((home) => [path.join(home, '.claude'), path.join(home, 'Library', 'Application Support', 'Claude')]))
 
 const inside = (child, parent) => {
   const rel = path.relative(parent, child)
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
 
+/**
+ * The real path, by the system's own realpath: on a case-insensitive volume it also gives each name its case on
+ * disk, so `~/.CLAUDE` compares as `~/.claude`, which Node's own realpathSync doesn't do. The path as it is
+ * when it doesn't exist.
+ */
 const realOr = (p) => {
   try {
-    return fs.realpathSync(p)
+    return fs.realpathSync.native(p)
   } catch {
     return p
   }
 }
 
-/** A folder fake-claude may write fixture files into: one that exists and isn't the app's. */
+/** A folder fake-claude may write fixture files into: one that exists and isn't, or isn't in, the app's. */
 export function checkDir(dir, what) {
   let real
   try {
-    real = fs.realpathSync(dir)
+    real = fs.realpathSync.native(dir)
   } catch {
     throw new Error(`the fake bridge's ${what} folder ${dir} doesn't exist: start it with --${what}-dir set to an empty folder`)
   }
@@ -52,6 +66,16 @@ export function checkDir(dir, what) {
     }
   }
   return real
+}
+
+/** The JSON files under `dir`, down to `depth` folders (the records' `<account>/<org>/<host>.json` is 3). */
+function jsonFiles(dir, depth) {
+  const out = []
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith('.json')) out.push(e.name)
+    else if (e.isDirectory() && depth > 1) out.push(...jsonFiles(path.join(dir, e.name), depth - 1).map((f) => path.join(e.name, f)))
+  }
+  return out
 }
 
 /** Writes JSON beside the file and renames it into place, so a reading never sees half of it. */
@@ -111,6 +135,9 @@ export function againstFake({ url, token, expectMs = 1000, takenMs = 2000 }) {
         fs.mkdirSync(dir)
         madeDirs.push(dir)
       }
+      // Each folder by its real path too, before anything goes in it: a link in the records folder can't lead
+      // into the app's.
+      checkDir(dir, 'records')
     }
     const file = path.join(dir, `${host}.json`)
     writeJson(file, record)
@@ -124,8 +151,11 @@ export function againstFake({ url, token, expectMs = 1000, takenMs = 2000 }) {
       const state = await call('GET', '/control/state')
       dirs = { registry: checkDir(state.dirs.registry, 'registry'), records: checkDir(state.dirs.records, 'records') }
       removeWritten()
-      const foreign = fs.readdirSync(dirs.registry).filter((n) => n.endsWith('.json'))
-      if (foreign.length) throw new Error(`the fake bridge's registry folder ${dirs.registry} holds files fake-claude didn't write (${foreign.join(', ')}): give it an empty one`)
+      // With its own files gone, anything left is someone else's: perhaps the app's, reached some other way.
+      for (const [what, depth] of [['registry', 1], ['records', 3]]) {
+        const foreign = jsonFiles(dirs[what], depth)
+        if (foreign.length) throw new Error(`the fake bridge's ${what} folder ${dirs[what]} holds files fake-claude didn't write (${foreign.join(', ')}): give it an empty one`)
+      }
       await call('POST', '/control/reset')
       for (const entry of fx.setup.registry ?? []) writeRegistry({ ...entry })
       for (const [host, record] of Object.entries(fx.setup.records ?? {})) writeRecord(host, record)

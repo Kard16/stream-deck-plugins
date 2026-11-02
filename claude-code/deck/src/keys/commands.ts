@@ -67,7 +67,8 @@ type PromptKey = {
 /**
  * The Saved Prompt keys, without the SDK. Each holds text set in its Property Inspector. A press queues it
  * as a prompt for the target session (PROTOCOL.md, Commands), and the key shows waiting until the command is
- * final, then sent (done) or refused (refused or failed) for a few seconds (kickoff answer 6).
+ * final, then sent (done) or refused (refused or failed) for a few seconds (kickoff answer 6). While its last
+ * prompt is still queued, delivered or waiting, a press alerts and sends nothing, so a double press sends once.
  */
 export class PromptKeys {
 	readonly #model: CommandModel;
@@ -113,6 +114,12 @@ export class PromptKeys {
 		const key = this.#keys.get(id);
 		if (!key) return;
 		if (settings) key.settings = settings;
+		const last = key.cmd === null ? null : this.#model.commands.get(key.cmd);
+		if (last && !FINAL_STATES.has(last.state)) {
+			this.#log.info(`Saved Prompt: nothing sent: ${last.id} is still ${last.state}`);
+			key.surface.showAlert();
+			return;
+		}
 		const text = typeof key.settings.text === "string" ? key.settings.text.trim() : "";
 		if (text === "") {
 			this.#log.info("Saved Prompt: no text set; set it in the key's settings");

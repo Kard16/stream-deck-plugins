@@ -40,14 +40,17 @@ Running it:
 
 Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}) or --port, with --token-file:
   state                          the deck's view, sessions, held requests, commands, registry
-  answer <id> allow|deny|none    answers one held request (ids p1, p2… are in state)
-  approve                        Approve: the oldest held request, as the key does
-  deny                           Deny: the same
+  answer <id> allow|deny|none    answers one held tool request (ids p1, p2… are in state); never
+                                 an ask request, which the deck doesn't answer
+  approve [<id>]                 Approve: the oldest held request, as the key does. With an id, as
+                                 a key that showed that request: it alerts if the oldest is another
+  deny [<id>]                    Deny: the same
   prompt <host> <text>           a Saved Prompt key: queues a prompt for that session (local_…)
   mode <host> <mode>             the Mode dial: ${MODES.join(', ')}
   rescan                         reads the registry and records now
   reset                          forgets everything: held requests get {}, polls no commands
-  It prints the answer as JSON and exits 1 when the call failed or the press alerted.
+  It prints the answer as JSON and exits 1 when the call failed or the press alerted, and 2 for a
+  usage error, before it reads any token.
 
   -h, --help                     this text
 `
@@ -94,41 +97,49 @@ async function serve(values) {
   process.once('SIGTERM', () => void stop('SIGTERM'))
 }
 
-async function command(values, [cmd, ...args]) {
-  const url = values.url ?? `http://127.0.0.1:${number(values.port, '--port', DEFAULTS.port)}`
-  const token = readToken(values['token-file'] ? path.resolve(values['token-file']) : DEFAULTS.tokenFile)
-  const control = controlClient(url, token)
+/** The control call for a command and its arguments, `[method, route, body]`, or a UsageError. */
+function controlCall(cmd, args) {
   const want = (n, shape) => {
-    if (args.length !== n) throw new UsageError(`${cmd} takes ${shape}`)
+    if (!(Array.isArray(n) ? n : [n]).includes(args.length)) throw new UsageError(`${cmd} takes ${shape}`)
   }
-  let r
   switch (cmd) {
     case 'state':
       want(0, 'no arguments')
-      r = await control.call('GET', '/control/state')
-      break
+      return ['GET', '/control/state']
     case 'answer':
       want(2, '<id> allow|deny|none')
-      r = await control.call('POST', '/control/answer', { id: args[0], decision: args[1] })
-      break
+      return ['POST', '/control/answer', { id: args[0], decision: args[1] }]
     case 'approve':
     case 'deny':
+      // An id presses as a key that showed that request: the control route's `shown` guard.
+      want([0, 1], 'nothing, or the id of the request the key shows (p3)')
+      return ['POST', `/control/${cmd}`, args.length ? { shown: args[0] } : {}]
     case 'rescan':
     case 'reset':
       want(0, 'no arguments')
-      r = await control.call('POST', `/control/${cmd}`, {})
-      break
+      return ['POST', `/control/${cmd}`, {}]
     case 'prompt':
       want(2, '<host> <text> (quote the text)')
-      r = await control.call('POST', '/control/prompt', { host: args[0], text: args[1] })
-      break
+      return ['POST', '/control/prompt', { host: args[0], text: args[1] }]
     case 'mode':
       want(2, `<host> <mode>, the mode one of ${MODES.join(', ')}`)
-      r = await control.call('POST', '/control/mode', { host: args[0], mode: args[1] })
-      break
+      return ['POST', '/control/mode', { host: args[0], mode: args[1] }]
     default:
       throw new UsageError(`unknown command ${cmd}`)
   }
+}
+
+async function command(values, [cmd, ...args]) {
+  // Usage first: a mistyped command exits 2 without reading any token.
+  const [method, route, body] = controlCall(cmd, args)
+  const url = values.url ?? `http://127.0.0.1:${number(values.port, '--port', DEFAULTS.port)}`
+  try {
+    new URL(url)
+  } catch {
+    throw new UsageError(`--url ${url} isn't a URL`)
+  }
+  const token = readToken(values['token-file'] ? path.resolve(values['token-file']) : DEFAULTS.tokenFile)
+  const r = await controlClient(url, token).call(method, route, body)
   process.stdout.write(`${JSON.stringify(r.json, null, 2)}\n`)
   return r.status < 300 && r.json?.ok !== false ? 0 : 1
 }

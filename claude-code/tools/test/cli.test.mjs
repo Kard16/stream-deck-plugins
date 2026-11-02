@@ -5,10 +5,13 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { pathToFileURL } from 'node:url'
 
-import { TOOLS, tempEnv } from './helpers.mjs'
+import { hostHeader, send } from '../lib/client.mjs'
+import { TOOLS, sleep, tempEnv } from './helpers.mjs'
 
 const BRIDGE = path.join(TOOLS, 'fake-bridge.mjs')
 const CLAUDE = path.join(TOOLS, 'fake-claude.mjs')
@@ -67,7 +70,7 @@ test('cli: both --help texts exit 0 without touching anything', async (t) => {
   assert.deepEqual(fs.readdirSync(env.root).sort(), ['records', 'registry', 'token'], 'no run folder or anything else made')
 })
 
-test('cli: usage errors exit 2', async (t) => {
+test('cli: usage errors exit 2, before any token is read', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   let r = await run(CLAUDE, [], { env: home })
@@ -79,9 +82,27 @@ test('cli: usage errors exit 2', async (t) => {
   assert.equal(r.code, 2)
   r = await run(BRIDGE, ['--port', 'x'], { env: home })
   assert.equal(r.code, 2)
+  // With no --token-file the default is the spike bridge's, which git ignores: usage comes first, so it's never read.
   r = await run(BRIDGE, ['answer', 'p1'], { env: home })
   assert.equal(r.code, 2)
-  assert.match(r.err, /answer takes <id> allow\|deny\|none/)
+  assert.match(r.err, /^fake-bridge: answer takes <id> allow\|deny\|none\n/)
+  // A token file that isn't there shows the order: read first, each would exit 1 for it.
+  const missing = path.join(env.root, 'no-token')
+  const cases = [
+    [['answer', 'p1'], /answer takes/],
+    [['approve', 'p1', 'p2'], /approve takes nothing, or the id/],
+    [['deny', 'p1', 'p2'], /deny takes nothing, or the id/],
+    [['state', 'x'], /state takes no arguments/],
+    [['prompt', 'local_x'], /prompt takes <host> <text>/],
+    [['bogus'], /unknown command bogus/],
+    [['state', '--url', 'not a url'], /--url not a url isn't a URL/],
+    [['state', '--port', 'x'], /--port must be a whole number/],
+  ]
+  for (const [args, why] of cases) {
+    r = await run(BRIDGE, [...args, '--token-file', missing], { env: home })
+    assert.equal(r.code, 2, `${args.join(' ')}: ${r.err}`)
+    assert.match(r.err.split('\n')[0], why)
+  }
 })
 
 test('cli: fake-claude --against-fake plays all 14 fixtures against the fake bridge\'s own CLI', async (t) => {
@@ -146,8 +167,40 @@ test('cli: the control commands', async (t) => {
   assert.match(JSON.parse(r.out).error, /no request p1/)
   r = await ctl('rescan')
   assert.equal(r.code, 0)
+
+  // approve and deny take the id the key showed, as the control route's `shown`: another oldest alerts.
+  const hold = (tool, input) => send(url, {
+    method: 'POST', path: '/v1/permission',
+    headers: { host: hostHeader(url), authorization: `Bearer ${env.token}`, 'x-deck-host': 'local_seven' },
+    body: JSON.stringify({ session_id: 's7', tool_name: tool, tool_input: input }),
+  })
+  const write = hold('Write', { file_path: '/s/a.txt', content: 'a' })
+  await sleep(100)
+  const bash = hold('Bash', { command: 'make' })
+  await sleep(100)
+  const [first, second] = JSON.parse((await ctl('state')).out).deck.held.map((h) => h.id)
+  r = await ctl('approve', second)
+  assert.equal(r.code, 1, 'the key showed the second, but the oldest is the first')
+  assert.match(JSON.parse(r.out).error, new RegExp(`the key showed ${second}; the oldest is ${first}`))
+  r = await ctl('approve', first)
+  assert.equal(r.code, 0, r.out)
+  assert.equal((await write.answer).json.hookSpecificOutput.decision.behavior, 'allow')
+  r = await ctl('deny', second)
+  assert.equal(r.code, 0, r.out)
+  assert.equal((await bash.answer).json.hookSpecificOutput.decision.behavior, 'deny')
+
+  // answer never answers an ask request: the deck doesn't, and a press on one jumps.
+  const ask = hold('AskUserQuestion', { questions: [{ question: 'Red or blue?' }] })
+  await sleep(100)
+  const [askId] = JSON.parse((await ctl('state')).out).deck.held.map((h) => h.id)
+  r = await ctl('answer', askId, 'none')
+  assert.equal(r.code, 1)
+  assert.match(JSON.parse(r.out).error, /never answers: a press on it jumps to local_seven instead/)
+  assert.equal(ask.settled, false, 'still held')
+
   r = await ctl('reset')
   assert.equal(r.code, 0)
+  assert.deepEqual((await ask.answer).json, {}, 'reset releases it with no decision')
   r = await run(BRIDGE, ['state', '--url', url, '--token-file', path.join(env.root, 'token-wrong')], { env: home })
   assert.equal(r.code, 1)
   fs.writeFileSync(path.join(env.root, 'token-wrong'), 'wrong\n')
@@ -165,18 +218,53 @@ test('cli: fake-claude won\'t write fixture files into the app\'s folders', asyn
   fs.mkdirSync(records, { recursive: true })
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--quiet'], home)
-  const r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, 'hello'], { env: home })
+  let r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, 'hello'], { env: home })
   assert.equal(r.code, 1)
   assert.match(r.out, /won't write fixture files into .*\.claude\/sessions/)
+
+  // The same folders by other names: real paths compare as the system gives them, which on a case-insensitive
+  // volume (the Mac's default) includes each name's case on disk.
+  if (fs.existsSync(path.join(env.root, '.CLAUDE'))) {
+    const upper = await serve(env, ['--token-file', env.tokenFile, '--run-dir', path.join(env.root, 'run-upper'), '--registry-dir', path.join(env.root, '.CLAUDE', 'SESSIONS'), '--records-dir', path.join(env.root, 'records'), '--quiet'], home)
+    r = await run(CLAUDE, ['--against-fake', '--url', upper.url, '--token-file', env.tokenFile, 'hello'], { env: home })
+    assert.equal(r.code, 1)
+    assert.match(r.out, /won't write fixture files into .*\.CLAUDE\/SESSIONS/)
+  } else {
+    t.diagnostic('this volume is case-sensitive: the case check was skipped')
+  }
+  // A link in a fake records folder that leads into the app's: each folder written into is checked too.
+  const fakeRecords = path.join(env.root, 'fake-records')
+  fs.mkdirSync(fakeRecords)
+  fs.symlinkSync(records, path.join(fakeRecords, 'fixture-account'))
+  const linked = await serve(env, ['--token-file', env.tokenFile, '--run-dir', path.join(env.root, 'run-linked'), '--registry-dir', path.join(env.root, 'registry'), '--records-dir', fakeRecords, '--quiet'], home)
+  r = await run(CLAUDE, ['--against-fake', '--url', linked.url, '--token-file', env.tokenFile, 'hello'], { env: home })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /won't write fixture files into .*fake-records\/fixture-account, inside .*Application Support\/Claude:/)
+
   assert.deepEqual(fs.readdirSync(sessions), [], 'nothing written')
   assert.deepEqual(fs.readdirSync(records), [])
+  assert.deepEqual(fs.readdirSync(path.join(env.root, 'registry')), [], 'and the fake registry folder left as it was')
+})
+
+test('cli: the app\'s folders stay protected when HOME points elsewhere', async (t) => {
+  const env = tempEnv(t)
+  // Only reads the list: nothing here goes near the real folders.
+  const script = path.join(env.root, 'protected.mjs')
+  fs.writeFileSync(script, `import { PROTECTED } from ${JSON.stringify(pathToFileURL(path.join(TOOLS, 'lib', 'drivers.mjs')).href)}\nprocess.stdout.write(JSON.stringify(PROTECTED))\n`)
+  const r = await run(script, [], { env: { HOME: env.root } })
+  assert.equal(r.code, 0, r.err)
+  const dirs = JSON.parse(r.out)
+  const own = os.userInfo().homedir
+  for (const home of [env.root, own]) {
+    assert.ok(dirs.includes(path.join(home, '.claude')), `${home}/.claude in ${r.out}`)
+    assert.ok(dirs.includes(path.join(home, 'Library', 'Application Support', 'Claude')), `${home}'s app folder in ${r.out}`)
+  }
 })
 
 test('cli: SIGTERM answers a held request with no decision before the bridge exits', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url, child } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
-  const { send, hostHeader } = await import('../lib/client.mjs')
   const held = send(url, {
     method: 'POST', path: '/v1/permission',
     headers: { host: hostHeader(url), authorization: `Bearer ${env.token}`, 'x-deck-host': 'local_x' },

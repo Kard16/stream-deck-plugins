@@ -9,6 +9,7 @@ import { RecordingLog } from "./helpers/recording-log.js";
 
 const A = "local_5e3575bb-5693-4e5e-8e5e-47ddebcaa318";
 const B = "local_b";
+const C = "local_c";
 
 /** A record's fields as the app writes them on this Mac (app 4.4212.0), values made up. */
 function record(host: string, fields: Record<string, unknown> = {}): Record<string, unknown> {
@@ -59,10 +60,12 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 		renameSync(`${file}.tmp`, file);
 	};
 
-	test("reads the fields the deck uses; needs_action is a string here, and only a non-empty one needs the user", async () => {
+	test("reads the fields the deck uses; needs_action and needsUser are strings here, and any non-empty one needs the user", async () => {
 		write(org, A, record(A));
 		write(org, B, record(B, { title: "Other", postTurnSummary: { needs_action: "squash-merge PR #99 (go)" }, turnWrapUp: { description: "x" } }));
-		const records = await new RecordsReader(root).scan([A, B]);
+		// The wrap-up asks the user something and the summary doesn't: the app shows that turn as blocked.
+		write(org, C, record(C, { turnWrapUp: { description: "Opened PR #12.", needsUser: "Merge PR #12?" } }));
+		const records = await new RecordsReader(root).scan([A, B, C]);
 		assert.deepEqual(records.get(A), {
 			host: A,
 			title: "Deck spike S0",
@@ -73,9 +76,15 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 			needsUser: false,
 		});
 		assert.equal(records.get(B)?.needsUser, true);
+		assert.equal(records.get(C)?.needsUser, true);
+		// `turnWrapUp.needsUser` and `postTurnSummary.needs_action` each need the user when true or a non-empty string.
 		assert.equal(parseRecord(A, JSON.stringify({ turnWrapUp: { needsUser: true } }))?.needsUser, true);
+		assert.equal(parseRecord(A, JSON.stringify({ turnWrapUp: { needsUser: "yes" } }))?.needsUser, true);
+		assert.equal(parseRecord(A, JSON.stringify({ turnWrapUp: { needsUser: "" } }))?.needsUser, false);
 		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: true } }))?.needsUser, true);
-		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: "  " } }))?.needsUser, false);
+		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: " " } }))?.needsUser, true);
+		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: "" } }))?.needsUser, false);
+		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: false } }))?.needsUser, false);
 	});
 
 	test("only the listed hosts are read, each once until its file changes", async () => {

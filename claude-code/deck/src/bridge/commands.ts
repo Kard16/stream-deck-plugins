@@ -39,7 +39,8 @@ export interface PollReply extends Responder {
  * A delivered command without a final result counts as failed, with "no result", after this long (PROTOCOL.md,
  * Commands), unless it's a prompt the mod said it's waiting with: the engine holds a prompt until the session's
  * turn ends, which can take far longer than this. Such a prompt ends with its final result, the mod's restart
- * or the session's end instead (a gap in PROTOCOL.md, raised with the main thread).
+ * or the session's end instead, or fails with "no result" once its session has gone this long without an open
+ * poll, since a live mod always keeps one open.
  */
 export const IN_FLIGHT_MS = 60_000;
 
@@ -48,10 +49,13 @@ const KEEP = 200;
 
 type Poll = { host: string; inst: string | null; reply: PollReply; timer: TimerHandle | null };
 
+/** A session's time without an open poll: since when, and the timer that then fails its waiting prompts. */
+type Unpolled = { since: number; timer: TimerHandle | null };
+
 /**
  * The commands the deck queues for sessions when the user presses a key, and the mod's long polls for them.
  * One open poll per session; a command answered to a poll is in flight until its final result, or for 60 s
- * without one, a limit a prompt's `waiting` lifts.
+ * without one, a limit a prompt's `waiting` lifts for as long as its session keeps a poll open.
  */
 export class CommandQueue {
 	readonly #clock: Clock;
@@ -60,6 +64,7 @@ export class CommandQueue {
 	readonly #commands = new Map<string, Command>();
 	readonly #polls = new Map<string, Poll>();
 	readonly #timers = new Map<string, TimerHandle>();
+	readonly #unpolled = new Map<string, Unpolled>();
 	readonly #listeners = new Set<() => void>();
 	#nextId = 1;
 
@@ -114,16 +119,19 @@ export class CommandQueue {
 		}
 		if (this.#queuedFor(host).length > 0 || waitS <= 0) {
 			this.#deliver(reply, host, inst);
+			// Answered at once: the session had a poll just now, and has none open until its next.
+			this.#pollEnded(host);
 			return;
 		}
 		const poll: Poll = { host, inst, reply, timer: null };
 		poll.timer = this.#clock.setTimeout(() => {
 			poll.timer = null;
 			if (this.#polls.get(host) !== poll) return;
-			this.#polls.delete(host);
+			this.#endPoll(poll);
 			send(reply, []);
 		}, waitS * 1000);
 		this.#polls.set(host, poll);
+		this.#watchPolls(host);
 		reply.onClose(() => {
 			if (this.#polls.get(host) === poll) this.#endPoll(poll);
 		});
@@ -148,8 +156,9 @@ export class CommandQueue {
 			if (cmd.state === "waiting") return ignore("already waiting");
 			cmd.state = "waiting";
 			// The mod has the prompt, and the engine sends it when the session's turn ends, however long that
-			// takes, so the 60 s no longer applies. Mode commands skip waiting; a stray one keeps its 60 s, so the
-			// window in which the bridge allows that mode change without a press stays bounded.
+			// takes, so the 60 s no longer applies: the session's polls bound it instead. Mode commands skip
+			// waiting; a stray one keeps its 60 s, so the window in which the bridge allows that mode change
+			// without a press stays bounded.
 			if (cmd.t === "prompt") this.#stopTimer(cmd.id);
 		} else if (state === "done" || state === "refused" || state === "failed") {
 			cmd.state = state;
@@ -157,6 +166,7 @@ export class CommandQueue {
 			cmd.detail = detail;
 			this.#stopTimer(cmd.id);
 		} else return ignore("not a state");
+		this.#watchPolls(host);
 		this.#log.info(`RESULT ${cmd.id} ${cmd.state}${cmd.error ? `: ${quote(cmd.error, 120)}` : ""}`);
 		this.#emit();
 		return true;
@@ -179,10 +189,14 @@ export class CommandQueue {
 			this.#fail(cmd, why);
 			any = true;
 		}
+		this.#watchPolls(host);
 		if (any) this.#emit();
 	}
 
-	/** The session ended: nothing can deliver its queued commands or report on its in-flight ones. */
+	/**
+	 * The session ended (release rule 4): nothing can deliver its queued commands or report on its in-flight
+	 * ones, so all of them fail, and its open poll is answered with none.
+	 */
 	failHost(host: string, why: string): void {
 		let any = false;
 		for (const cmd of this.#commands.values()) {
@@ -191,19 +205,68 @@ export class CommandQueue {
 			any = true;
 		}
 		const poll = this.#polls.get(host);
-		if (poll) this.#endPoll(poll);
+		if (poll) {
+			this.#endPoll(poll);
+			send(poll.reply, []);
+		}
+		this.#stopUnpolled(host);
+		this.#unpolled.delete(host);
 		if (any) this.#emit();
 	}
 
 	/** Stops every timer. Open polls stay open; the server drops their connections when it stops. */
 	dispose(): void {
+		for (const poll of this.#polls.values()) if (poll.timer !== null) this.#clock.clearTimeout(poll.timer);
+		this.#polls.clear();
 		for (const handle of this.#timers.values()) this.#clock.clearTimeout(handle);
 		this.#timers.clear();
-		for (const poll of [...this.#polls.values()]) this.#endPoll(poll);
+		for (const host of this.#unpolled.keys()) this.#stopUnpolled(host);
+		this.#unpolled.clear();
 	}
 
 	#queuedFor(host: string): Command[] {
 		return [...this.#commands.values()].filter((c) => c.host === host && c.state === "queued");
+	}
+
+	#waitingPrompts(host: string): Command[] {
+		return [...this.#commands.values()].filter((c) => c.host === host && c.t === "prompt" && c.state === "waiting");
+	}
+
+	/** The session's open poll ended, or one was answered at once: its time without a poll counts from now. */
+	#pollEnded(host: string): void {
+		this.#stopUnpolled(host);
+		this.#unpolled.set(host, { since: this.#clock.now(), timer: null });
+		this.#watchPolls(host);
+	}
+
+	/**
+	 * Arms the session's no-poll limit while it has a waiting prompt and no open poll, and disarms it otherwise.
+	 * IN_FLIGHT_MS after its last poll ended, its waiting prompts fail with "no result" (PROTOCOL.md, Commands).
+	 */
+	#watchPolls(host: string): void {
+		if (this.#polls.has(host) || this.#waitingPrompts(host).length === 0) {
+			this.#stopUnpolled(host);
+			return;
+		}
+		// A waiting prompt was delivered by a poll that has since ended, so `since` is set; now is only a fallback.
+		const unpolled = this.#unpolled.get(host) ?? { since: this.#clock.now(), timer: null };
+		this.#unpolled.set(host, unpolled);
+		if (unpolled.timer !== null) return;
+		unpolled.timer = this.#clock.setTimeout(() => {
+			unpolled.timer = null;
+			const waiting = this.#polls.has(host) ? [] : this.#waitingPrompts(host);
+			if (waiting.length === 0) return;
+			this.#log.info(`UNPOLLED ${host}: no open poll for ${this.#inFlightMs / 1000} s, so its waiting prompts fail`);
+			for (const cmd of waiting) this.#fail(cmd, "no result");
+			this.#emit();
+		}, unpolled.since + this.#inFlightMs - this.#clock.now());
+	}
+
+	#stopUnpolled(host: string): void {
+		const unpolled = this.#unpolled.get(host);
+		if (!unpolled || unpolled.timer === null) return;
+		this.#clock.clearTimeout(unpolled.timer);
+		unpolled.timer = null;
 	}
 
 	/** Answers a poll with the session's queued commands. A client that has gone gets nothing, and they stay queued. */
@@ -248,7 +311,9 @@ export class CommandQueue {
 	#endPoll(poll: Poll): void {
 		if (poll.timer !== null) this.#clock.clearTimeout(poll.timer);
 		poll.timer = null;
-		if (this.#polls.get(poll.host) === poll) this.#polls.delete(poll.host);
+		if (this.#polls.get(poll.host) !== poll) return;
+		this.#polls.delete(poll.host);
+		this.#pollEnded(poll.host);
 	}
 
 	#prune(): void {

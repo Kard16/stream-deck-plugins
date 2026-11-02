@@ -6,9 +6,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 
-import { parseWait, readToken, startFakeBridge } from '../lib/bridge.mjs'
+import { parseWait, readToken, scrubber, startFakeBridge } from '../lib/bridge.mjs'
 import { send } from '../lib/client.mjs'
-import { MAX_BODY } from '../lib/protocol.mjs'
+import { MAX_BODY, fingerprint, summary } from '../lib/protocol.mjs'
 import { request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const A = { sid: 'sid-a', host: 'local_a', inst: 'ia', pid: 11 }
@@ -58,6 +58,52 @@ test('bridge: hello answers with the version, and refuses another one', async (t
   assert.deepEqual([r.status, r.json], [200, { v: 1, ok: true }])
   r = await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { ...hello, v: 2 } }).answer
   assert.deepEqual([r.status, r.json], [200, { v: 1, ok: false, error: 'version' }])
+})
+
+test('bridge: a mod request naming no session it can place gets 400; a permission request is held without a host', async (t) => {
+  const env = tempEnv(t)
+  const bridge = await startBridge(t, env)
+  const nobody = { sid: 'sid-unknown', host: '$CLAUDE_CODE_HOST_SESSION_ID', inst: 'iz' }
+  const posts = [
+    ['/v1/hello', { v: 1, ...nobody, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' }],
+    ['/v1/events', { ...nobody, seq: 1, events: [{ t: 'turn.start', turn: 't1', at: 1 }] }],
+    ['/v1/result', { ...nobody, id: 'cmd-1', state: 'done' }],
+  ]
+  for (const [p, json] of posts) {
+    const r = await request(bridge, env.token, { method: 'POST', path: p, json }).answer
+    assert.deepEqual([p, r.status, typeof r.json?.error], [p, 400, 'string'])
+  }
+  const held = request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': 'not-local' }, json: { session_id: 'sid-unknown', tool_name: 'Bash', tool_input: { command: 'ls' } } })
+  await sleep(100)
+  assert.deepEqual(bridge.deck.view().held.map((h) => h.host), [null])
+  held.abort()
+})
+
+test('bridge: a request a route throws on gets 500, which the hook takes as no decision, and the bridge carries on', async (t) => {
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const lines = []
+  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l) })
+  // 40 KB of tool_input nested 20,000 deep: JSON.parse takes it, and canonical() runs out of stack on it.
+  const deep = `${'['.repeat(20_000)}${']'.repeat(20_000)}`
+  const raw = `{"session_id":"${A.sid}","tool_name":"Bash","tool_input":${deep}}`
+  let r = await request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, raw }).answer
+  assert.equal(r.status, 500)
+  assert.match(r.json.error, /Maximum call stack size exceeded/)
+  assert.equal(bridge.deck.view().held.length, 0, 'nothing held')
+
+  r = await request(bridge, env.token, { method: 'POST', path: '/v1/events', json: { sid: A.sid, host: A.host, inst: A.inst, seq: 1, events: [{ t: 'measure', context: { percent: 7, window: 10 }, at: 1 }] } }).answer
+  assert.equal(r.status, 204, 'still serving')
+  assert.equal(bridge.deck.view().context[A.host], 7)
+  r = await request(bridge, env.token, { path: '/control/state' }).answer
+  assert.equal(r.status, 200)
+
+  const log = runLog(env)
+  const req = log.find((e) => e.kind === 'request' && e.path === '/v1/permission')
+  assert.match(req.unlogged, /Maximum call stack/, 'the request is logged without the body it could not print')
+  assert.ok(log.some((e) => e.kind === 'route-error' && e.n === req.n && e.route === '/v1/permission' && /RangeError: Maximum call stack/.test(e.error)))
+  assert.ok(log.some((e) => e.kind === 'answer' && e.n === req.n && e.status === 500))
+  assert.ok(lines.some((l) => / \/v1\/permission failed: RangeError: Maximum call stack size exceeded$/.test(l)))
 })
 
 test('bridge: a long poll waits, answers when a command is queued, and needs a session', async (t) => {
@@ -110,18 +156,24 @@ test('bridge: the folders feed the deck: sessions from the registry, settings fr
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, name: 'A', status: 'idle', statusUpdatedAt: 1 })
   writeRegistry(env, 12, { sessionId: 'sid-cli', status: 'busy' })
   fs.writeFileSync(path.join(env.registryDir, '13.json'), '{"half": ')
-  fs.writeFileSync(path.join(env.registryDir, '11.key'), 'never read')
+  // A .key file that a reader opening it would list: registry JSON for a session of its own.
+  fs.writeFileSync(path.join(env.registryDir, '11.key'), JSON.stringify({ pid: 14, sessionId: 'sid-key', hostSessionId: 'local_key', name: 'Key', status: 'waiting', statusUpdatedAt: 1 }))
   writeRecord(env, A.host, { model: 'claude-haiku-5-5', effort: 'low', permissionMode: 'default', lastFocusedAt: 5, postTurnSummary: { needs_action: true, status_detail: 'private text' } })
+  // App 4.4212.0 writes a sentence where needs_action was true.
+  writeRegistry(env, 15, { sessionId: 'sid-b', hostSessionId: 'local_b', name: 'B', status: 'idle', statusUpdatedAt: 1 })
+  writeRecord(env, 'local_b', { model: 'claude-haiku-5-5', postTurnSummary: { needs_action: 'Approve the plan before I go on.' } })
   const bridge = await startBridge(t, env)
   const view = bridge.deck.view()
-  assert.deepEqual(view.sessions, [A.host], 'only entries with a hostSessionId are Code-tab sessions')
+  assert.deepEqual(view.sessions.sort(), [A.host, 'local_b'], 'only entries with a hostSessionId are Code-tab sessions, and never a .key file')
+  for (const what of ['local_key', 'sid-key']) assert.equal(JSON.stringify(bridge.deck.state()).includes(what), false, `nothing of the .key file: ${what}`)
   assert.deepEqual(view.settings[A.host], { model: 'claude-haiku-5-5', effort: 'low', mode: 'default' })
   assert.equal(view.status[A.host], 'needs-you', 'the record says the last turn needs the user')
-  assert.equal(JSON.stringify(bridge.deck.state()).includes('private text'), false, 'only the flag is kept')
+  assert.equal(view.status.local_b, 'needs-you', 'a sentence says so too')
+  for (const what of ['private text', 'Approve the plan']) assert.equal(JSON.stringify(bridge.deck.state()).includes(what), false, `only the flag is kept: ${what}`)
 
   fs.rmSync(path.join(env.registryDir, `${A.pid}.json`))
   await bridge.rescan()
-  assert.deepEqual(bridge.deck.view().sessions, [])
+  assert.deepEqual(bridge.deck.view().sessions, ['local_b'])
 })
 
 test('bridge: an unreadable registry folder is not every session ending', async (t) => {
@@ -160,6 +212,55 @@ test('bridge: the run log has every request and answer, and never the token', as
   assert.ok(log.some((e) => e.kind === 'held' && e.fp && e.summary === `echo <token>`))
   const config = JSON.parse(fs.readFileSync(path.join(env.runDir, 'bridge.json'), 'utf8'))
   assert.equal(config.tokenFile, env.tokenFile)
+})
+
+test('bridge: no run of 8 or more of the token reaches the log, stdout or the state, even at the end of a summary cut short', async (t) => {
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const lines = []
+  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l) })
+  const input = { command: `export DECK_TOKEN=${env.token}` }
+  // The mod's summary of the call: cut to 39 characters and an ellipsis, it ends in the token's first 21.
+  const cut = summary('Bash', input)
+  assert.deepEqual([cut.length, cut.endsWith(`${env.token.slice(0, 21)}…`), cut.includes(env.token)], [40, true, false])
+  const mod = { sid: A.sid, host: A.host, inst: A.inst }
+  await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, ...mod, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
+  let r = await request(bridge, env.token, { method: 'POST', path: '/v1/events', json: { ...mod, seq: 1, events: [{ t: 'tool.start', tool: 'Bash', use: 'u1', summary: cut, fp: fingerprint('Bash', input), at: 1 }] } }).answer
+  assert.equal(r.status, 204)
+  const held = request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, tool_name: 'Bash', tool_input: input } })
+  await sleep(100)
+  // A run from the middle, in an event and in a query.
+  const middle = env.token.slice(5, 14)
+  await request(bridge, env.token, { method: 'POST', path: `/v1/events?x=${middle}`, json: { ...mod, seq: 2, events: [{ t: 'settings', model: `claude_${middle}`, at: 2 }] } }).answer
+  const state = await request(bridge, env.token, { path: '/control/state' }).answer
+  assert.equal(state.json.sessions[A.host].tools[0].summary, 'export DECK_TOKEN=<token>…')
+  await request(bridge, env.token, { method: 'POST', path: '/control/deny' }).answer
+  await held.answer
+  await bridge.close()
+
+  const runs = []
+  for (let i = 0; i + 8 <= env.token.length; i++) runs.push(env.token.slice(i, i + 8))
+  const leaked = (text) => runs.filter((run) => text.includes(run))
+  const text = fs.readFileSync(path.join(env.runDir, 'events.jsonl'), 'utf8')
+  assert.deepEqual(leaked(text), [], 'in the log')
+  assert.deepEqual(leaked(lines.join('\n')), [], 'on stdout')
+  assert.deepEqual(leaked(state.text), [], 'in the state')
+  assert.ok(text.includes('export DECK_TOKEN=<token>…'), 'the cut summary is there, scrubbed')
+  assert.ok(text.includes('claude_<token>'))
+})
+
+test('bridge: the scrubber takes the token and every run of 8 or more of it, as it is and as JSON escapes it', () => {
+  const token = 'tok-0123456789abcdef'
+  const scrub = scrubber(token)
+  assert.equal(scrub(`a ${token} b`), 'a <token> b')
+  assert.equal(scrub(`cut ${token.slice(0, 8)}…`), 'cut <token>…')
+  assert.equal(scrub(`end ${token.slice(-12)}.`), 'end <token>.')
+  assert.equal(scrub(`seven ${token.slice(3, 10)} stays`), `seven ${token.slice(3, 10)} stays`)
+  assert.equal(scrub(`${token}${token.slice(0, 9)}`), '<token><token>')
+  const quoted = 'ab"cd\\ef0123'
+  assert.equal(scrubber(quoted)(JSON.stringify({ k: `x${quoted}y` })), '{"k":"x<token>y"}')
+  assert.equal(scrubber('short')('a short b'), 'a <token> b', 'a token under 8 characters goes whole')
+  assert.equal(scrubber('')('as it is'), 'as it is')
 })
 
 test('bridge: closing answers held requests with {} and open polls with no commands', async (t) => {

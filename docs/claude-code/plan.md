@@ -458,6 +458,24 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Tools: 77/77, and both `--help` exit 0.
     - The deck's and the tools' tests also pass with the clock moved two days ahead, past the fixtures' T0 (2026-11-02T06:13Z).
   - **Left for the next round:** the agents' contract questions and the reviewers' minors.
+- 2026-11-01, **PROTOCOL.md amended** after Phase 3's build. Nothing changes on the wire, so `v` stays 1. The full list is in its Amendments section; the main decisions:
+  - **A Saved Prompt waiting behind a long turn stays waiting.** Its `waiting` stops the 60 s clock. It fails only if its session goes 60 s without an open poll, since a live mod always keeps one open. Mode commands keep the 60 s, which bounds the mode rule's window.
+  - **A press counts only once its request has been on the key for 1 s.** A double press can't answer a request nobody saw. Phase 4 checks that 1 s outlasts the key's checkmark and doesn't feel slow.
+  - **While a Saved Prompt key's last prompt is in flight,** another press alerts and sends nothing.
+  - **Answers to the hook are exactly Allow, Deny or `{}`,** and both runners check that. An expected `{}` means no decision.
+  - **Release rules 2 and 3 compare arrival with `statusUpdatedAt`,** both on this Mac's clock. The fixtures' times are absolute around T0 (2026-11-02T06:13Z), so runners follow the fixture's clock.
+  - Also spelled out: the command states, a new `inst` and a vanished session failing their commands, the host pattern, `needs_action` as a string, the mod's failure rules, and the `end` reason `clear`.
+  - `make-fixtures.mjs` now writes only when run, so the tools import the reference implementation instead of copying it.
+- 2026-11-01, **fix round for the review's minors** (workflow `wf_9f6acfe7-511`: a fixer per track, an independent verifier, and a refixer for the deck).
+  - **Plugin:** the token is hidden before an error text is cut, including any 8-character run of it. Hello, events and results now fail after 35 s unanswered, like the poll. After an outage the deck ends on the current model.
+  - **Deck:** the runner holds `/v1/permission` answers to the exact bodies. A waiting prompt fails after 60 s without a poll. A Saved Prompt key won't send twice while its prompt is in flight. `/v1/next`'s query is scrubbed. A vanished session's open poll is answered.
+  - **The verifier caught a regression:** the deck read `turnWrapUp.needsUser` only when it was `true`. The app (4.4212.0, read in its bundle) writes it only as a string, so the refixer made it count as a non-empty string too.
+  - **Tools:**
+    - Fixes: a crash on deep input; fp pairing; scrubbing token runs; the `.key` test; usage checked before the token; `approve pN`; no answers to `ask` requests; a stricter write guard.
+    - Amendments now applied: the 60 s and no-poll rules, rule 4, the host pattern, `inst` handling.
+    - The tools import the reference implementation from `make-fixtures.mjs` instead of copying it.
+  - **Re-run by the main thread:** plugin 51/51 with `tsc`, validate and the fixtures check; deck 155/155 with typecheck, build and validate; tools 89/89. The deck's and the tools' tests pass with the clock two days ahead too.
+  - **The questions it raised went into a second set of amendments,** the most visible being that status rule 6 now follows the app's own `Dw`: a turn wrap-up's `needsUser` replaces the summary's `needs_action`. A third round brings the code up to them.
 
 ## Progress
 

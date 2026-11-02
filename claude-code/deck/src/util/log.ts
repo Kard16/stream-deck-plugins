@@ -29,12 +29,57 @@ export function quote(value: string | null | undefined, max = 80): string {
 	return JSON.stringify(value.length > max ? `${value.slice(0, max)}…` : value);
 }
 
-/** `text` with every occurrence of `secret` replaced by `<token>`. */
+/**
+ * The shortest run of the secret's characters that {@link scrub} takes out on its own. A value cut short can end
+ * in the start of the secret, or a summary keep only its end, so the whole of it needn't be there to give it away.
+ */
+export const SCRUB_RUN = 8;
+
+/**
+ * `text` with `secret` taken out: the whole of it, and every run of {@link SCRUB_RUN} or more characters that's
+ * also part of it, each become `<token>`. A secret shorter than that is only taken out whole.
+ */
 export function scrub(text: string, secret: string): string {
-	return secret === "" ? text : text.split(secret).join("<token>");
+	if (secret === "") return text;
+	if (secret.length < SCRUB_RUN) return text.split(secret).join("<token>");
+	const windows = new Set<string>();
+	for (let i = 0; i + SCRUB_RUN <= secret.length; i++) windows.add(secret.slice(i, i + SCRUB_RUN));
+	// Only a stretch made wholly of the secret's characters can hold part of it, and most text has few.
+	const stretches = new RegExp(`[${secret.replace(/[\\\]^-]/g, "\\$&")}]{${SCRUB_RUN},}`, "g");
+	return text.replace(stretches, (stretch) => scrubStretch(stretch, windows));
 }
 
-/** A log that replaces `secret` wherever it appears in a message, so the bridge token can't reach the log file. */
+/**
+ * A stretch of the secret's characters with each part of the secret in it taken out: every window of
+ * SCRUB_RUN characters that's in the secret is covered, and each run of overlapping or touching windows
+ * becomes one `<token>`.
+ */
+function scrubStretch(stretch: string, windows: ReadonlySet<string>): string {
+	let out = "";
+	let copied = 0;
+	// The covered run being built, [start, end).
+	let start = -1;
+	let end = -1;
+	const close = (): void => {
+		out += `${stretch.slice(copied, start)}<token>`;
+		copied = end;
+	};
+	for (let i = 0; i + SCRUB_RUN <= stretch.length; i++) {
+		if (!windows.has(stretch.slice(i, i + SCRUB_RUN))) continue;
+		if (i > end) {
+			if (start >= 0) close();
+			start = i;
+		}
+		end = i + SCRUB_RUN;
+	}
+	if (start >= 0) close();
+	return out + stretch.slice(copied);
+}
+
+/**
+ * A log that scrubs `secret` from every message (see {@link scrub}), so the bridge token, or any part of it
+ * SCRUB_RUN characters long, can't reach the log file.
+ */
 export function redacting(log: Log, secret: string): Log {
 	if (secret === "") return log;
 	return {

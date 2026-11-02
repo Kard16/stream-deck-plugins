@@ -29,6 +29,14 @@ test('hello goes first, with the ids, cwd, model and versions; then one poll, wi
   expect(w.sent).toHaveLength(2)
 })
 
+test('hello says cc "unknown" when the engine gives no version', async ($, on) => {
+  const w = world(on)
+  w.session.version = ''
+  await $.session.start(START)
+  await w.settle()
+  expect(w.to('/v1/hello')[0]?.body.cc).toBe('unknown')
+})
+
 test('without CLAUDE_CODE_HOST_SESSION_ID the mod still talks, with host empty, and the bridge looks the sid up', async ($, on) => {
   const w = world(on, { env: { DECK_TOKEN: 'tok-only' } })
   await $.session.start(START)
@@ -154,6 +162,23 @@ test('turns, failures, attach, detach, measure and end become events; a measurem
   ])
 })
 
+test("measure carries the context's percent, tokens and window and the cost's usd, and nothing else the engine puts there", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  type Measure = Parameters<typeof $.session.measure>[0]
+  // Before the first response the engine has the window alone.
+  await $.session.measure({ changed: ['context'], context: { window: 1_000_000 }, rateLimits: [] })
+  const extra = { changed: ['context', 'cost'], context: { tokens: 90_000, window: 1_000_000, percent: 9, cached: 4 }, rateLimits: [], cost: { usd: 0.03, currency: 'USD' } }
+  await $.session.measure(extra as unknown as Measure)
+  await w.settle()
+  const any = expect.any(Number)
+  expect(w.events().map(x => x.event)).toEqual([
+    { t: 'measure', at: any, context: { window: 1_000_000 } },
+    { t: 'measure', at: any, context: { percent: 9, tokens: 90_000, window: 1_000_000 }, cost: { usd: 0.03 } },
+  ])
+})
+
 test('after a /clear, requests carry the new session id', async ($, on) => {
   const w = world(on)
   await $.session.start(START)
@@ -222,6 +247,25 @@ test('commands the mod won\'t run fail with the reason; one without an id is ski
   expect(results.filter(r => r.id === 'c3')).toEqual([{ id: 'c3', state: 'failed', error: expect.stringMatching(/not "bypassPermissions"/) }])
   expect(results.filter(r => r.id === 'c4')).toEqual([{ id: 'c4', state: 'waiting' }, { id: 'c4', state: 'done' }])
   expect(results).toHaveLength(5)
+})
+
+test('a command whose id is the empty string still has a string id: it runs and is reported on', async ($, on) => {
+  const submitted: string[] = []
+  const w = world(on, {
+    submit: text => {
+      submitted.push(text)
+      return undefined
+    },
+  })
+  await $.session.start(START)
+  await w.settle()
+  w.deliver([{ id: '', t: 'prompt', text: 'Nameless.' }])
+  await w.settle()
+  expect(submitted).toEqual(['Nameless.'])
+  expect(w.results()).toEqual([
+    { id: '', state: 'waiting' },
+    { id: '', state: 'done' },
+  ])
 })
 
 test("a mode command calls the app's own tool for this session: done with its text, then settings; refused with the tool's text; failed when the call throws", async ($, on) => {

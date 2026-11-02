@@ -9,10 +9,11 @@ import { BridgeServer } from "../src/bridge/server.js";
 import { ModeKeys, PromptKeys } from "../src/keys/commands.js";
 import { DecisionKeys } from "../src/keys/decision.js";
 import { SessionModel } from "../src/model/sessions.js";
+import { ALLOW_DECISION, DENY_DECISION } from "../src/protocol/wire.js";
 import { RecordsReader, RecordsWatcher } from "../src/records/records.js";
 import { RegistryReader } from "../src/registry/registry.js";
 import { RegistryWatcher } from "../src/registry/watcher.js";
-import { type Fixture, loadFixtures, mismatches, type Obj, type PluginLine, repliedLabels } from "./helpers/fixtures.js";
+import { type Fixture, loadFixtures, mismatches, type Obj, type PluginLine, repliedLabels, replyMismatches } from "./helpers/fixtures.js";
 import { type Outcome, request, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -27,6 +28,8 @@ import { RecordingLog } from "./helpers/recording-log.js";
  * - `press` lines go through the keys' own logic classes, with no settle time on Approve and Deny, `registry`
  *   lines to the fake folder, after which the watcher scans; `expect` lines are retried for up to 1 s.
  * - Command ids: the deck's real id is bound to the fixture's name at its first appearance in a `reply`.
+ * - A 200 from `/v1/permission` must be exactly Allow, Deny or `{}`, whatever its `reply` line expects, and an
+ *   expected `{}` means no decision (replyMismatches).
  * - At the end, a held request or poll that no `reply` line checked must still be open.
  *
  * The deck's wall clock follows the fixture: it starts at the setup's `statusUpdatedAt` and moves to each
@@ -149,22 +152,20 @@ async function play(fixture: Fixture): Promise<void> {
 				const o = await within(entry.outcome, DEADLINE_REPLY_MS);
 				assert.ok("status" in o, `${where(n)}: no answer to ${r.to}: ${JSON.stringify(o)}`);
 				assert.equal(o.status, r.status, `${where(n)}: ${r.to} answered ${o.status} ${o.body}`);
-				if (r.body !== undefined) {
-					const got: unknown = o.body === "" ? undefined : JSON.parse(o.body);
-					const want = structuredClone(r.body) as Obj;
-					// Command ids: bind the fixture's name to the deck's id at its first appearance.
-					if (Array.isArray(want.cmds) && typeof got === "object" && got !== null && Array.isArray((got as Obj).cmds)) {
-						const gotCmds = (got as { cmds: Obj[] }).cmds;
-						want.cmds.forEach((w: Obj, i: number) => {
-							const real = gotCmds[i]?.id;
-							if (typeof w.id !== "string" || typeof real !== "string") return;
-							if (!ids.has(w.id)) ids.set(w.id, real);
-							w.id = ids.get(w.id);
-						});
-					}
-					const problems = mismatches(want, got);
-					assert.deepEqual(problems, [], `${where(n)}: ${r.to} answered ${o.body}`);
+				const got: unknown = o.body === "" ? undefined : JSON.parse(o.body);
+				const want = r.body === undefined ? undefined : (structuredClone(r.body) as Obj);
+				// Command ids: bind the fixture's name to the deck's id at its first appearance.
+				if (want && Array.isArray(want.cmds) && typeof got === "object" && got !== null && Array.isArray((got as Obj).cmds)) {
+					const gotCmds = (got as { cmds: Obj[] }).cmds;
+					want.cmds.forEach((w: Obj, i: number) => {
+						const real = gotCmds[i]?.id;
+						if (typeof w.id !== "string" || typeof real !== "string") return;
+						if (!ids.has(w.id)) ids.set(w.id, real);
+						w.id = ids.get(w.id);
+					});
 				}
+				const problems = replyMismatches(entry.line.path.split("?")[0] ?? "", o.status, want, got);
+				assert.deepEqual(problems, [], `${where(n)}: ${r.to} answered ${o.body}`);
 				continue;
 			}
 
@@ -306,4 +307,40 @@ describe("fixtures, deck side (claude-code/protocol/fixtures/*.jsonl)", () => {
 			await play(fixture);
 		});
 	}
+});
+
+describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
+	const PERMISSION = "/v1/permission";
+	/** A body as the runner gets it: parsed from the wire. */
+	const wire = (body: unknown): unknown => JSON.parse(JSON.stringify(body));
+	const allow = wire(ALLOW_DECISION);
+	const deny = wire(DENY_DECISION);
+
+	test("a 200 from /v1/permission is exactly Allow, Deny or {}, whatever the line expects; an expected {} is no decision", () => {
+		assert.deepEqual(replyMismatches(PERMISSION, 200, allow, wire(ALLOW_DECISION)), []);
+		assert.deepEqual(replyMismatches(PERMISSION, 200, deny, wire(DENY_DECISION)), []);
+		assert.deepEqual(replyMismatches(PERMISSION, 200, {}, {}), []);
+
+		// An Allow where the line expects {}: by the general rule, {} matches anything.
+		assert.deepEqual(mismatches({}, allow), []);
+		assert.notDeepEqual(replyMismatches(PERMISSION, 200, {}, allow), []);
+
+		// An Allow with updatedPermissions, where the line expects Allow: the general rule lets extra fields through.
+		const widened = { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedPermissions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] } } };
+		assert.deepEqual(mismatches(allow, widened), []);
+		assert.notDeepEqual(replyMismatches(PERMISSION, 200, allow, widened), []);
+
+		// A Deny without its message, where the line expects Deny, only a deny, or gives no body at all.
+		const bare = { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", interrupt: true } } };
+		const someDeny = { hookSpecificOutput: { decision: { behavior: "deny" } } };
+		assert.deepEqual(mismatches(someDeny, bare), []);
+		for (const want of [deny, someDeny, undefined]) assert.notDeepEqual(replyMismatches(PERMISSION, 200, want, bare), [], JSON.stringify(want));
+	});
+
+	test("error answers, and other routes, keep the general rule", () => {
+		assert.deepEqual(replyMismatches(PERMISSION, 405, { error: "*" }, { error: "Method Not Allowed" }), []);
+		assert.deepEqual(replyMismatches("/v1/hello", 200, {}, { v: 1, ok: true }), []);
+		assert.deepEqual(replyMismatches("/v1/next", 200, undefined, { cmds: [] }), []);
+		assert.notDeepEqual(replyMismatches("/v1/hello", 200, { v: 1, ok: true }, { v: 1, ok: false }), []);
+	});
 });

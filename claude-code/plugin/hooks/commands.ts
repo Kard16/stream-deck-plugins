@@ -36,7 +36,7 @@ function errorText(err: unknown): string {
 /** Runs one command and reports how it went. Never rejects. */
 export async function runCommand(cmd: Record<string, unknown>, host: CommandHost, out: CommandOut): Promise<void> {
   const id = cmd.id
-  if (typeof id !== 'string' || id === '') return
+  if (typeof id !== 'string') return
   try {
     if (cmd.t === 'prompt') await prompt(id, cmd.text, host, out)
     else if (cmd.t === 'mode') await mode(id, cmd.mode, host, out)

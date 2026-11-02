@@ -42,9 +42,52 @@ export const CONTROL_ROUTES = Object.freeze({
 /** A logged body bigger than this is cut to its outline: a Write can carry a whole file. */
 const LOGGED_BODY_MAX = 64 * 1024
 
+/** Runs of the token this long or longer are scrubbed too, not only the whole of it. */
+const TOKEN_RUN = 8
+
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const pad = (n, w = 2) => String(n).padStart(w, '0')
 const round1 = (x) => Math.round(x * 10) / 10
+const escapeRe = (s) => s.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
+
+/**
+ * What an exception says, on one short line. Nothing about it can throw again: a getter, a toString, a
+ * message nested too deep to print.
+ */
+export function errorText(err) {
+  try {
+    const text = err instanceof Error ? `${err.name}: ${err.message}` : `a thrown ${typeof err}`
+    return text.split('\n')[0].slice(0, 200)
+  } catch {
+    return 'an exception that has no message'
+  }
+}
+
+/**
+ * What every body is scrubbed with before it's read, and every log line before it's written: the token and
+ * any run of TOKEN_RUN or more of its characters become `<token>`, both as they are and as JSON escapes
+ * them. A run is enough to leak it: the mod cuts a summary to 39 characters from an input that holds the
+ * token, so its tool.start can carry the token's first few characters without the rest.
+ */
+export function scrubber(token) {
+  const alternatives = []
+  for (const t of new Set([token, JSON.stringify(token).slice(1, -1)])) {
+    if (t === '') continue
+    if (t.length < TOKEN_RUN) {
+      alternatives.push(escapeRe(t))
+      continue
+    }
+    // Each place a run can start, then as much more of the token as follows it: abcdefgh(?:i(?:j)?)?
+    for (let j = 0; j + TOKEN_RUN <= t.length; j++) {
+      let more = ''
+      for (let k = t.length - 1; k >= j + TOKEN_RUN; k--) more = `(?:${escapeRe(t[k])}${more})?`
+      alternatives.push(`${escapeRe(t.slice(j, j + TOKEN_RUN))}${more}`)
+    }
+  }
+  if (!alternatives.length) return (text) => text
+  const runs = new RegExp(alternatives.join('|'), 'g')
+  return (text) => text.replace(runs, '<token>')
+}
 
 function clock(d = new Date()) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
@@ -152,15 +195,23 @@ export async function startFakeBridge(options = {}) {
   const runDir = makeRunDir(o.runDir, o.runRoot)
   const logFile = path.join(runDir, 'events.jsonl')
   const print = o.quiet ? () => {} : (o.print ?? ((line) => process.stdout.write(`${line}\n`)))
-  // The token never reaches the log: every line is scrubbed of it as a whole, whatever field it hid in, both
-  // as it is and as JSON escapes it.
-  const escaped = JSON.stringify(token).slice(1, -1)
-  const scrub = (text) => text.split(token).join('<token>').split(escaped).join('<token>')
-  // A log that can't be written (its folder gone, the disk full) must not take the bridge down with it.
+  // The token never reaches the log: every line is scrubbed of it, and of any run of it, whatever field it
+  // hid in.
+  const scrub = scrubber(token)
+  // A log that can't be written (its folder gone, the disk full) must not take the bridge down with it, and
+  // nor must a line that can't be made: one holding a body nested too deep for JSON.stringify keeps its plain
+  // fields, which can't fail, and says why the rest is missing.
   let writeFailed = false
   const write = (obj) => {
+    let line
     try {
-      fs.appendFileSync(logFile, `${scrub(JSON.stringify(obj))}\n`)
+      line = JSON.stringify(obj)
+    } catch (err) {
+      const plain = Object.entries(obj).filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v))
+      line = JSON.stringify({ ...Object.fromEntries(plain), unlogged: errorText(err) })
+    }
+    try {
+      fs.appendFileSync(logFile, `${scrub(line)}\n`)
       writeFailed = false
     } catch (err) {
       if (!writeFailed) process.stderr.write(`fake bridge: can't write ${logFile}: ${err.code ?? err.message}\n`)
@@ -225,7 +276,8 @@ export async function startFakeBridge(options = {}) {
         deck.applyRecord(host, null)
       }
     } catch (err) {
-      log({ kind: 'scan-error', error: String(err?.message ?? err), say: `scan failed: ${err?.message ?? err}` })
+      const why = errorText(err)
+      log({ kind: 'scan-error', error: why, say: `scan failed: ${why}` })
     }
   }
 
@@ -324,9 +376,10 @@ export async function startFakeBridge(options = {}) {
         let body
         if (method === 'POST' && !(isControl && text === '')) {
           try {
-            // The token is taken out before anything reads the body, as the deck does: a summary cut short
-            // could otherwise carry part of it past the scrubbing. A request whose input held the token then
-            // gets another fp than the mod's, and is released by the other rules.
+            // The token, and any run of it, is taken out before anything reads the body, as the deck takes the
+            // token: a summary cut short, the bridge's or the mod's, could otherwise carry part of it into the
+            // state and the log. A request whose input held the token then gets another fp than the mod's, and
+            // is released by the other rules.
             body = JSON.parse(scrub(text))
           } catch {
             reject(400, "the body isn't JSON")
@@ -340,17 +393,33 @@ export async function startFakeBridge(options = {}) {
         }
         logRequest()
         if (isControl) {
-          control(route, body ?? {}, send).catch((err) => {
-            log({ kind: 'control-error', route, error: String(err?.message ?? err), say: `${route} failed: ${err?.message ?? err}` })
-            send(500, { error: String(err?.message ?? err) })
-          })
+          control(route, body ?? {}, send).catch((err) => failed('control-error', n, route, err, send))
           return
         }
-        dispatch(route, url, req, body, responder, watchClose)
+        try {
+          dispatch(route, url, req, body, responder, watchClose)
+        } catch (err) {
+          if (err instanceof BadRequest) send(400, { error: err.message })
+          else failed('route-error', n, route, err, send)
+        }
         counted()
       },
-      (err) => write({ kind: 'close', n, t: Date.now(), ms: round1(performance.now() - t0), error: String(err?.message ?? err) }),
+      (err) => write({ kind: 'close', n, t: Date.now(), ms: round1(performance.now() - t0), error: errorText(err) }),
     )
+  }
+
+  /**
+   * A route that threw: 500 for its client, and the bridge carries on. A tool_input nested too deep for
+   * canonical() does this, say. The hook takes a 500 as no decision, so the app's dialog decides. The log
+   * line is made of nothing that can throw again: neither the body nor the error itself.
+   */
+  function failed(kind, n, route, err, send) {
+    const why = errorText(err)
+    write({ kind, n, t: Date.now(), route, error: why })
+    try {
+      print(`${clock()} ${route} failed: ${scrub(why)}`)
+    } catch {}
+    send(500, { error: `the fake bridge failed on this request: ${why}` })
   }
 
   function dispatch(route, url, req, body, responder, watchClose) {

@@ -5,6 +5,7 @@ import { afterEach, describe, test } from "node:test";
 import { allowedHosts, BRIDGE_HOST, BRIDGE_PORT } from "../src/bridge/config.js";
 import { type BridgeRoutes, BridgeServer } from "../src/bridge/server.js";
 import { SessionModel } from "../src/model/sessions.js";
+import { SCRUB_RUN, scrub } from "../src/util/log.js";
 import { type Outcome, send, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -213,17 +214,50 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		await send(port, { token: "wrong" }).outcome;
 		await send(port, { token: TOKEN, host: `${"h".repeat(70)}${TOKEN}` }).outcome;
 		await send(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, ...MOD, plugin: TOKEN, cc: `${"c".repeat(30)}${TOKEN}` }) }).outcome;
+		// In the long poll's query, as the mod's inst, which the log names, cut to 40 characters, when it's new:
+		// the token itself; after 30 characters, so the cut ends in its start; and percent-encoded.
+		const poll = (inst: string) => send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${inst}&wait=0` }).outcome;
+		assert.equal(status(await poll(TOKEN)), 200);
+		await poll(`${"q".repeat(30)}${TOKEN}`);
+		await poll(`p${[...TOKEN].map((c) => `%${c.charCodeAt(0).toString(16)}`).join("")}`);
+		// Part of the token on its own, as if a client had cut it.
+		await poll(`${"r".repeat(30)}${TOKEN.slice(0, 20)}`);
+		await send(port, { token: TOKEN, path: `/w/${TOKEN.slice(20, 40)}` }).outcome;
 		const held = send(port, { token: TOKEN, body: JSON.stringify({ tool_name: `${"t".repeat(90)}${TOKEN}`, session_id: TOKEN, tool_input: { command: TOKEN } }) });
 		await waitFor(() => model.held.size === 1, "the request to be held");
-		assert.ok(!model.held.oldest?.summary.includes(TOKEN.slice(0, 16)), "nor a key");
+		assert.ok(!model.held.oldest?.summary.includes(TOKEN.slice(0, SCRUB_RUN)), "nor a key");
 		model.held.press(1, "allow");
 		await held.outcome;
 		assert.ok(log.lines.length >= 5);
-		// No run of 16 of the token's characters anywhere.
+		// No run of SCRUB_RUN of the token's characters anywhere.
 		for (const line of log.lines) {
-			for (let i = 0; i + 16 <= TOKEN.length; i++) assert.ok(!line.message.includes(TOKEN.slice(i, i + 16)), line.message);
+			for (let i = 0; i + SCRUB_RUN <= TOKEN.length; i++) assert.ok(!line.message.includes(TOKEN.slice(i, i + SCRUB_RUN)), line.message);
 		}
 		assert.ok(log.lines.some((l) => l.message.includes("/x/<token>")));
+		// The query was scrubbed before anything read it: the inst arrived whole as <token>, not cut and then redacted.
+		assert.ok(log.lines.some((l) => l.message.includes('RESTART local_test-server: mod instance "<token>" replaces "i1"')), log.at("info").join("\n"));
+		assert.ok(log.lines.some((l) => l.message.includes(`mod instance "${"q".repeat(30)}<token>"`)));
+		assert.ok(log.lines.some((l) => l.message.includes('mod instance "p<token>"')));
+	});
+
+	test("the token is taken out of a body's strings, not its numbers: a number holding a run of its digits still parses", async () => {
+		const token = "0123456789abcdef".repeat(4);
+		const { port } = await start({ token });
+		const body = JSON.stringify({ ...MOD, seq: 1, events: [{ t: "turn.start", turn: "/x/1234567890", at: 1234567890123 }] });
+		assert.equal(status(await send(port, { token, path: "/v1/events", body }).outcome), 204);
+	});
+
+	test("scrub takes out the token, and any run of SCRUB_RUN or more of its characters", () => {
+		assert.equal(scrub(`/x/${TOKEN}/y`, TOKEN), "/x/<token>/y");
+		assert.equal(scrub(`z${TOKEN.slice(0, SCRUB_RUN)}`, TOKEN), "z<token>", "a cut that ends in its start");
+		assert.equal(scrub(`${TOKEN.slice(-SCRUB_RUN)}z`, TOKEN), "<token>z", "a summary that keeps only its end");
+		assert.equal(scrub(`q${TOKEN.slice(10, 40)}q${TOKEN}q`, TOKEN), "q<token>q<token>q");
+		assert.equal(scrub(`z${TOKEN.slice(0, SCRUB_RUN - 1)}z`, TOKEN), `z${TOKEN.slice(0, SCRUB_RUN - 1)}z`, "fewer characters stay");
+		assert.equal(scrub("fixture-token, then fixture-to…", "fixture-token"), "<token>, then <token>…");
+		const odd = "a]b^c-d\\e[f";
+		assert.equal(scrub(`<${odd}> <${odd.slice(1, 9)}>`, odd), "<<token>> <<token>>", "characters a regular expression treats specially");
+		assert.equal(scrub("tok, tok", "tok"), "<token>, <token>", "a secret shorter than SCRUB_RUN goes only whole");
+		assert.equal(scrub(TOKEN, ""), TOKEN);
 	});
 
 	test("a busy port: listen rejects; start logs, retries after 1 s, and listens once the port is free", async () => {

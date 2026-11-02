@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
+import path from 'node:path'
 import test from 'node:test'
 
 import { controlClient } from '../lib/client.mjs'
@@ -13,7 +14,7 @@ import { againstFake, interactive } from '../lib/drivers.mjs'
 import { fixtureFiles, parseFixture, readFixture } from '../lib/fixtures.mjs'
 import { play } from '../lib/play.mjs'
 import { ALLOW, DENY, ROUTES } from '../lib/protocol.mjs'
-import { runLog, sleep, startBridge, tempEnv } from './helpers.mjs'
+import { runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const NAMES = fixtureFiles().map((f) => readFixture(f).name)
 
@@ -82,6 +83,21 @@ test('play: the fingerprints of both sides matched for every held request the fi
   // approve, deny, answered-in-app, answered-in-app-registry and needs-you: a tool.start and a request each.
   assert.deepEqual(checks.map((c) => c.tool), ['Bash', 'Write', 'Write', 'Bash', 'AskUserQuestion'])
   assert.deepEqual(checks.filter((c) => !c.match || c.bridgeSummary !== c.modSummary), [])
+})
+
+test('play: against-fake won\'t play into a registry or records folder holding files it didn\'t write', async (t) => {
+  const env = tempEnv(t)
+  writeRecord(env, 'local_other', { model: 'm', lastFocusedAt: 1 })
+  let { r } = await playAgainstFake(t, readFixture('hello'), env)
+  assert.equal(r.ok, false)
+  assert.match(r.error, /the fake bridge's records folder .* holds files fake-claude didn't write \(acct\/org\/local_other\.json\): give it an empty one/)
+  assert.deepEqual(fs.readdirSync(env.registryDir), [], 'nothing written')
+  assert.deepEqual(fs.readdirSync(path.join(env.recordsDir, 'acct', 'org')), ['local_other.json'], 'and nothing removed')
+
+  const other = tempEnv(t)
+  writeRegistry(other, 7, { sessionId: 's7', hostSessionId: 'local_seven', status: 'idle' })
+  ;({ r } = await playAgainstFake(t, readFixture('hello'), other))
+  assert.match(r.error, /registry folder .* holds files fake-claude didn't write \(7\.json\)/)
 })
 
 /** A fixture's text with one replacement, which must apply. */

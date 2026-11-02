@@ -36,11 +36,12 @@ export const nodeRecordsFs: RecordsFs = {
 };
 
 /**
- * True for `true`, and for a string with something in it. On this Mac (app 4.4212.0) `needs_action` is a
- * string: empty when nothing is needed, a sentence when something is (PROTOCOL.md says "true").
+ * `turnWrapUp.needsUser` and `postTurnSummary.needs_action` each say the turn needs the user when true or a non-empty
+ * string. On this Mac (app 4.4212.0) both are strings, and the app drops a wrap-up or summary that holds anything else:
+ * `needsUser` is there only when the turn is waiting on the user, and `needs_action` is empty when nothing is needed.
  */
-function flagged(v: unknown): boolean {
-	return v === true || (typeof v === "string" && v.trim() !== "");
+function needsAction(v: unknown): boolean {
+	return v === true || (typeof v === "string" && v !== "");
 }
 
 /** A record from one file's text; null when it isn't a complete JSON object (say, caught mid-write). */
@@ -62,7 +63,7 @@ export function parseRecord(host: string, text: string): AppRecord | null {
 		effort: str(o.effort, 40),
 		permissionMode: str(o.permissionMode, 40),
 		lastFocusedAt: typeof o.lastFocusedAt === "number" && Number.isFinite(o.lastFocusedAt) ? o.lastFocusedAt : null,
-		needsUser: flagged(obj(o.turnWrapUp).needsUser) || flagged(obj(o.postTurnSummary).needs_action),
+		needsUser: needsAction(obj(o.turnWrapUp).needsUser) || needsAction(obj(o.postTurnSummary).needs_action),
 	};
 }
 

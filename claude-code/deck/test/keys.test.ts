@@ -151,17 +151,30 @@ describe("Approve and Deny keys", () => {
 	});
 
 	test("a press after the shown request ended does nothing but alert", () => {
-		const { clock, model, surface, feedback, permission } = setup();
-		const approve = new DecisionKeys(model, "allow", { clock });
+		const { clock, model, surface, feedback, permission, log } = setup();
+		const approve = new DecisionKeys(model, "allow", { clock, log });
 		approve.add("k", surface("k"));
 		const first = permission(A, "Bash", { command: "ls" });
-		clock.advance(200);
-		// It's answered in the app and released, and another arrives, before the key repaints.
+		clock.advance(200 + SETTLE_MS);
+		// A second request arrives: the key repaints at once with the count, still showing the first.
+		const second = permission(B, "Bash", { command: "rm -rf build" });
+		assert.equal(approve.painted("k")?.shown, 1);
+		assert.match(approve.painted("k")?.svg ?? "", />2</);
+		// The first ends (its client goes) within the painter's 100 ms of that repaint, so the key still shows it
+		// when pressed, though the oldest is now the second.
 		first.close();
-		const second = permission(A, "Bash", { command: "rm -rf build" });
+		assert.equal(model.held.oldest?.id, 2);
+		assert.equal(approve.painted("k")?.shown, 1);
 		approve.press("k");
 		assert.deepEqual(second.sent, []);
 		assert.deepEqual(feedback, ["k:alert"]);
+		assert.ok(log.at("info").some((l) => l.includes("Approve press: nothing answered: the key showed #1, but the oldest is now #2")));
+		// The key then shows the second, and once it has been in sight for SETTLE_MS, a press answers it.
+		clock.advance(100);
+		assert.equal(approve.painted("k")?.shown, 2);
+		clock.advance(SETTLE_MS);
+		approve.press("k");
+		assert.equal(JSON.parse(second.sent[0] ?? "null").hookSpecificOutput.decision.behavior, "allow");
 	});
 
 	test("a question or a plan shows 'needs you'; a press jumps to its session and answers nothing", () => {
@@ -216,8 +229,12 @@ describe("Saved Prompt keys", () => {
 		assert.equal(keys.look("k")?.state, "waiting");
 		model.result({ host: A, inst: `i-${A}`, id: "c1", state: "waiting" });
 		assert.equal(keys.look("k")?.state, "waiting");
-		// The session's turn runs past the 60 s a command gets without a result: the prompt still waits.
-		clock.advance(IN_FLIGHT_MS + 5000);
+		// The session's turn runs past the 60 s a command gets without a result, while the mod keeps a poll open,
+		// polling again each time one answers: the prompt still waits.
+		for (let ms = 0; ms <= IN_FLIGHT_MS; ms += 20_000) {
+			model.next(new URLSearchParams({ host: A, inst: `i-${A}`, wait: "20" }), new FakeReply());
+			clock.advance(20_000);
+		}
 		assert.equal(keys.look("k")?.state, "waiting");
 		model.result({ host: A, inst: `i-${A}`, id: "c1", state: "done" });
 		assert.equal(keys.look("k")?.state, "sent");
@@ -239,6 +256,40 @@ describe("Saved Prompt keys", () => {
 		clock.advance(REFUSED_SHOW_MS);
 		assert.equal(keys.look("k")?.state, "idle");
 		assert.ok(log.at("info").some((l) => l.includes('c1: refused: "dropped: the session was stopped"')));
+	});
+
+	test("while the key's last prompt is queued, delivered or waiting, a press alerts and sends nothing: a double press sends once", () => {
+		const { clock, model, surface, feedback, log } = setup();
+		model.hello({ v: 1, host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
+		model.pick(A);
+		const keys = new PromptKeys(model, { clock, log });
+		keys.add("k", surface("k"), { text: "Carry on." });
+		keys.press("k");
+		keys.press("k");
+		assert.deepEqual(
+			model.commands.list().map((c) => [c.id, c.state]),
+			[["c1", "queued"]],
+		);
+		assert.deepEqual(feedback, ["k:alert"]);
+		assert.ok(log.at("info").some((l) => l.includes("Saved Prompt: nothing sent: c1 is still queued")));
+		model.next(new URLSearchParams({ host: A, inst: `i-${A}`, wait: "20" }), new FakeReply());
+		keys.press("k");
+		model.result({ host: A, inst: `i-${A}`, id: "c1", state: "waiting" });
+		keys.press("k");
+		assert.deepEqual(feedback, ["k:alert", "k:alert", "k:alert"], "delivered, then waiting");
+		assert.equal(model.commands.list().length, 1);
+		// Once it's final, a press sends again, while the key still shows the last outcome.
+		model.result({ host: A, inst: `i-${A}`, id: "c1", state: "done" });
+		assert.equal(keys.look("k")?.state, "sent");
+		keys.press("k");
+		assert.deepEqual(
+			model.commands.list().map((c) => [c.id, c.state]),
+			[
+				["c1", "done"],
+				["c2", "queued"],
+			],
+		);
+		assert.equal(feedback.length, 3);
 	});
 
 	test("no text, no target, an ended target, or a session without the plugin: the press alerts and nothing is queued", () => {

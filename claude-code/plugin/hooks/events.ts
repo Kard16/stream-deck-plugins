@@ -80,13 +80,15 @@ export const turnEnd = (e: TurnCompleteInput): DeckEvent => ({
 /**
  * Context use, when it or the cost moved. A measurement that only moved a rate-limit window says nothing the
  * deck shows, so it isn't sent. Figures the engine doesn't have yet (`percent` before the first response) are
- * left out, as it leaves them out.
+ * left out, as it leaves them out. The context carries its percent, tokens and window and the cost its usd,
+ * whatever else the engine puts beside them.
  */
 export function measure(e: SessionMeasureInput): DeckEvent | undefined {
   const changed: readonly string[] | undefined = Array.isArray(e.changed) ? e.changed : undefined
   if (changed !== undefined && !changed.includes('context') && !changed.includes('cost')) return undefined
   const { percent, tokens, window } = e.context
-  return { t: 'measure', at: now(), context: { percent, tokens, window }, ...(e.cost === undefined ? {} : { cost: e.cost }) }
+  const usd = e.cost?.usd
+  return { t: 'measure', at: now(), context: { percent, tokens, window }, ...(typeof usd === 'number' ? { cost: { usd } } : {}) }
 }
 
 export const attach = (e: SessionAttachInput): DeckEvent => ({ t: 'attach', at: now(), surface: e.surface })

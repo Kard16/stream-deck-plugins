@@ -174,8 +174,8 @@ export class BridgeServer {
 	}
 
 	/**
-	 * Text from a client, made fit for the log: the token replaced before anything is cut short (a cut token
-	 * would no longer match), then quoted and cut.
+	 * Text from a client, made fit for the log: the token taken out before anything is cut short (a cut might
+	 * leave too little of it to recognise), then quoted and cut.
 	 */
 	#show(value: string | null | undefined, max = 60): string {
 		return quote(value === null || value === undefined ? value : scrub(value, this.#opts.token), max);
@@ -221,8 +221,12 @@ export class BridgeServer {
 
 		if (target === ROUTES.next) {
 			req.resume();
+			// The token is taken out of the query as it is out of bodies, once decoded, so nothing cut from it later
+			// (the mod's inst in a log line, say) can carry part of it.
+			const query = new URLSearchParams();
+			for (const [name, value] of new URLSearchParams(queryString)) query.append(scrub(name, token), scrub(value, token));
 			this.#routed++;
-			this.#guard(what, res, () => routes.next(new URLSearchParams(queryString), this.#heldReply(req, res)));
+			this.#guard(what, res, () => routes.next(query, this.#heldReply(req, res)));
 			return;
 		}
 
@@ -230,9 +234,10 @@ export class BridgeServer {
 			(text) => {
 				let body: unknown;
 				try {
-					// With the token taken out first, nothing cut from the body later (a tool's summary on a key, a line
-					// in the log) can carry part of it.
-					body = JSON.parse(scrub(text, token));
+					// With the token taken out of every string first, nothing cut from the body later (a tool's summary
+					// on a key, a line in the log) can carry part of it. It's taken out after parsing, since a run of
+					// the token's digits in the raw text could be part of a number.
+					body = scrubJson(JSON.parse(text), token);
 				} catch {
 					refuse(400, `the body isn't JSON (${Buffer.byteLength(text)} bytes)`);
 					return;
@@ -306,6 +311,14 @@ export class BridgeServer {
 }
 
 class TooLarge extends Error {}
+
+/** A parsed body with the token taken out of every string in it, names included (see scrub). */
+function scrubJson(value: unknown, token: string): unknown {
+	if (typeof value === "string") return scrub(value, token);
+	if (Array.isArray(value)) return value.map((v: unknown) => scrubJson(v, token));
+	if (isObj(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [scrub(k, token), scrubJson(v, token)]));
+	return value;
+}
 
 /** Reads a request body as UTF-8, failing with TooLarge past `max` bytes, or with the error if the client aborts. */
 function readBody(req: IncomingMessage, max: number): Promise<string> {

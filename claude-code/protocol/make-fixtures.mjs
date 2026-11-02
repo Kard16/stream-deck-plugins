@@ -494,11 +494,14 @@ const fixtures = {}
 
 // ---- write ---------------------------------------------------------------------
 
-fs.mkdirSync(OUT, { recursive: true })
-for (const name of fs.readdirSync(OUT)) if (name.endsWith('.jsonl')) fs.rmSync(path.join(OUT, name))
-for (const [name, lines] of Object.entries(fixtures)) {
-  const text = lines.map((l) => JSON.stringify(l, (k, v) => (v === undefined ? undefined : v))).join('\n') + '\n'
-  fs.writeFileSync(path.join(OUT, `${name}.jsonl`), text)
+// Only when run, so tools can import the reference implementation without rewriting the fixtures.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  fs.mkdirSync(OUT, { recursive: true })
+  for (const name of fs.readdirSync(OUT)) if (name.endsWith('.jsonl')) fs.rmSync(path.join(OUT, name))
+  for (const [name, lines] of Object.entries(fixtures)) {
+    const text = lines.map((l) => JSON.stringify(l, (k, v) => (v === undefined ? undefined : v))).join('\n') + '\n'
+    fs.writeFileSync(path.join(OUT, `${name}.jsonl`), text)
+  }
+  fs.writeFileSync(path.join(OUT, 'vectors.json'), JSON.stringify(vectors, null, 2) + '\n')
+  console.log(`${Object.keys(fixtures).length} fixtures and ${vectors.length} vectors in ${path.relative(process.cwd(), OUT)}`)
 }
-fs.writeFileSync(path.join(OUT, 'vectors.json'), JSON.stringify(vectors, null, 2) + '\n')
-console.log(`${Object.keys(fixtures).length} fixtures and ${vectors.length} vectors in ${path.relative(process.cwd(), OUT)}`)

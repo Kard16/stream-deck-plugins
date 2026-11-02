@@ -3,7 +3,7 @@
 // never holds up the session. The clock is the kit's mock, so the waits are exact.
 
 import { expect, test } from 'claude-code/testing'
-import { HOST, START, TOKEN, world } from './world'
+import { HOST, MODEL, START, TOKEN, world } from './world'
 
 const READ = { tool: 'Read', tool_use_id: 'u1', file_path: '/sandbox/notes.md' } as const
 
@@ -133,6 +133,29 @@ test('a deck on another protocol version: the mod logs that once and stops talki
   expect(w.logs[0]).toMatch(/protocol version 2/)
 })
 
+test("a hello answered ok: false with a v other than 1, even one that isn't a number, stops the mod as another version does", async ($, on) => {
+  const w = world(on)
+  w.bridge.hello = { status: 200, body: { v: '2', ok: false } }
+  await $.session.start(START)
+  await w.settle()
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await w.clock.advance(300_000)
+  expect(w.sent.map(r => r.route)).toEqual(['/v1/hello'])
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/protocol version 2 and this plugin 1/)
+})
+
+test('a hello answered ok: false with no v and no version error is retried like an outage', async ($, on) => {
+  const w = world(on)
+  w.bridge.hello = { status: 200, body: { ok: false, error: 'busy' } }
+  await $.session.start(START)
+  await w.settle()
+  await w.clock.advance(3000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000, 3000])
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/wasn't answered ok/)
+})
+
 test('a hello the bridge refuses (401) is retried like an outage', async ($, on) => {
   const w = world(on)
   w.bridge.hello = { status: 401, body: { error: 'unauthorized' } }
@@ -163,6 +186,128 @@ test('a poll the bridge leaves unanswered 35 s counts as a failed request: hello
   await w.clock.advance(1000)
   expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 36_000])
   expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 36_000])
+})
+
+test('a hello the bridge takes and never answers fails after 35 s; once the bridge answers, the poll opens and the queued events go out', async ($, on) => {
+  const w = world(on, { mode: 'hang' })
+  await $.session.start(START)
+  await w.settle()
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(await $.tool.call(READ)).toEqual({ result: 'ran' })
+  await w.clock.advance(34_999)
+  expect(w.sent.map(r => r.route)).toEqual(['/v1/hello'])
+  expect(w.logs).toEqual([])
+  await w.clock.advance(1)
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/the hello had no answer after 35 s/)
+
+  // The bridge answers again: the hello 1 s after the failure is answered, the poll opens, and the events go out in
+  // order.
+  w.bridge.mode = 'up'
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 36_000])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([36_000])
+  expect(w.events().map(x => [x.seq, x.event.t])).toEqual([
+    [1, 'turn.start'],
+    [2, 'tool.start'],
+    [3, 'tool.end'],
+  ])
+  // The first hello's answer comes at last, and changes nothing: no second poll, no other request.
+  const before = w.sent.length
+  w.answerHung(200, { v: 1, ok: true })
+  await w.clock.advance(1000)
+  expect(w.sent.length).toBe(before)
+  expect(w.logs).toHaveLength(1)
+})
+
+test('an event the bridge takes and never answers fails after 35 s: after the next hello it goes again with its seq, and the line moves on', async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  w.bridge.events = 'hang'
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.settle()
+  w.bridge.events = 204
+  await $.turn.start({ text: 'b', turnId: 't2' })
+  await w.settle()
+  // One request at a time: the second waits behind the first.
+  expect(w.to('/v1/events')).toHaveLength(1)
+  await w.clock.advance(34_999)
+  expect(w.logs).toEqual([])
+  await w.clock.advance(1)
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/\/v1\/events had no answer after 35 s/)
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 36_000])
+  const sends = () => w.to('/v1/events').map(r => [r.body.seq, r.body.events[0].turn, r.at])
+  expect(sends()).toEqual([
+    [1, 't1', 0],
+    [1, 't1', 36_000],
+    [2, 't2', 36_000],
+  ])
+
+  // The first send's answer comes at last, and changes nothing: the line goes on from where it is.
+  w.answerHung(204)
+  await w.settle()
+  await $.turn.start({ text: 'c', turnId: 't3' })
+  await w.settle()
+  expect(sends().map(([s]) => s)).toEqual([1, 1, 2, 3])
+  expect(w.to('/v1/hello')).toHaveLength(2)
+  expect(w.logs).toHaveLength(1)
+})
+
+test('a model that changed twice while the bridge was away, once before a turn ended and once after: the deck ends on the model now', async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // The deck restarts. While it's away the model changes, a turn ends (which queues that model), and the model
+  // changes again.
+  w.bridge.mode = 'down'
+  w.drop()
+  await w.settle()
+  w.session.model = 'claude-sonnet-5-5'
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await w.settle()
+  w.session.model = 'claude-opus-5-5'
+  w.bridge.mode = 'up'
+  await w.clock.advance(1000)
+  // The hello tells the model now, the queued settings the one before, and a settings event the model now again.
+  const told = w.sent
+    .filter(r => r.at === 1000 && r.route !== '/v1/next')
+    .map(r => (r.route === '/v1/hello' ? `hello ${r.body.model}` : `${r.body.events[0].t} ${r.body.events[0].model ?? ''}`.trim()))
+  expect(told).toEqual(['hello claude-opus-5-5', 'turn.end', 'settings claude-sonnet-5-5', 'settings claude-opus-5-5'])
+  // From then on the deck has it: the next turn sends no settings.
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await w.settle()
+  expect(w.settings()).toEqual([{ model: 'claude-sonnet-5-5' }, { model: 'claude-opus-5-5' }])
+})
+
+test('a model that changed while the bridge was away, with no turn ending: the hello tells it, and no settings event repeats it', async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  w.bridge.mode = 'down'
+  w.drop()
+  await w.settle()
+  w.session.model = 'claude-opus-5-5'
+  w.bridge.mode = 'up'
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.body.model)).toEqual([MODEL, 'claude-opus-5-5'])
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await w.settle()
+  expect(w.settings()).toEqual([])
+})
+
+test('the model is read again once a hello is answered: a change made while the hello was out reaches the deck', async ($, on) => {
+  const w = world(on, { mode: 'hang' })
+  await $.session.start(START)
+  await w.settle()
+  expect(w.to('/v1/hello')[0]?.body.model).toBe(MODEL)
+  w.session.model = 'claude-opus-5-5'
+  w.bridge.mode = 'up'
+  w.answerHung(200, { v: 1, ok: true })
+  await w.settle()
+  expect(w.settings()).toEqual([{ model: 'claude-opus-5-5' }])
 })
 
 test('the bridge holding each poll its 20 s: the mod polls again as each answers, one open at a time', async ($, on) => {
@@ -232,4 +377,44 @@ test('the token goes in the Authorization header alone: never in a URL, a body o
   expect(w.logs).toHaveLength(1)
   expect(w.logs[0]?.includes(TOKEN)).toBe(false)
   expect(w.logs[0]).toMatch(/<token>/)
+})
+
+test("a token across the 200-character cut of an error's text is hidden before the cut: no piece of it reaches the log", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // How many characters the engine puts before a refusal's reason, from an outage whose reason is a mark.
+  w.bridge.mode = 'down'
+  w.bridge.refusal = 'MARK'
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.settle()
+  const opening = "isn't answering ("
+  const first = w.logs[0] ?? ''
+  const before = first.indexOf('MARK') - first.indexOf(opening) - opening.length
+  expect(before).toBeGreaterThanOrEqual(0)
+  expect(before).toBeLessThan(150)
+  w.bridge.mode = 'up'
+  await w.clock.advance(1000)
+
+  // A second outage, whose error's text holds the token from its 194th character: a cut at 199 made first would
+  // leave the token's first 6 in the log, too few for a piece to be hidden on its own.
+  const filler = 'x'.repeat(193 - before)
+  w.bridge.mode = 'down'
+  w.bridge.refusal = `${filler}${TOKEN} and on`
+  await $.turn.start({ text: 'b', turnId: 't2' })
+  await w.settle()
+  expect(w.logs).toHaveLength(2)
+  const line = w.logs[1] ?? ''
+  expect(line).toContain(`${filler}<token…`)
+  for (let i = 0; i + 5 <= TOKEN.length; i++) expect(line).not.toContain(TOKEN.slice(i, i + 5))
+})
+
+test("a piece of the token 8 characters or longer is hidden too, as in an error's text the engine had already cut short", async ($, on) => {
+  const w = world(on, { mode: 'down' })
+  w.bridge.refusal = `connect ECONNREFUSED (Authorization: Bearer ${TOKEN.slice(0, 12)}…) after ${TOKEN.slice(9)}`
+  await $.session.start(START)
+  await w.settle()
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toContain('(Authorization: Bearer <token>…) after <token>)')
+  for (let i = 0; i + 8 <= TOKEN.length; i++) expect(w.logs[0]).not.toContain(TOKEN.slice(i, i + 8))
 })

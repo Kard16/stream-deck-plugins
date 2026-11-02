@@ -114,6 +114,9 @@ describe("session model", () => {
 		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
 		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 })]);
 		assert.equal(view(A)?.status, "done");
+		// Just compacted: the engine has no percent until its next response, so the old figure goes.
+		events(A, { t: "measure", context: { window: 2 }, cost: { usd: 0.5 } });
+		assert.equal(view(A)?.context, null);
 	});
 
 	test("failed and interrupted turns; a failed turn stays failed when its turn.end comes after", () => {
@@ -229,6 +232,30 @@ describe("session model", () => {
 		);
 	});
 
+	test("rule 4 also fails the session's delivered and waiting commands, and answers its open poll with none", () => {
+		const { model } = setup();
+		model.hello({ v: 1, host: A, inst: "ia", model: "m" });
+		const poll = (): FakeReply => {
+			const reply = new FakeReply();
+			model.next(new URLSearchParams({ host: A, inst: "ia", wait: "20" }), reply);
+			return reply;
+		};
+		const waiting = model.commands.queue(A, { t: "prompt", text: "one" });
+		poll();
+		model.result({ host: A, inst: "ia", id: waiting.id, state: "waiting" });
+		const delivered = model.commands.queue(A, { t: "mode", mode: "plan" });
+		poll();
+		const open = poll();
+		assert.deepEqual([waiting.state, delivered.state, open.answers], ["waiting", "delivered", []]);
+		model.setRegistry([reg(2, B)]);
+		assert.deepEqual(open.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(
+			[waiting.state, waiting.error, delivered.state, delivered.error],
+			["failed", "the session ended", "failed", "the session ended"],
+		);
+		assert.equal(model.commands.polling(A), false);
+	});
+
 	test("rule 5: a request whose client closes is dropped without an answer", () => {
 		const { model, permission } = setup();
 		const r = permission(A, "Write", { file_path: "/x" });
@@ -270,8 +297,23 @@ describe("session model", () => {
 		assert.deepEqual([view(A)?.doing, view(A)?.context, view(A)?.model], [null, 30, "claude-haiku-5-5"]);
 		assert.deepEqual([cmd.state, cmd.error], ["failed", "the mod restarted"]);
 		assert.equal(queued.state, "queued");
+		// The new instance takes the queued prompt and starts a tool. A late request from the old one, an
+		// instance seen before, isn't another restart, so neither is forgotten.
+		model.next(new URLSearchParams({ host: A, inst: "ib" }), new FakeReply());
+		model.events({ host: A, inst: "ib", seq: 1, events: [{ t: "tool.start", tool: "Read", use: "u2", summary: "b.md", fp: "2" }] });
 		model.hello({ v: 1, host: A, inst: "ia", model: "claude-haiku-5-5" });
-		assert.equal(queued.state, "queued", "an instance seen before isn't another restart");
+		assert.deepEqual([queued.state, view(A)?.doing], ["delivered", "b.md"]);
+	});
+
+	test("an instance seen before never counts as a restart again, however many came after it", () => {
+		const { model, view } = setup([reg(1, A, { status: "busy" })]);
+		for (let i = 0; i < 12; i++) model.hello({ v: 1, host: A, inst: `i${i}`, model: "m" });
+		model.events({ host: A, inst: "i11", seq: 1, events: [{ t: "tool.start", tool: "Read", use: "u1", summary: "a.md", fp: "1" }] });
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		model.next(new URLSearchParams({ host: A, inst: "i11" }), new FakeReply());
+		// The first instance, eleven restarts back, sends something late.
+		model.events({ host: A, inst: "i0", seq: 1, events: [] });
+		assert.deepEqual([cmd.state, view(A)?.doing], ["delivered", "a.md"]);
 	});
 
 	test("the target: the session picked on the dial; until then the one last on screen", () => {

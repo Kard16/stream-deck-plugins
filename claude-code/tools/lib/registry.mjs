@@ -86,7 +86,8 @@ export async function signature(file) {
 
 /**
  * The fields the deck uses from a record, or null when it can't be read. The app's summaries are text about
- * the user's work, so only their needs-the-user flags are kept.
+ * the user's work, so only their needs-the-user flags are kept. `needs_action` is true or, from app 4.4212.0,
+ * a sentence: any non-empty one counts.
  */
 export async function readRecord(file) {
   let obj
@@ -97,6 +98,7 @@ export async function readRecord(file) {
   }
   if (!isObject(obj)) return null
   const out = pick(obj, ['model', 'effort', 'permissionMode', 'lastFocusedAt'])
-  out.needsUser = obj.turnWrapUp?.needsUser === true || obj.postTurnSummary?.needs_action === true
+  const action = obj.postTurnSummary?.needs_action
+  out.needsUser = obj.turnWrapUp?.needsUser === true || action === true || (typeof action === 'string' && action !== '')
   return out
 }

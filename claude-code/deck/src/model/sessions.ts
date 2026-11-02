@@ -59,9 +59,12 @@ type RunningTool = { use: string | null; tool: string; summary: string; fp: stri
 type BridgeSession = {
 	host: string;
 	sid: string | null;
-	/** The current mod instance, and the ones seen before it (newest last, a few kept). */
+	/**
+	 * The current mod instance, and every one seen for the session: one seen before never counts as a restart
+	 * again. They go with the rest when the session ends.
+	 */
 	inst: string | null;
-	insts: string[];
+	insts: Set<string>;
 	/** The last `seq` seen, per instance. */
 	lastSeq: Map<string, number>;
 	/** The mod has talked to the bridge (any route), so the session has the plugin. */
@@ -444,7 +447,9 @@ export class SessionModel implements BridgeRoutes {
 				return;
 			}
 			case "measure":
-				if (e.percent !== null) b.context = e.percent;
+				// The latest measure's, which has none until the engine has a response to count: a fresh session,
+				// or one just compacted, whose old figure no longer holds.
+				b.context = e.percent;
 				return;
 			case "settings":
 				if (e.model) b.settings.model = e.model;
@@ -462,24 +467,20 @@ export class SessionModel implements BridgeRoutes {
 		}
 	}
 
-	/** The session of a mod request, by its host or else its sid. A new `inst` means the mod restarted. */
+	/** The session of a mod request, by its host or else its sid. An `inst` not seen before means the mod restarted. */
 	#modSession(ref: ModRef): BridgeSession | null {
 		const host = ref.host ?? this.#hostForSid(ref.sid);
 		if (host === null) return null;
 		const b = this.#bridgeFor(host);
 		if (ref.sid) b.sid = ref.sid;
 		b.mod = true;
-		if (ref.inst !== null && !b.insts.includes(ref.inst)) {
+		if (ref.inst !== null && !b.insts.has(ref.inst)) {
 			if (b.inst !== null) {
 				this.#log.info(`RESTART ${host}: mod instance ${quote(ref.inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten`);
 				b.tools = [];
 				this.commands.forgetInFlight(host, "the mod restarted");
 			}
-			b.insts.push(ref.inst);
-			if (b.insts.length > 8) {
-				const gone = b.insts.shift();
-				if (gone !== undefined) b.lastSeq.delete(gone);
-			}
+			b.insts.add(ref.inst);
 			b.inst = ref.inst;
 		}
 		return b;
@@ -492,7 +493,7 @@ export class SessionModel implements BridgeRoutes {
 				host,
 				sid: null,
 				inst: null,
-				insts: [],
+				insts: new Set(),
 				lastSeq: new Map(),
 				mod: false,
 				cwd: null,

@@ -26,7 +26,7 @@ export type Sent = {
 type HttpValue = { status: number; ok: boolean; headers: Record<string, string>; text: string }
 type Answer = { value: HttpValue } | { deny: string }
 
-/** How the fake bridge behaves: answering, refusing connections (down), or taking requests it never answers (hang). */
+/** How the fake bridge behaves: answering, refusing connections (down), or taking requests it leaves unanswered (hang). */
 export type Mode = 'up' | 'down' | 'hang'
 
 export type WorldOptions = {
@@ -47,17 +47,20 @@ export function world(on: On, o: WorldOptions = {}) {
   const sent: Sent[] = []
   const logs: string[] = []
   const held: { req: Sent; reply: (a: Answer) => void }[] = []
+  /** Requests the bridge took and left unanswered: all of them in mode `hang`, or a route's set to `'hang'`. */
+  const hung: { req: Sent; reply: (a: Answer) => void }[] = []
   const bridge = {
     mode: o.mode ?? ('up' as Mode),
     hello: { status: 200, body: { v: 1, ok: true } as unknown },
-    events: 204,
-    result: 204,
+    /** The status events and results are answered with, or `'hang'` to take them and never answer. */
+    events: 204 as number | 'hang',
+    result: 204 as number | 'hang',
     /** Seconds the bridge holds a poll with nothing to send: the poll's own `wait` when undefined. */
     pollHold: undefined as number | undefined,
     /** The reason a refused connection gives. */
     refusal: 'connect ECONNREFUSED 127.0.0.1:47600',
   }
-  const session = { sid: SID, model: MODEL }
+  const session = { sid: SID, model: MODEL, version: '2.1.309' }
   /** Answers each `$.tool.call`, standing for the tool itself. */
   const engine = {
     tool: (_e: Record<string, unknown>): unknown => ({ result: 'ran' }),
@@ -68,7 +71,7 @@ export function world(on: On, o: WorldOptions = {}) {
   on('session.id', () => ({ value: session.sid }))
   on('session.model', () => ({ value: session.model }))
   on('session.cwd', () => ({ value: '/sandbox' }))
-  on('session.version', () => ({ value: { version: '2.1.309' } }))
+  on('session.version', () => ({ value: { version: session.version } }))
   on('ui.log', (_$, e) => {
     logs.push(e.text)
     return { value: undefined }
@@ -87,6 +90,12 @@ export function world(on: On, o: WorldOptions = {}) {
     if (i < 0) return
     held.splice(i, 1)
     entry.reply(answer(200, { cmds }))
+  }
+
+  function hang(req: Sent): Promise<Answer> {
+    return new Promise<Answer>(reply => {
+      hung.push({ req, reply })
+    })
   }
 
   on('http.fetch', (_$, e) => {
@@ -109,14 +118,14 @@ export function world(on: On, o: WorldOptions = {}) {
     sent.push(req)
     if (`${url.protocol}//${url.host}` !== BRIDGE) return { deny: `not the bridge: ${e.url}` }
     if (bridge.mode === 'down') return { deny: bridge.refusal }
-    if (bridge.mode === 'hang') return new Promise<Answer>(() => {})
+    if (bridge.mode === 'hang') return hang(req)
     switch (req.route) {
       case '/v1/hello':
         return answer(bridge.hello.status, bridge.hello.body)
       case '/v1/events':
-        return answer(bridge.events)
+        return bridge.events === 'hang' ? hang(req) : answer(bridge.events)
       case '/v1/result':
-        return answer(bridge.result)
+        return bridge.result === 'hang' ? hang(req) : answer(bridge.result)
       case '/v1/next':
         return new Promise<Answer>(reply => {
           const entry = { req, reply }
@@ -178,6 +187,10 @@ export function world(on: On, o: WorldOptions = {}) {
     /** The deck restarts: every held poll's connection drops. */
     drop: (): void => {
       for (const entry of held.splice(0)) entry.reply({ deny: 'socket hang up' })
+    },
+    /** The bridge wakes up late: answers every request it left hanging, oldest first. */
+    answerHung: (status: number, body?: unknown): void => {
+      for (const entry of hung.splice(0)) entry.reply(answer(status, body))
     },
     /** Lets everything under way run without moving the clock. */
     settle: async (): Promise<void> => {
