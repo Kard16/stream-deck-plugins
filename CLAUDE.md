@@ -34,6 +34,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 | `lightroom/tools/` | Mock Lightroom, fake deck client, latency harness | Tools track |
 | `lightroom/protocol/` | Wire protocol spec, plus fixture streams both sides test against | Main thread |
 | `claude-code/plugin/` | Claude Code plugin `streamdeck-bridge`: hooks and a mod | Plugin track |
+| `claude-code/plugin-tsc/` | The plugin's type-check config and its fixtures-copy script, kept outside the plugin because the engine writes into a folder it loads | Plugin track |
 | `claude-code/deck/` | Stream Deck plugin: an npm project with `com.karimdhanji.claude.sdPlugin/` inside, hosting the bridge | Deck track |
 | `claude-code/tools/` | Fake Claude, fake bridge, fixture runner | Tools track |
 | `claude-code/protocol/` | Bridge protocol spec, plus fixture streams both sides test against | Main thread |
@@ -134,6 +135,20 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `npm run build`, `npm run typecheck`
 - `npx streamdeck validate com.karimdhanji.lightroom.sdPlugin`
 - The plugin is linked, and Stream Deck's developer mode is on (`npx streamdeck dev`). A linked plugin doesn't start without developer mode.
+
+**Claude Code plugin** (from the repo root; `CC` is the app's binary, `$HOME/Library/Application Support/Claude/claude-code/2.1.309/5af865b9901c/claude.app/Contents/MacOS/claude`)
+- `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`
+- `CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`.
+- `node claude-code/plugin-tsc/sync-fixtures.mjs --check`: the plugin's copy of the fixtures is current. `claude plugin test` can't read files outside the plugin, so after `make-fixtures.mjs` changes them, run it without `--check`.
+
+**Claude deck plugin** (from `claude-code/deck`)
+- `npm run typecheck`, `npm test`, `npm run build`
+- `npx streamdeck validate com.karimdhanji.claude.sdPlugin`
+- After `npm run build`, `streamdeck restart com.karimdhanji.claude`; `npm run watch` does both on save.
+
+**Claude tools and protocol** (from the repo root)
+- `node --test claude-code/tools/test/`
+- `node claude-code/protocol/make-fixtures.mjs`: regenerates the fixtures and `vectors.json`
 
 **Spikes**
 - `node spikes/lr-harness/test.mjs`: harness self-test against the fake Lightroom, about 100 s

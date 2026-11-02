@@ -1,8 +1,8 @@
 {
   "name": "claude-deck",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Stream Deck + plugin for Claude Code desktop sessions: the Sessions dial and a held-approval key (spike S6)",
+  "description": "Stream Deck + plugin for Claude Code desktop sessions: it hosts the bridge (claude-code/protocol/PROTOCOL.md), with session status and jump, approvals, saved prompts and mode",
   "type": "module",
   "scripts": {
     "build": "rollup -c",

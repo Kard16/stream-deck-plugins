@@ -5,8 +5,9 @@ export const LOG_LEVELS = ["error", "warn", "info", "debug", "trace"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /**
- * Normal use logs at info: startup, the bridge's state, every bridge request and close, answers, jumps, and
- * problems. Debug adds registry rescans and dial scrolling.
+ * Normal use logs at info: startup, the bridge's state, refused requests, each mod's hello, held requests and
+ * how each ended, commands and their results, jumps, and problems. Debug adds every event and poll, registry
+ * and record rescans, and dial scrolling.
  */
 export const DEFAULT_LOG_LEVEL: LogLevel = "info";
 

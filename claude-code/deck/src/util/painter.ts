@@ -62,17 +62,21 @@ export class StripPainter {
 
 /**
  * Sends one key's image: only when it differs from the last one sent, and at most one per interval. It also
- * remembers what that image showed (`shown`), so a press acts on what the key last displayed.
+ * remembers what that image showed (`shown`), and since when, so a press acts on what the key last displayed,
+ * and only once it has been there long enough to be seen.
  */
 export class KeyPainter<T> {
 	readonly #send: (svg: string) => void;
+	readonly #clock: Clock;
 	readonly #throttle: Throttle;
 	#desired: { svg: string; shown: T } | null = null;
 	#painted: { svg: string; shown: T } | null = null;
+	#shownSince: number | null = null;
 
 	constructor(send: (svg: string) => void, opts: { clock?: Clock; minIntervalMs?: number } = {}) {
 		this.#send = send;
-		this.#throttle = new Throttle(() => this.#flush(), opts);
+		this.#clock = opts.clock ?? realClock;
+		this.#throttle = new Throttle(() => this.#flush(), { ...opts, clock: this.#clock });
 	}
 
 	update(svg: string, shown: T): void {
@@ -83,6 +87,14 @@ export class KeyPainter<T> {
 	/** What the image last sent showed; undefined before the first paint. */
 	get shown(): T | undefined {
 		return this.#painted?.shown;
+	}
+
+	/**
+	 * When `shown` took its current value, on the painter's clock; null before the first paint. A new image
+	 * of the same thing (a count going up, say) leaves it; a different thing resets it, even in an identical image.
+	 */
+	get shownSince(): number | null {
+		return this.#shownSince;
 	}
 
 	get svg(): string | null {
@@ -97,6 +109,7 @@ export class KeyPainter<T> {
 		const desired = this.#desired;
 		if (!desired) return false;
 		const same = this.#painted?.svg === desired.svg;
+		if (this.#painted === null || !Object.is(this.#painted.shown, desired.shown)) this.#shownSince = this.#clock.now();
 		this.#painted = desired;
 		if (same) return false;
 		this.#send(desired.svg);

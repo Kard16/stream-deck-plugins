@@ -1,5 +1,4 @@
-import streamDeck, {
-	action,
+import {
 	type DialAction,
 	type DialDownEvent,
 	type DialRotateEvent,
@@ -9,21 +8,16 @@ import streamDeck, {
 	type TouchTapEvent,
 	type WillAppearEvent,
 	type WillDisappearEvent,
+	action,
 } from "@elgato/streamdeck";
 
 import type { SessionsDials } from "../sessions/dials.js";
-import { describeError } from "../util/log.js";
+import { fireAndForget } from "./shared.js";
 
-/** The dial lists every session from the registry, so it has no settings. */
+/** The dial lists every running session, so it has no settings. */
 export type SessionsSettings = Record<string, never>;
 
-const logger = streamDeck.logger.createScope("SessionsDial");
-
-function fireAndForget(what: string, call: () => Promise<void>): void {
-	call().catch((err: unknown) => logger.warn(`${what} failed: ${describeError(err)}`));
-}
-
-/** The Sessions dial. All behaviour lives in {@link SessionsDials}; this class only maps SDK events onto it. */
+/** The Sessions dial, on the deck since spike S6. All behaviour lives in {@link SessionsDials}. */
 @action({ UUID: "com.karimdhanji.claude.sessions" })
 export class SessionsDialAction extends SingletonAction<SessionsSettings> {
 	readonly #dials: SessionsDials;

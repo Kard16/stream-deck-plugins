@@ -1,10 +1,12 @@
 /**
- * The bridge's address. Port 47601, not the plan's 47600: the main thread's spike bridge
- * (spikes/cc-bridge/) owns 47600 during the spikes. Every other use of the port derives from this constant.
+ * The bridge's address: 127.0.0.1:47600, IPv4 only (PROTOCOL.md, Transport). The plugin's hooks.json and mod
+ * use the same port. The spike bridge (spikes/cc-bridge/) listened there during Phase 1; while anything else
+ * holds the port, the bridge retries with backoff (server.ts) until it's free. Every other use of the port
+ * derives from this constant, and tests bind port 0.
  */
-export const BRIDGE_PORT = 47601;
+export const BRIDGE_PORT = 47600;
 
-/** Loopback only. */
+/** Loopback only. Clients use 127.0.0.1, never localhost, which can resolve to ::1 first (S6). */
 export const BRIDGE_HOST = "127.0.0.1";
 
 /**
@@ -14,9 +16,6 @@ export const BRIDGE_HOST = "127.0.0.1";
 export function allowedHosts(port: number): string[] {
 	return [`127.0.0.1:${port}`, `localhost:${port}`];
 }
-
-/** The held-request route. Claude Code's PermissionRequest http hook posts here. */
-export const PERMISSION_PATH = "/permission";
 
 /** Bodies over this size get 413. A PermissionRequest carries the tool's input, which a Write can make large. */
 export const MAX_BODY_BYTES = 8 * 1024 * 1024;

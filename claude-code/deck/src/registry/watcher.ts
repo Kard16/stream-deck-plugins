@@ -6,7 +6,7 @@ export const REGISTRY_POLL_MS = 1000;
 
 /**
  * Re-reads the registry every second and tells listeners when the list of sessions or any of their fields
- * changed. Polling rather than fs.watch: it's simpler, and 1 s is quick enough for the spike.
+ * changed. Polling rather than fs.watch: it's simpler, and a second is quick enough for the deck.
  */
 export class RegistryWatcher {
 	readonly #reader: RegistryReader;
@@ -16,7 +16,7 @@ export class RegistryWatcher {
 	#sessions: RegistrySession[] = [];
 	#json = "";
 	#timer: ReturnType<typeof setInterval> | null = null;
-	#scanning = false;
+	#running: Promise<void> | null = null;
 	#again = false;
 
 	constructor(reader: RegistryReader, opts: { log?: Log; pollMs?: number } = {}) {
@@ -45,41 +45,46 @@ export class RegistryWatcher {
 		this.#timer = null;
 	}
 
-	/** Scans now. A call during a scan runs one more scan after it, never two at once. */
-	async scanNow(): Promise<void> {
-		if (this.#scanning) {
+	/**
+	 * Scans now. A call during a scan runs one more scan after it, never two at once, and resolves when that
+	 * one is done.
+	 */
+	scanNow(): Promise<void> {
+		if (this.#running) {
 			this.#again = true;
-			return;
+			return this.#running;
 		}
-		this.#scanning = true;
-		try {
-			do {
-				this.#again = false;
-				let sessions: RegistrySession[];
+		this.#running = this.#loop().finally(() => {
+			this.#running = null;
+		});
+		return this.#running;
+	}
+
+	async #loop(): Promise<void> {
+		do {
+			this.#again = false;
+			let sessions: RegistrySession[];
+			try {
+				sessions = await this.#reader.scan();
+			} catch (err) {
+				this.#log.warn(`scan failed: ${describeError(err)}`);
+				continue;
+			}
+			const json = JSON.stringify(sessions);
+			if (json === this.#json) continue;
+			const first = this.#json === "";
+			const before = this.#sessions.length;
+			this.#sessions = sessions;
+			this.#json = json;
+			if (first || sessions.length !== before) this.#log.info(`${sessions.length} session(s) running`);
+			else this.#log.debug("a session changed");
+			for (const listener of [...this.#listeners]) {
 				try {
-					sessions = await this.#reader.scan();
+					listener(sessions);
 				} catch (err) {
-					this.#log.warn(`scan failed: ${describeError(err)}`);
-					continue;
+					this.#log.error(`a listener threw: ${describeError(err)}`);
 				}
-				const json = JSON.stringify(sessions);
-				if (json === this.#json) continue;
-				const first = this.#json === "";
-				const before = this.#sessions.length;
-				this.#sessions = sessions;
-				this.#json = json;
-				if (first || sessions.length !== before) this.#log.info(`${sessions.length} session(s) running`);
-				else this.#log.debug("a session changed");
-				for (const listener of [...this.#listeners]) {
-					try {
-						listener(sessions);
-					} catch (err) {
-						this.#log.error(`a listener threw: ${describeError(err)}`);
-					}
-				}
-			} while (this.#again);
-		} finally {
-			this.#scanning = false;
-		}
+			}
+		} while (this.#again);
 	}
 }

@@ -1,19 +1,11 @@
-import type { RegistrySession } from "../registry/registry.js";
+import type { SessionView } from "../model/sessions.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { type Log, nullLog, quote } from "../util/log.js";
 import { type Feedback, PAINT_INTERVAL_MS, StripPainter } from "../util/painter.js";
-import { displayName, sessionsStrip } from "./strip.js";
+import { sessionsStrip } from "./strip.js";
 
 /** Ticks that arrive within this window are summed and applied together. */
 export const COALESCE_MS = 40;
-
-/**
- * What a dial follows a session by: the app's `local_…` id, fixed for the session's life (the jump route
- * takes it too), or the registry file's pid when the file has none.
- */
-export function identity(s: RegistrySession): string {
-	return s.hostSessionId ?? `pid:${s.key}`;
-}
 
 /** What the SDK adapter gives for one dial. */
 export type DialSurface = {
@@ -21,11 +13,19 @@ export type DialSurface = {
 	showAlert(): void;
 };
 
+/** What the Sessions dial needs from the session model. */
+export interface SessionsModel {
+	sessions(): SessionView[];
+	target(): SessionView | null;
+	pick(key: string): void;
+	onChange(listener: () => void): () => void;
+}
+
 type Dial = {
 	id: string;
 	surface: DialSurface;
 	painter: StripPainter;
-	/** The selected session's identity ({@link identity}), so the selection follows it when the list changes. */
+	/** The selected session's key, so the selection follows it when the list changes. */
 	selected: string | null;
 	index: number;
 	pendingTicks: number;
@@ -35,32 +35,35 @@ type Dial = {
 };
 
 /**
- * The Sessions dial, without the SDK. Each placed dial scrolls the registry's sessions on its own strip, one
- * session per tick, stopping at either end. Press (without turning) and tap jump to the session in the app
- * through the `open` callback, and log `jump <hostSessionId>`. Long-touch only logs.
+ * The Sessions dial, without the SDK. Each placed dial scrolls the running sessions on its own strip, one
+ * session per tick, stopping at either end, and follows its session by the app's `local_…` id while the list
+ * changes. Press (without turning) and tap jump to the session in the app through the `open` callback and
+ * make it the target for prompts and mode. Long-touch only logs.
  */
 export class SessionsDials {
+	readonly #model: SessionsModel;
 	readonly #clock: Clock;
 	readonly #log: Log;
 	readonly #paintIntervalMs: number;
-	readonly #open: (hostSessionId: string) => void;
+	readonly #open: (host: string) => void;
 	readonly #dials = new Map<string, Dial>();
-	#sessions: RegistrySession[] = [];
+	#sessions: SessionView[] = [];
 
-	constructor(
-		opts: { clock?: Clock; log?: Log; paintIntervalMs?: number; open?: (hostSessionId: string) => void } = {},
-	) {
+	constructor(model: SessionsModel, opts: { clock?: Clock; log?: Log; paintIntervalMs?: number; open?: (host: string) => void } = {}) {
+		this.#model = model;
 		this.#clock = opts.clock ?? realClock;
 		this.#log = opts.log ?? nullLog;
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
 		this.#open = opts.open ?? (() => {});
+		this.#sessions = model.sessions();
+		model.onChange(() => this.refresh());
 	}
 
-	/** A new list from the registry: each dial stays on its session, or on the same position if it ended. */
-	setSessions(sessions: RegistrySession[]): void {
-		this.#sessions = sessions;
+	/** The model changed: each dial stays on its session, or on the same position if it ended, and repaints. */
+	refresh(): void {
+		this.#sessions = this.#model.sessions();
 		for (const dial of this.#dials.values()) {
-			const found = dial.selected === null ? -1 : sessions.findIndex((s) => identity(s) === dial.selected);
+			const found = dial.selected === null ? -1 : this.#sessions.findIndex((s) => s.key === dial.selected);
 			this.#select(dial, found >= 0 ? found : dial.index);
 			this.#repaint(dial);
 		}
@@ -144,7 +147,7 @@ export class SessionsDials {
 			return;
 		}
 		const s = this.#sessions[dial.index];
-		this.#log.info(s ? `long-touch ${s.hostSessionId ?? `(no hostSessionId; pid ${s.key})`}: nothing assigned yet` : "long-touch: no sessions");
+		this.#log.info(s ? `long-touch ${s.host ?? `(no app id; pid ${s.pid ?? "?"})`}: nothing assigned` : "long-touch: no sessions");
 	}
 
 	/** What a dial's strip shows now, for tests. */
@@ -153,7 +156,7 @@ export class SessionsDials {
 	}
 
 	/** The selected session of a dial, for tests. */
-	selected(id: string): RegistrySession | null {
+	selected(id: string): SessionView | null {
 		const dial = this.#dials.get(id);
 		return dial ? (this.#sessions[dial.index] ?? null) : null;
 	}
@@ -165,24 +168,28 @@ export class SessionsDials {
 			dial.surface.showAlert();
 			return;
 		}
-		if (s.hostSessionId === null) {
-			this.#log.info(`jump via ${via}: pid ${s.key} (${quote(displayName(s))}) has no hostSessionId`);
+		if (s.host === null) {
+			this.#log.info(`jump via ${via}: pid ${s.pid ?? "?"} (${quote(s.title)}) has no app id`);
 			dial.surface.showAlert();
 			return;
 		}
-		// S5's route, claude://code/continue?session=<local_id>, is opened by the plugin (see plugin.ts).
-		this.#log.info(`jump ${s.hostSessionId} via ${via}: ${quote(displayName(s))}`);
-		this.#open(s.hostSessionId);
+		// The jump makes it the target too (PROTOCOL.md, "The target session"). S5's route,
+		// claude://code/continue?session=<local_id>, is opened by the plugin (see plugin.ts).
+		this.#model.pick(s.key);
+		this.#log.info(`jump ${s.host} via ${via}: ${quote(s.title)}`);
+		this.#open(s.host);
 	}
 
 	#select(dial: Dial, index: number): void {
 		const last = this.#sessions.length - 1;
 		dial.index = last < 0 ? 0 : Math.max(0, Math.min(last, index));
 		const s = this.#sessions[dial.index];
-		dial.selected = s ? identity(s) : null;
+		dial.selected = s ? s.key : null;
 	}
 
 	#repaint(dial: Dial): void {
-		dial.painter.update(sessionsStrip(this.#sessions, dial.index));
+		const s = this.#sessions[dial.index] ?? null;
+		const target = this.#model.target();
+		dial.painter.update(sessionsStrip(s, dial.index, this.#sessions.length, s !== null && target?.listed === true && target.key === s.key));
 	}
 }

@@ -13,7 +13,7 @@ export type RegistrySession = {
 	key: string;
 	/** The sidebar title. */
 	name: string | null;
-	/** The raw value: `busy` and `idle` seen so far. */
+	/** The raw value: `idle`, `busy`, or `waiting` while a permission prompt is open (S2). */
 	status: string | null;
 	cwd: string | null;
 	/** The desktop app's `local_…` id. */

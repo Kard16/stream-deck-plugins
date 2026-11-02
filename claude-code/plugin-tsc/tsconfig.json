@@ -1,0 +1,19 @@
+{
+  "//": "Type-checks the streamdeck-bridge mod and its tests against Claude Code 2.1.309's d.ts. It lives outside the plugin folder because the engine lays its own .claude-plugin/types/ and tsconfig.json into a plugin folder it hot-reloads. Options from the d.ts header. Run: mise exec -- node lightroom/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc",
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": [],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
+  "files": ["../vendor/mods-api-2.1.309/claude-code.d.ts"],
+  "include": ["../plugin/hooks/**/*.ts", "../plugin/tests/**/*.ts"]
+}

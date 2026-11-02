@@ -2,9 +2,9 @@
 	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 	"UUID": "com.karimdhanji.claude",
 	"Name": "Claude Code",
-	"Version": "0.1.0.0",
+	"Version": "0.2.0.0",
 	"Author": "Karim Dhanji",
-	"Description": "Claude Code desktop sessions on the dials and keys: a Sessions dial and a held-approval key (spike S6).",
+	"Description": "Claude Code desktop sessions on the dials and keys: session status and jump, approvals, saved prompts and mode.",
 	"Category": "Claude Code",
 	"CategoryIcon": "imgs/plugin/category-icon",
 	"Icon": "imgs/plugin/icon",
@@ -20,14 +20,13 @@
 		}
 	],
 	"Nodejs": {
-		"Version": "24",
-		"Debug": "enabled"
+		"Version": "24"
 	},
 	"Actions": [
 		{
 			"UUID": "com.karimdhanji.claude.sessions",
 			"Name": "Sessions",
-			"Tooltip": "Turn to scroll through the running Claude Code sessions. Press or tap to jump to one (spike: it only logs).",
+			"Tooltip": "Turn to scroll through the running Claude Code sessions: status, context, model and effort. Press or tap to jump to one and make it the target.",
 			"Icon": "imgs/actions/sessions/icon",
 			"Controllers": [
 				"Encoder"
@@ -43,24 +42,115 @@
 				"Icon": "imgs/actions/sessions/encoder",
 				"TriggerDescription": {
 					"Rotate": "Scroll sessions",
-					"Push": "Jump (logs only)",
-					"Touch": "Jump (logs only)",
-					"LongTouch": "Log only"
+					"Push": "Jump and target",
+					"Touch": "Jump and target",
+					"LongTouch": "Nothing"
+				}
+			}
+		},
+		{
+			"UUID": "com.karimdhanji.claude.mode",
+			"Name": "Mode",
+			"Tooltip": "The target session's mode, model and effort. Turn to choose Manual, Accept edits, Plan or Auto; press or tap to apply it.",
+			"Icon": "imgs/actions/mode/icon",
+			"Controllers": [
+				"Encoder"
+			],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/mode/key"
+				}
+			],
+			"Encoder": {
+				"layout": "layouts/mode.json",
+				"Icon": "imgs/actions/mode/encoder",
+				"TriggerDescription": {
+					"Rotate": "Choose a mode",
+					"Push": "Apply to the target",
+					"Touch": "Apply to the target",
+					"LongTouch": "Cancel the choice"
 				}
 			}
 		},
 		{
 			"UUID": "com.karimdhanji.claude.approve",
 			"Name": "Approve",
-			"Tooltip": "Shows how many permission requests are waiting. Press to allow the oldest one (spike).",
+			"Tooltip": "Shows the oldest request waiting for permission, across sessions. Press to allow it. A question or a plan jumps to its session.",
 			"Icon": "imgs/actions/approve/icon",
 			"Controllers": [
 				"Keypad"
 			],
 			"SupportedInMultiActions": false,
+			"UserTitleEnabled": false,
 			"States": [
 				{
 					"Image": "imgs/actions/approve/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.claude.deny",
+			"Name": "Deny",
+			"Tooltip": "Shows the oldest request waiting for permission, across sessions. Press to deny it, which stops the turn like the app's own No. A question or a plan jumps to its session.",
+			"Icon": "imgs/actions/deny/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"SupportedInMultiActions": false,
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/deny/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.claude.prompt",
+			"Name": "Saved Prompt",
+			"Tooltip": "Sends its text to the target session as your own message. A busy session gets it when its turn ends.",
+			"Icon": "imgs/actions/prompt/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"PropertyInspectorPath": "pi/prompt.html",
+			"SupportedInMultiActions": false,
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/prompt/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.claude.set-mode",
+			"Name": "Mode Key",
+			"Tooltip": "Changes the target session to the mode set in the key's settings.",
+			"Icon": "imgs/actions/mode-key/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"PropertyInspectorPath": "pi/mode.html",
+			"SupportedInMultiActions": false,
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/mode-key/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.claude.session",
+			"Name": "Session",
+			"Tooltip": "The target session's title and status. Press to jump to it.",
+			"Icon": "imgs/actions/session/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/session/key"
 				}
 			]
 		}

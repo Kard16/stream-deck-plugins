@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Mode Key</title>
+		<link rel="stylesheet" href="pi.css" />
+	</head>
+	<body>
+		<div class="item">
+			<span class="label">Mode</span>
+			<select class="field" id="mode">
+				<option value="">Choose a mode</option>
+				<option value="default">Manual</option>
+				<option value="acceptEdits">Accept edits</option>
+				<option value="plan">Plan</option>
+				<option value="auto">Auto</option>
+			</select>
+		</div>
+		<p class="hint">A press changes the target session to this mode: the session last picked on the Sessions dial, or else the one last on screen in the app. The key turns blue while it's the target's mode.</p>
+		<script src="common.js"></script>
+		<script src="mode.js"></script>
+	</body>
+</html>

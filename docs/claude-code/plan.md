@@ -444,6 +444,20 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Three kinds of request:** `tool` (Approve and Deny), `ask` (AskUserQuestion and ExitPlanMode: shown, and a press jumps), and `mode` (the deck's own mode change, allowed at once).
   - **Commands** are `prompt` and `mode` only. Results go `waiting`, then `done`, `refused` or `failed`.
   - **The target session** is the last one picked on the Sessions dial, else the one last on screen (`attach`, or the records' `lastFocusedAt`), refining kickoff answer 4 with S3's finding.
+- 2026-11-01, **Phase 3 started** as workflow `wf_eb1b88f3-f07`: a builder per track (A plugin, B deck, C tools), then an independent reviewer per track that re-runs its checks, then a fixer for blockers and majors. Each agent edits only its track's folder and commits nothing; the main thread verifies and commits. The spike bridge (47600) and S0 stay up for ladder step 4.
+- 2026-11-01, **Phase 3 built and verified.** All 8 agents of `wf_eb1b88f3-f07` finished.
+  - **Track A, the plugin** (`claude-code/plugin/`, type-checked through `claude-code/plugin-tsc/`): the reviewer passed it with 5 minors, so no fixer ran. The engine won't load a module that stores `$` or passes it to a method. So `register.ts` holds the 13 hooks and one adapter, and the protocol logic lives in plain modules. `claude plugin test` can't read files outside the plugin, so `tests/fixtures.gen.ts` is a generated copy of the fixtures.
+  - **Track B, the deck** (`claude-code/deck/`): the reviewer found 1 blocker and 2 majors, and the fixer fixed all three.
+    - The Mode strip wrote live data into `title`. Its key is now `target`.
+    - A quick second press answered the next request before the key showed it: a probe allowed another session's `rm -rf` 80 ms after an Approve. A press now counts only once its request has been on the key for 1 s.
+    - A prompt waiting behind a turn over 60 s was failed, though it was sent later. Its `waiting` now stops the 60 s clock.
+  - **Track C, the tools** (`claude-code/tools/`): 1 major, fixed. The fake Claude passed Allow or Deny answers that carried extra fields, such as `updatedPermissions`.
+  - **Re-run by the main thread:**
+    - Plugin: `tsc` exit 0; `plugin validate` with 2.1.309 passes; `plugin test` 39/39; the fixtures copy is current.
+    - Deck: typecheck exit 0; 146/146 tests; build exit 0; `streamdeck validate` passes.
+    - Tools: 77/77, and both `--help` exit 0.
+    - The deck's and the tools' tests also pass with the clock moved two days ahead, past the fixtures' T0 (2026-11-02T06:13Z).
+  - **Left for the next round:** the agents' contract questions and the reviewers' minors.
 
 ## Progress
 
@@ -451,7 +465,8 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] S0 sandbox · [x] S1 status · [x] S2 approvals · [x] S3 mod · [x] S4 mode, model, effort (mode through the app's tool; model and effort shown only, by the user's choice) · [x] S5 overview and jump · [x] S6 deck
 - [x] Phase 1: spike results shown to the user, and their go, 2026-11-01
 - [x] Phase 2: contract frozen, 2026-11-01
-- [ ] Track A: Claude Code plugin · [ ] Track B: deck plugin · [ ] Track C: tools
+- [x] Track A: Claude Code plugin · [x] Track B: deck plugin · [x] Track C: tools, 2026-11-01
+- [ ] Protocol amendments and the reviewers' minors
 - [ ] Ladder steps 4–5
 - [ ] Phase 4: on hardware with the user
 - [ ] Phase 5: daily use, when the user says so

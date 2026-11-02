@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Saved Prompt</title>
+		<link rel="stylesheet" href="pi.css" />
+	</head>
+	<body>
+		<div class="item">
+			<span class="label">Prompt</span>
+			<textarea class="field" id="text" placeholder="What to send, as your own message" spellcheck="true"></textarea>
+		</div>
+		<div class="item">
+			<span class="label">Key label</span>
+			<input class="field" type="text" id="label" placeholder="The start of the prompt" maxlength="60" autocomplete="off" />
+		</div>
+		<p class="hint">Goes to the target session: the one last picked on the Sessions dial, or else the one last on screen in the app. A busy session gets it when its turn ends. The key shows waiting, then sent or refused.</p>
+		<script src="common.js"></script>
+		<script src="prompt.js"></script>
+	</body>
+</html>

@@ -1,0 +1,579 @@
+import path from "node:path";
+
+import { type Command, CommandQueue, type CommandSpec, type PollReply } from "../bridge/commands.js";
+import { HeldRequests } from "../bridge/held.js";
+import type { BridgeRoutes, BridgeState, RouteAnswer } from "../bridge/server.js";
+import { fingerprint, summary } from "../protocol/fingerprint.js";
+import {
+	ALLOW_DECISION,
+	ASK_TOOLS,
+	asHost,
+	isObj,
+	MODE_TOOL,
+	type ModEvent,
+	type ModRef,
+	modRef,
+	type Obj,
+	parseEvent,
+	parseHello,
+	parsePermission,
+	parsePoll,
+	parseResult,
+	PROTOCOL_VERSION,
+} from "../protocol/wire.js";
+import type { AppRecord } from "../records/records.js";
+import { compareSessions, type RegistrySession } from "../registry/registry.js";
+import type { Clock } from "../util/clock.js";
+import { describeError, type Log, nullLog, quote } from "../util/log.js";
+import { type SessionStatus, sessionStatus } from "./status.js";
+
+/** One session as the deck shows it. */
+export type SessionView = {
+	/** What the deck keys the session by: its host, or `pid:<pid>` for a registry file without one. */
+	key: string;
+	/** The app's `local_…` id; null for a registry file without one. Jumps and commands need it. */
+	host: string | null;
+	/** The registry file's pid. */
+	pid: string | null;
+	title: string;
+	status: SessionStatus;
+	/** The summary of the main loop's latest unfinished tool, from the mod. */
+	doing: string | null;
+	/** Context use, %, from the mod's latest `measure`. */
+	context: number | null;
+	model: string | null;
+	effort: string | null;
+	mode: string | null;
+	/** The bridge has heard from the session's mod, so it can take prompts and mode changes. */
+	plugin: boolean;
+	/** False only for a picked target whose registry file has gone: it has ended. */
+	listed: boolean;
+};
+
+export type QueueResult = { ok: true; cmd: Command } | { ok: false; why: string };
+
+type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean };
+type RunningTool = { use: string | null; tool: string; summary: string; fp: string | null };
+
+/** What the bridge has heard about one session, from its mod and from its PermissionRequests. */
+type BridgeSession = {
+	host: string;
+	sid: string | null;
+	/** The current mod instance, and the ones seen before it (newest last, a few kept). */
+	inst: string | null;
+	insts: string[];
+	/** The last `seq` seen, per instance. */
+	lastSeq: Map<string, number>;
+	/** The mod has talked to the bridge (any route), so the session has the plugin. */
+	mod: boolean;
+	cwd: string | null;
+	/** The latest from hello, `settings` events and PermissionRequests; each wins over the app's record. */
+	settings: { model: string | null; mode: string | null; effort: string | null };
+	/** The main loop's last turn. */
+	turn: Turn | null;
+	/** The main loop's unfinished tool calls, oldest first. */
+	tools: RunningTool[];
+	context: number | null;
+	/** Wall-clock ms of the latest `attach`: the session came on screen in the app. */
+	onScreenAt: number | null;
+};
+
+const NO_HOST: RouteAnswer = { status: 400, body: { error: "unknown session: no host, and the registry doesn't know the sid" } };
+
+/** The longest title kept; the strips and keys cut it further. */
+const MAX_TITLE = 120;
+
+export type SessionModelOptions = {
+	log?: Log;
+	/** Timers for the long poll and the in-flight limit. */
+	clock?: Clock;
+	/** Wall-clock ms, compared with the registry's `statusUpdatedAt` and the records' `lastFocusedAt`. */
+	wallNow?: () => number;
+	inFlightMs?: number;
+};
+
+/**
+ * The deck's session model (PROTOCOL.md, "The deck's session model"). It merges the registry, the app's
+ * records and what the bridge hears, keyed by the app's `local_…` id; it's also the bridge's routes. It holds
+ * the PermissionRequests, applies the release rules, queues the commands that key presses make, and works
+ * out each session's status, settings and context, and the target session for prompts and mode.
+ */
+export class SessionModel implements BridgeRoutes {
+	readonly held: HeldRequests;
+	readonly commands: CommandQueue;
+	readonly #log: Log;
+	readonly #wallNow: () => number;
+	readonly #listeners = new Set<() => void>();
+	readonly #bridge = new Map<string, BridgeSession>();
+	#registry = new Map<string, RegistrySession>();
+	#ordered: RegistrySession[] = [];
+	#records = new Map<string, AppRecord>();
+	#picked: string | null = null;
+	/** The picked session's title as last listed, for when it has ended. */
+	#pickedTitle: string | null = null;
+	#bridgeState: BridgeState = "stopped";
+
+	constructor(opts: SessionModelOptions = {}) {
+		this.#log = opts.log ?? nullLog;
+		this.#wallNow = opts.wallNow ?? Date.now;
+		this.held = new HeldRequests({ log: this.#log });
+		this.commands = new CommandQueue({ clock: opts.clock, log: this.#log, inFlightMs: opts.inFlightMs });
+		this.held.onChange(() => this.#emit());
+		this.commands.onChange(() => this.#emit());
+	}
+
+	onChange(listener: () => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	}
+
+	/** Stops the command queue's timers. */
+	dispose(): void {
+		this.commands.dispose();
+	}
+
+	// ---- sources ----
+
+	get online(): boolean {
+		return this.#bridgeState === "listening";
+	}
+
+	setBridgeState(state: BridgeState): void {
+		if (state === this.#bridgeState) return;
+		this.#bridgeState = state;
+		this.#emit();
+	}
+
+	/**
+	 * A new list from the registry. Release rules 2–4 run on what changed: a session leaving `waiting` lets its
+	 * only held request go if it came before the change; `idle` with a later `statusUpdatedAt` lets go every
+	 * request that came before; a session whose file disappeared has ended.
+	 */
+	setRegistry(sessions: readonly RegistrySession[]): void {
+		const now = this.#wallNow();
+		const next = new Map<string, RegistrySession>();
+		for (const s of sessions) {
+			const key = keyOf(s);
+			const other = next.get(key);
+			// Two files for one session (a restarted process whose old file lingers): the later start wins.
+			if (!other || (s.startedAt ?? 0) > (other.startedAt ?? 0)) next.set(key, s);
+		}
+		const before = this.#registry;
+		this.#registry = next;
+		this.#ordered = [...next.values()].sort(compareSessions);
+
+		for (const [key, s] of next) {
+			const host = asHost(s.hostSessionId);
+			if (host === null) continue;
+			const old = before.get(key);
+			if (old?.status === "waiting" && s.status !== "waiting") {
+				const mine = this.held.forHost(host);
+				const changedAt = s.statusUpdatedAt ?? now;
+				const only = mine.length === 1 ? mine[0] : undefined;
+				if (only && only.at < changedAt) this.held.release(only.id, "the registry shows the session no longer waiting (rule 2)");
+			}
+			if (s.status === "idle") {
+				const since = s.statusUpdatedAt ?? (old && old.status !== "idle" ? now : null);
+				if (since !== null) for (const h of this.held.forHost(host)) if (h.at < since) this.held.release(h.id, "the registry shows the session idle (rule 3)");
+			}
+		}
+		for (const [key, old] of before) {
+			if (next.has(key)) continue;
+			const host = asHost(old.hostSessionId);
+			if (host !== null) this.#ended(host);
+		}
+		// Requests that came without a usable host: the registry may know their sid now.
+		for (const h of this.held.list()) {
+			if (h.host !== null || h.sid === null) continue;
+			const host = this.#hostForSid(h.sid);
+			if (host !== null) this.held.setHost(h.id, host);
+		}
+		if (this.#picked !== null) {
+			const picked = next.get(this.#picked);
+			if (picked) this.#pickedTitle = this.#title(picked);
+		}
+		this.#emit();
+	}
+
+	/** The app's records of the listed sessions, by host. */
+	setRecords(records: ReadonlyMap<string, AppRecord>): void {
+		this.#records = new Map(records);
+		this.#emit();
+	}
+
+	/** The hosts the registry lists, whose app records the deck reads. */
+	hosts(): string[] {
+		return this.#ordered.map((s) => asHost(s.hostSessionId)).filter((h): h is string => h !== null);
+	}
+
+	// ---- the bridge's routes ----
+
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void {
+		const p = parsePermission(body);
+		if (!p) {
+			this.#log.info("PERMISSION refused: the body isn't a PermissionRequest (no tool_name)");
+			reply.send(400, JSON.stringify({ error: "not a PermissionRequest" }));
+			return;
+		}
+		const host = asHost(deckHost) ?? this.#hostForSid(p.sid);
+		if (host !== null) {
+			const b = this.#bridgeFor(host);
+			if (p.sid) b.sid = p.sid;
+			if (p.mode) b.settings.mode = p.mode;
+			if (p.effort) b.settings.effort = p.effort;
+		}
+		// Kind mode: the deck's own mode change, in flight, raised this. The only answer without a key press.
+		if (host !== null && p.tool === MODE_TOOL && isObj(p.input) && p.input.session_id === "self") {
+			const cmd = this.commands.inFlightMode(host, p.input.mode);
+			if (cmd) {
+				cmd.allowed = true;
+				reply.send(200, JSON.stringify(ALLOW_DECISION));
+				this.#log.info(`ALLOWED the mode change to ${quote(String(p.input.mode), 20)} for ${host}: the deck's own command ${cmd.id}`);
+				this.#emit();
+				return;
+			}
+		}
+		const held = this.held.hold(
+			{
+				at: this.#wallNow(),
+				host,
+				sid: p.sid,
+				tool: p.tool,
+				kind: ASK_TOOLS.has(p.tool) ? "ask" : "tool",
+				summary: summary(p.tool, p.input),
+				fp: fingerprint(p.tool, p.input),
+			},
+			reply,
+		);
+		reply.onClose(() => this.held.close(held.id));
+	}
+
+	hello(body: Obj): RouteAnswer {
+		const h = parseHello(body);
+		if (h.v !== PROTOCOL_VERSION) {
+			this.#log.warn(`HELLO from ${h.host ?? "an unknown session"} speaks version ${quote(JSON.stringify(h.v) ?? "none", 20)}; the deck speaks ${PROTOCOL_VERSION}`);
+			return { status: 200, body: { v: PROTOCOL_VERSION, ok: false, error: "version" } };
+		}
+		const b = this.#modSession(h);
+		if (!b) return NO_HOST;
+		if (h.cwd) b.cwd = h.cwd;
+		if (h.model) b.settings.model = h.model;
+		if (h.mode) b.settings.mode = h.mode;
+		if (h.effort) b.settings.effort = h.effort;
+		this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)} plugin ${quote(h.plugin, 20)} cc ${quote(h.cc, 20)}`);
+		this.#emit();
+		return { status: 200, body: { v: PROTOCOL_VERSION, ok: true } };
+	}
+
+	events(body: Obj): RouteAnswer {
+		const ref = modRef(body);
+		const b = this.#modSession(ref);
+		if (!b) return NO_HOST;
+		const inst = ref.inst ?? "";
+		const seq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : null;
+		const last = b.lastSeq.get(inst) ?? 0;
+		// A retry, or a request older than one already applied.
+		if (seq === null || seq <= last) {
+			this.#log.debug(`EVENTS from ${b.host} dropped: seq ${seq ?? "missing"} isn't above ${last}`);
+			return { status: 204 };
+		}
+		b.lastSeq.set(inst, seq);
+		const events: unknown[] = Array.isArray(body.events) ? body.events : [];
+		for (const raw of events) {
+			const e = parseEvent(raw);
+			if (!e) continue;
+			if (e.t === "tool.start" || e.t === "tool.end") this.#log.debug(`EVENT ${b.host} ${e.t} ${quote(e.tool, 60)} fp ${e.fp ?? "none"}${e.agent ? ` agent ${quote(e.agent, 40)}` : ""}`);
+			else this.#log.debug(`EVENT ${b.host} ${e.t}`);
+			try {
+				this.#apply(b, e);
+			} catch (err) {
+				this.#log.error(`event ${e.t} from ${b.host} failed: ${describeError(err)}`);
+			}
+		}
+		this.#emit();
+		return { status: 204 };
+	}
+
+	next(query: URLSearchParams, reply: PollReply): void {
+		const q = parsePoll(query);
+		const b = this.#modSession(q);
+		if (!b) {
+			reply.send(NO_HOST.status, JSON.stringify(NO_HOST.body));
+			return;
+		}
+		this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
+		this.commands.poll(b.host, q.inst, q.wait, reply);
+		this.#emit();
+	}
+
+	result(body: Obj): RouteAnswer {
+		const r = parseResult(body);
+		const b = this.#modSession(r);
+		if (!b) return NO_HOST;
+		if (r.id !== null) this.commands.result(b.host, r.inst, r.id, r.state, r.error, r.detail);
+		return { status: 204 };
+	}
+
+	// ---- views ----
+
+	/** The running sessions, oldest first. */
+	sessions(): SessionView[] {
+		return this.#ordered.map((s) => this.#view(s));
+	}
+
+	/** A listed session by key. */
+	session(key: string): SessionView | null {
+		const s = this.#registry.get(key);
+		return s ? this.#view(s) : null;
+	}
+
+	/** A session's title for a held request: the registry's, the record's, the folder's; else "Unknown session". */
+	titleFor(host: string | null): string {
+		if (host === null) return "Unknown session";
+		const s = this.#registry.get(host);
+		if (s) return this.#title(s);
+		const rec = this.#records.get(host)?.title;
+		if (rec) return rec;
+		const cwd = this.#bridge.get(host)?.cwd;
+		return cwd ? path.basename(cwd) : "Unknown session";
+	}
+
+	/**
+	 * The session prompts and mode go to: the one last picked on the Sessions dial, even after it has ended
+	 * (presses then do nothing but alert, kickoff answer 4); until one is picked, the one most recently on
+	 * screen in the app, by its latest `attach` or its record's `lastFocusedAt`, whichever is later.
+	 */
+	target(): SessionView | null {
+		if (this.#picked !== null) {
+			const listed = this.session(this.#picked);
+			if (listed) return listed;
+			return {
+				key: this.#picked,
+				host: asHost(this.#picked),
+				pid: null,
+				title: this.#pickedTitle ?? this.#picked,
+				status: "idle",
+				doing: null,
+				context: null,
+				model: null,
+				effort: null,
+				mode: null,
+				plugin: false,
+				listed: false,
+			};
+		}
+		let best: RegistrySession | null = null;
+		let bestAt = -Infinity;
+		for (const s of this.#ordered) {
+			const host = asHost(s.hostSessionId);
+			if (host === null) continue;
+			const at = Math.max(this.#bridge.get(host)?.onScreenAt ?? -Infinity, this.#records.get(host)?.lastFocusedAt ?? -Infinity);
+			if (at > bestAt) {
+				bestAt = at;
+				best = s;
+			}
+		}
+		return best ? this.#view(best) : null;
+	}
+
+	/** Whether a session was picked on the Sessions dial (rather than the target following the app). */
+	get picked(): string | null {
+		return this.#picked;
+	}
+
+	/** The Sessions dial picked a session: it's the target from now on. */
+	pick(key: string): void {
+		const s = this.#registry.get(key);
+		if (s) this.#pickedTitle = this.#title(s);
+		if (this.#picked === key) return;
+		this.#picked = key;
+		this.#log.info(`TARGET ${key}: picked on the Sessions dial`);
+		this.#emit();
+	}
+
+	/**
+	 * Queues a command that a key press made, for a listed session with the plugin; anything else is refused
+	 * with the reason, and the key alerts.
+	 */
+	queue(key: string, spec: CommandSpec): QueueResult {
+		const view = this.session(key);
+		if (!view) return { ok: false, why: `${this.#pickedTitle && key === this.#picked ? quote(this.#pickedTitle) : key} has ended` };
+		if (view.host === null) return { ok: false, why: `${quote(view.title)} has no app id` };
+		if (!view.plugin) return { ok: false, why: `${quote(view.title)} doesn't have the plugin` };
+		return { ok: true, cmd: this.commands.queue(view.host, spec) };
+	}
+
+	// ---- internals ----
+
+	#apply(b: BridgeSession, e: ModEvent): void {
+		switch (e.t) {
+			case "turn.start":
+				if (e.agent !== null) return;
+				b.turn = { id: e.turn, ended: false, reason: null, failed: false };
+				b.tools = [];
+				return;
+			case "turn.end": {
+				if (e.agent !== null) return;
+				// A `failed` for this same turn stays: the status says failed, whatever the reason.
+				const same = b.turn !== null && (e.turn === null || b.turn.id === null || b.turn.id === e.turn);
+				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false) };
+				b.tools = [];
+				return;
+			}
+			case "failed":
+				if (e.agent !== null) return;
+				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true };
+				b.tools = [];
+				this.#log.info(`FAILED turn in ${b.host}${e.error ? `: ${quote(e.error, 120)}` : ""}`);
+				return;
+			case "tool.start":
+				if (e.agent !== null) return;
+				if (e.use !== null) b.tools = b.tools.filter((t) => t.use !== e.use);
+				b.tools.push({ use: e.use, tool: e.tool, summary: e.summary, fp: e.fp });
+				return;
+			case "tool.end": {
+				if (e.agent === null) {
+					const i = e.use !== null ? b.tools.findIndex((t) => t.use === e.use) : b.tools.findIndex((t) => t.fp !== null && t.fp === e.fp);
+					if (i >= 0) b.tools.splice(i, 1);
+				}
+				// Rule 1, for the main loop and subagents alike: the call a held request was for has ended.
+				if (e.fp !== null) {
+					const match = this.held.forHost(b.host).find((h) => h.fp === e.fp);
+					if (match) this.held.release(match.id, `the session reported the call's end (rule 1, fp ${e.fp})`);
+				}
+				return;
+			}
+			case "measure":
+				if (e.percent !== null) b.context = e.percent;
+				return;
+			case "settings":
+				if (e.model) b.settings.model = e.model;
+				if (e.mode) b.settings.mode = e.mode;
+				if (e.effort) b.settings.effort = e.effort;
+				return;
+			case "attach":
+				b.onScreenAt = this.#wallNow();
+				return;
+			case "detach":
+				return;
+			case "end":
+				this.#log.info(`END ${b.host}: ${quote(e.reason, 60)}`);
+				return;
+		}
+	}
+
+	/** The session of a mod request, by its host or else its sid. A new `inst` means the mod restarted. */
+	#modSession(ref: ModRef): BridgeSession | null {
+		const host = ref.host ?? this.#hostForSid(ref.sid);
+		if (host === null) return null;
+		const b = this.#bridgeFor(host);
+		if (ref.sid) b.sid = ref.sid;
+		b.mod = true;
+		if (ref.inst !== null && !b.insts.includes(ref.inst)) {
+			if (b.inst !== null) {
+				this.#log.info(`RESTART ${host}: mod instance ${quote(ref.inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten`);
+				b.tools = [];
+				this.commands.forgetInFlight(host, "the mod restarted");
+			}
+			b.insts.push(ref.inst);
+			if (b.insts.length > 8) {
+				const gone = b.insts.shift();
+				if (gone !== undefined) b.lastSeq.delete(gone);
+			}
+			b.inst = ref.inst;
+		}
+		return b;
+	}
+
+	#bridgeFor(host: string): BridgeSession {
+		let b = this.#bridge.get(host);
+		if (!b) {
+			b = {
+				host,
+				sid: null,
+				inst: null,
+				insts: [],
+				lastSeq: new Map(),
+				mod: false,
+				cwd: null,
+				settings: { model: null, mode: null, effort: null },
+				turn: null,
+				tools: [],
+				context: null,
+				onScreenAt: null,
+			};
+			this.#bridge.set(host, b);
+		}
+		return b;
+	}
+
+	/** The registry's host for a Claude Code session id, else the one a mod said hello with. */
+	#hostForSid(sid: string | null): string | null {
+		if (sid === null) return null;
+		for (const s of this.#ordered) if (s.sessionId === sid) return asHost(s.hostSessionId);
+		for (const b of this.#bridge.values()) if (b.sid === sid) return b.host;
+		return null;
+	}
+
+	/** Release rule 4: the registry file disappeared, so the session has ended. */
+	#ended(host: string): void {
+		for (const h of this.held.forHost(host)) this.held.release(h.id, "the session's registry file disappeared (rule 4)");
+		this.commands.failHost(host, "the session ended");
+		this.#bridge.delete(host);
+		this.#log.info(`ENDED ${host}: its registry file disappeared`);
+	}
+
+	#view(s: RegistrySession): SessionView {
+		const host = asHost(s.hostSessionId);
+		const b = host === null ? undefined : this.#bridge.get(host);
+		const rec = host === null ? undefined : this.#records.get(host);
+		const held = host === null ? [] : this.held.forHost(host);
+		return {
+			key: keyOf(s),
+			host,
+			pid: s.key,
+			title: this.#title(s),
+			status: sessionStatus({
+				heldTool: held.filter((h) => h.kind === "tool").length,
+				heldAsk: held.filter((h) => h.kind === "ask").length,
+				registry: s.status,
+				turn: b?.turn ?? null,
+				recordNeedsUser: rec?.needsUser ?? false,
+			}),
+			doing: b?.tools.at(-1)?.summary ?? null,
+			context: b?.context ?? null,
+			model: b?.settings.model ?? rec?.model ?? null,
+			effort: b?.settings.effort ?? rec?.effort ?? null,
+			mode: b?.settings.mode ?? rec?.permissionMode ?? null,
+			plugin: b?.mod ?? false,
+			listed: true,
+		};
+	}
+
+	/** The sidebar title; else the app's record's; else the folder's name; else the pid. */
+	#title(s: RegistrySession): string {
+		const name = s.name?.trim();
+		if (name) return name.length > MAX_TITLE ? `${name.slice(0, MAX_TITLE)}…` : name;
+		const host = asHost(s.hostSessionId);
+		const rec = host === null ? null : (this.#records.get(host)?.title ?? null);
+		if (rec) return rec;
+		const cwd = s.cwd ?? (host === null ? null : (this.#bridge.get(host)?.cwd ?? null));
+		const folder = cwd ? path.basename(cwd) : "";
+		return folder !== "" ? folder : `Session ${s.key}`;
+	}
+
+	#emit(): void {
+		for (const listener of [...this.#listeners]) {
+			try {
+				listener();
+			} catch (err) {
+				this.#log.error(`a listener threw: ${describeError(err)}`);
+			}
+		}
+	}
+}
+
+/** The deck keys sessions by host; a registry file without one by its pid. */
+export function keyOf(s: RegistrySession): string {
+	return asHost(s.hostSessionId) ?? `pid:${s.key}`;
+}

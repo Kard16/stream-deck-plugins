@@ -1,72 +1,78 @@
-/** The answer the Approve key gives: Claude Code's PermissionRequest hook output for "allow". */
-export const ALLOW_DECISION = {
-	hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } },
-} as const;
+import { ALLOW_DECISION, DENY_DECISION, NO_DECISION } from "../protocol/wire.js";
+import { describeError, type Log, nullLog, quote } from "../util/log.js";
 
-/** A request the bridge is holding until a key press answers it or its client goes away. */
-export type HeldRequest = {
-	/** 1, 2, 3… in arrival order, for the log and for knowing which request a key showed. */
-	id: number;
-	/** Date.now() when it was held. */
-	at: number;
-	/** `tool_name` from the body, when the body is an object that has one. */
-	toolName: string | null;
-	/** `session_id` from the body, likewise. */
-	sessionId: string | null;
-};
-
-/** How the queue answers one request. The HTTP server makes one per held request. */
+/** How the bridge answers one held HTTP request. The server makes one per request it holds. */
 export interface Responder {
 	/** False once the client has gone or an answer was sent. */
 	readonly open: boolean;
 	send(status: number, body: string): void;
 }
 
-export type AnswerResult =
-	| { ok: true; req: HeldRequest; remaining: number }
+/**
+ * `tool`: Approve and Deny answer it. `ask` (AskUserQuestion, ExitPlanMode): shown, never answered; a press
+ * jumps to its session. The third kind, `mode`, is allowed at once and never held (PROTOCOL.md, Permission
+ * requests).
+ */
+export type HeldKind = "tool" | "ask";
+
+/** A PermissionRequest the bridge holds until a press answers it or a release rule lets it go. */
+export type Held = {
+	/** 1, 2, 3… in arrival order: for the log, and for knowing which request a key showed. */
+	readonly id: number;
+	/** Wall-clock ms when it arrived, compared with the registry's `statusUpdatedAt` (release rules 2 and 3). */
+	readonly at: number;
+	/** The app's `local_…` id, from `X-Deck-Host` or the registry; null until the registry knows the sid. */
+	host: string | null;
+	readonly sid: string | null;
+	readonly tool: string;
+	readonly kind: HeldKind;
+	readonly summary: string;
+	readonly fp: string;
+};
+
+export type Decision = "allow" | "deny";
+
+export type PressResult =
+	| { ok: true; did: "answered"; held: Held; decision: Decision; remaining: number }
+	/** An ask: the press jumps to its session and answers nothing. */
+	| { ok: true; did: "jump"; held: Held }
 	/**
 	 * empty: nothing is held. changed: the oldest isn't the request the key showed, so the press does nothing.
 	 * gone: the oldest's client had already gone; it's removed and nothing is sent.
 	 */
-	| { ok: false; why: "empty" | "changed" | "gone"; req: HeldRequest | null };
+	| { ok: false; why: "empty" | "changed" | "gone"; held: Held | null };
 
-type Entry = { req: HeldRequest; responder: Responder };
-
-/** Longer `tool_name` and `session_id` values are cut to this, for the key and the log. */
-const MAX_FIELD = 100;
-
-/** Reads `tool_name` and `session_id` from a body, if it's an object with string values for them. */
-export function describeBody(body: unknown): Pick<HeldRequest, "toolName" | "sessionId"> {
-	if (typeof body !== "object" || body === null || Array.isArray(body)) return { toolName: null, sessionId: null };
-	const o = body as Record<string, unknown>;
-	const field = (v: unknown): string | null => (typeof v === "string" && v !== "" ? (v.length > MAX_FIELD ? `${v.slice(0, MAX_FIELD)}…` : v) : null);
-	return { toolName: field(o.tool_name), sessionId: field(o.session_id) };
-}
+type Entry = { held: Held; responder: Responder };
 
 /**
- * Held permission requests, oldest first. A key press answers the oldest with {@link ALLOW_DECISION}; a
- * client that closes first is removed. Nothing here answers on its own: no timeout, no default.
+ * The held PermissionRequests of every session, oldest first. Only a press answers one, and only the one
+ * the key showed (S6). The release rules answer with no decision. Nothing here answers on its own: no
+ * timeout, no default.
  */
-export class HeldQueue {
+export class HeldRequests {
 	readonly #entries: Entry[] = [];
 	readonly #listeners = new Set<() => void>();
-	readonly #now: () => number;
+	readonly #log: Log;
 	#nextId = 1;
 
-	constructor(opts: { now?: () => number } = {}) {
-		this.#now = opts.now ?? Date.now;
+	constructor(opts: { log?: Log } = {}) {
+		this.#log = opts.log ?? nullLog;
 	}
 
 	get size(): number {
 		return this.#entries.length;
 	}
 
-	get oldest(): HeldRequest | null {
-		return this.#entries[0]?.req ?? null;
+	get oldest(): Held | null {
+		return this.#entries[0]?.held ?? null;
 	}
 
-	list(): HeldRequest[] {
-		return this.#entries.map((e) => e.req);
+	list(): Held[] {
+		return this.#entries.map((e) => e.held);
+	}
+
+	forHost(host: string): Held[] {
+		return this.#entries.filter((e) => e.held.host === host).map((e) => e.held);
 	}
 
 	onChange(listener: () => void): () => void {
@@ -74,39 +80,78 @@ export class HeldQueue {
 		return () => this.#listeners.delete(listener);
 	}
 
-	hold(body: unknown, responder: Responder): HeldRequest {
-		const req: HeldRequest = { id: this.#nextId++, at: this.#now(), ...describeBody(body) };
-		this.#entries.push({ req, responder });
+	hold(req: Omit<Held, "id">, responder: Responder): Held {
+		const held: Held = { ...req, id: this.#nextId++ };
+		this.#entries.push({ held, responder });
+		// The fp is logged so ladder step 4 can compare it with the mod's for the same call (PROTOCOL.md).
+		this.#log.info(`HELD #${held.id} ${held.kind} ${quote(held.tool, 60)} ${quote(held.summary, 40)} fp ${held.fp} from ${held.host ?? `sid ${quote(held.sid, 40)}`}; ${this.size} held`);
 		this.#emit();
-		return req;
+		return held;
 	}
 
-	/** The client of request `id` went away before an answer. Returns whether it was still held. */
-	close(id: number): boolean {
-		const i = this.#entries.findIndex((e) => e.req.id === id);
-		if (i < 0) return false;
-		this.#entries.splice(i, 1);
+	/** The registry now knows the session of a request that came without a usable host. */
+	setHost(id: number, host: string): void {
+		const entry = this.#entries.find((e) => e.held.id === id);
+		if (!entry || entry.held.host === host) return;
+		entry.held.host = host;
 		this.#emit();
-		return true;
+	}
+
+	/** Release rule 5: the client of request `id` went away (the hook's timeout, or the session ended). */
+	close(id: number): Held | null {
+		const entry = this.#take(id);
+		if (!entry) return null;
+		this.#log.info(`CLOSED #${id}: the client closed first; ${this.size} held`);
+		this.#emit();
+		return entry.held;
+	}
+
+	/** Release rules 1–4: answers `{}` (no decision; the app's dialog decides) and lets the request go. */
+	release(id: number, why: string): Held | null {
+		const entry = this.#take(id);
+		if (!entry) return null;
+		this.#send(entry, NO_DECISION);
+		this.#log.info(`RELEASED #${id} ${quote(entry.held.tool, 60)}: ${why}; ${this.size} held`);
+		this.#emit();
+		return entry.held;
 	}
 
 	/**
-	 * Answers the oldest request with allow. `shownId` is the request the key showed when pressed (null: it
-	 * showed none); when the oldest is another one, nothing is answered, so a press never approves a request
-	 * the key didn't show. Pass undefined to skip that check.
+	 * A press on Approve or Deny. `shownId` is the request the key showed when pressed (null: it showed none).
+	 * The press acts only on the oldest, and only when that's the one shown: new requests are always younger,
+	 * so a shown request still held is still the oldest. A `tool` request is answered; an `ask` is left held.
 	 */
-	answerOldest(shownId?: number | null): AnswerResult {
+	press(shownId: number | null, decision: Decision): PressResult {
 		const entry = this.#entries[0];
-		if (!entry) return { ok: false, why: "empty", req: null };
-		if (shownId !== undefined && entry.req.id !== shownId) return { ok: false, why: "changed", req: entry.req };
-		this.#entries.shift();
+		if (!entry) return { ok: false, why: "empty", held: null };
+		if (entry.held.id !== shownId) return { ok: false, why: "changed", held: entry.held };
 		if (!entry.responder.open) {
+			this.#entries.shift();
 			this.#emit();
-			return { ok: false, why: "gone", req: entry.req };
+			return { ok: false, why: "gone", held: entry.held };
 		}
-		entry.responder.send(200, JSON.stringify(ALLOW_DECISION));
+		if (entry.held.kind === "ask") return { ok: true, did: "jump", held: entry.held };
+		this.#entries.shift();
+		this.#send(entry, decision === "allow" ? ALLOW_DECISION : DENY_DECISION);
+		this.#log.info(`ANSWER #${entry.held.id} ${quote(entry.held.tool, 60)}: ${decision}, from a key press; ${this.size} held`);
 		this.#emit();
-		return { ok: true, req: entry.req, remaining: this.#entries.length };
+		return { ok: true, did: "answered", held: entry.held, decision, remaining: this.size };
+	}
+
+	#take(id: number): Entry | null {
+		const i = this.#entries.findIndex((e) => e.held.id === id);
+		if (i < 0) return null;
+		const [entry] = this.#entries.splice(i, 1);
+		return entry ?? null;
+	}
+
+	#send(entry: Entry, body: unknown): void {
+		if (!entry.responder.open) return;
+		try {
+			entry.responder.send(200, JSON.stringify(body));
+		} catch (err) {
+			this.#log.warn(`#${entry.held.id}: the answer couldn't be sent: ${describeError(err)}`);
+		}
 	}
 
 	#emit(): void {

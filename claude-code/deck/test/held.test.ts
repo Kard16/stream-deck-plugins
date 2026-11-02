@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { ALLOW_DECISION, describeBody, HeldQueue, type Responder } from "../src/bridge/held.js";
+import { type Held, HeldRequests, type Responder } from "../src/bridge/held.js";
+import { ALLOW_DECISION, DENY_DECISION } from "../src/protocol/wire.js";
+import { RecordingLog } from "./helpers/recording-log.js";
 
 /** A client whose answer the test can read, and which can close. */
 class FakeResponder implements Responder {
@@ -15,107 +17,108 @@ class FakeResponder implements Responder {
 }
 
 const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
+const DENY_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from the Stream Deck.","interrupt":true}}}';
 
-describe("held-request queue", () => {
-	test("holds requests oldest first, with their tool_name and session_id", () => {
-		const queue = new HeldQueue({ now: () => 1000 });
-		let changes = 0;
-		queue.onChange(() => changes++);
-		const a = queue.hold({ tool_name: "Bash", session_id: "s1", tool_input: { command: "ls" } }, new FakeResponder());
-		const b = queue.hold({ tool_name: "Write" }, new FakeResponder());
-		const c = queue.hold([1, 2], new FakeResponder());
-		assert.equal(queue.size, 3);
-		assert.equal(changes, 3);
-		assert.deepEqual(a, { id: 1, at: 1000, toolName: "Bash", sessionId: "s1" });
-		assert.deepEqual(b, { id: 2, at: 1000, toolName: "Write", sessionId: null });
-		assert.deepEqual(c, { id: 3, at: 1000, toolName: null, sessionId: null }, "any JSON is held; only an object has a tool_name");
-		assert.equal(queue.oldest?.id, 1);
+function req(tool: string, fields: Partial<Omit<Held, "id">> = {}): Omit<Held, "id"> {
+	return { at: 1000, host: "local_a", sid: "sid-a", tool, kind: "tool", summary: tool, fp: "00000000", ...fields };
+}
+
+describe("held requests", () => {
+	test("the answers are PROTOCOL.md's, byte for byte", () => {
+		assert.equal(JSON.stringify(ALLOW_DECISION), ALLOW_JSON);
+		assert.equal(JSON.stringify(DENY_DECISION), DENY_JSON);
 	});
 
-	test("answers the oldest with allow, then the next is the oldest", () => {
-		const queue = new HeldQueue();
+	test("holds requests oldest first, numbered in arrival order", () => {
+		const held = new HeldRequests();
+		let changes = 0;
+		held.onChange(() => changes++);
+		const a = held.hold(req("Bash"), new FakeResponder());
+		const b = held.hold(req("Write", { host: "local_b" }), new FakeResponder());
+		assert.deepEqual([a.id, b.id], [1, 2]);
+		assert.equal(held.size, 2);
+		assert.equal(changes, 2);
+		assert.equal(held.oldest?.tool, "Bash");
+		assert.deepEqual(
+			held.forHost("local_b").map((h) => h.tool),
+			["Write"],
+		);
+	});
+
+	test("Approve answers the oldest with allow, Deny with deny, and then the next is the oldest", () => {
+		const held = new HeldRequests();
 		const first = new FakeResponder();
 		const second = new FakeResponder();
-		queue.hold({ tool_name: "Bash" }, first);
-		queue.hold({ tool_name: "Edit" }, second);
-
-		const result = queue.answerOldest();
-		assert.equal(result.ok, true);
+		const a = held.hold(req("Bash"), first);
+		const b = held.hold(req("Edit"), second);
+		const result = held.press(a.id, "allow");
+		assert.equal(result.ok && result.did, "answered");
 		assert.deepEqual(first.sent, [{ status: 200, body: ALLOW_JSON }]);
-		assert.equal(JSON.stringify(ALLOW_DECISION), ALLOW_JSON);
 		assert.deepEqual(second.sent, [], "only the oldest is answered");
-		assert.equal(queue.size, 1);
-		assert.equal(queue.oldest?.toolName, "Edit");
-		if (result.ok) assert.equal(result.remaining, 1);
-	});
-
-	test("a client that closes first is removed from the count, and isn't answered", () => {
-		const queue = new HeldQueue();
-		const r1 = new FakeResponder();
-		const r2 = new FakeResponder();
-		const r3 = new FakeResponder();
-		queue.hold({ tool_name: "A" }, r1);
-		const b = queue.hold({ tool_name: "B" }, r2);
-		queue.hold({ tool_name: "C" }, r3);
-
-		r2.open = false;
-		assert.equal(queue.close(b.id), true);
-		assert.equal(queue.size, 2);
-		assert.deepEqual(
-			queue.list().map((r) => r.toolName),
-			["A", "C"],
-		);
-		assert.equal(queue.close(b.id), false, "closing twice changes nothing");
-
-		queue.answerOldest();
-		queue.answerOldest();
-		assert.equal(queue.size, 0);
-		assert.deepEqual(r2.sent, []);
-		assert.equal(r1.sent.length, 1);
-		assert.equal(r3.sent.length, 1);
+		held.press(b.id, "deny");
+		assert.deepEqual(second.sent, [{ status: 200, body: DENY_JSON }]);
+		assert.equal(held.size, 0);
 	});
 
 	test("a press for a request the key no longer shows answers nothing", () => {
-		const queue = new HeldQueue();
-		const r1 = new FakeResponder();
+		const held = new HeldRequests();
 		const r2 = new FakeResponder();
-		const a = queue.hold({ tool_name: "A" }, r1);
-		const b = queue.hold({ tool_name: "B" }, r2);
-		// The key showed A; A's client went away; B is now the oldest.
-		queue.close(a.id);
-		const result = queue.answerOldest(a.id);
-		assert.deepEqual(result, { ok: false, why: "changed", req: b });
+		const a = held.hold(req("A"), new FakeResponder());
+		const b = held.hold(req("B"), r2);
+		held.close(a.id);
+		assert.deepEqual(held.press(a.id, "allow"), { ok: false, why: "changed", held: b });
+		assert.equal(held.press(null, "allow").ok, false, "the key showed nothing, but a request arrived before the press");
 		assert.deepEqual(r2.sent, []);
-		assert.equal(queue.size, 1);
-		// The key showed nothing, but a request arrived before the press.
-		assert.equal(queue.answerOldest(null).ok, false);
-		// The key showed B.
-		assert.equal(queue.answerOldest(b.id).ok, true);
-		assert.equal(r2.sent.length, 1);
+		assert.equal(held.press(b.id, "allow").ok, true);
 	});
 
-	test("an oldest whose client is already gone is removed, and nothing is sent", () => {
-		const queue = new HeldQueue();
+	test("an ask is shown but never answered: the press says jump, and it stays held", () => {
+		const held = new HeldRequests();
+		const r = new FakeResponder();
+		const q = held.hold(req("AskUserQuestion", { kind: "ask" }), r);
+		const result = held.press(q.id, "allow");
+		assert.deepEqual(result, { ok: true, did: "jump", held: q });
+		assert.deepEqual(r.sent, []);
+		assert.equal(held.size, 1);
+	});
+
+	test("an oldest whose client already went is removed, nothing is sent, and the press doesn't fall through", () => {
+		const held = new HeldRequests();
 		const gone = new FakeResponder();
 		const next = new FakeResponder();
-		queue.hold({ tool_name: "A" }, gone);
-		queue.hold({ tool_name: "B" }, next);
-		gone.open = false; // closed, but the close hasn't reached the queue yet
-		const result = queue.answerOldest();
-		assert.equal(result.ok, false);
-		if (!result.ok) assert.equal(result.why, "gone");
-		assert.deepEqual(next.sent, [], "the press doesn't fall through to the next request");
-		assert.equal(queue.size, 1);
+		const a = held.hold(req("A"), gone);
+		held.hold(req("B"), next);
+		gone.open = false;
+		const result = held.press(a.id, "allow");
+		assert.deepEqual(result.ok === false && result.why, "gone");
+		assert.deepEqual(next.sent, []);
+		assert.equal(held.size, 1);
 	});
 
-	test("nothing held: nothing answered", () => {
-		assert.deepEqual(new HeldQueue().answerOldest(), { ok: false, why: "empty", req: null });
+	test("release answers no decision; close removes without an answer", () => {
+		const log = new RecordingLog();
+		const held = new HeldRequests({ log });
+		const r1 = new FakeResponder();
+		const r2 = new FakeResponder();
+		const a = held.hold(req("A"), r1);
+		const b = held.hold(req("B"), r2);
+		assert.equal(held.release(a.id, "rule 1")?.id, a.id);
+		assert.deepEqual(r1.sent, [{ status: 200, body: "{}" }]);
+		r2.open = false;
+		assert.equal(held.close(b.id)?.id, b.id);
+		assert.equal(held.release(b.id, "again"), null, "a request that's gone can't be released");
+		assert.equal(held.size, 0);
+		assert.ok(log.at("info").some((l) => /RELEASED #1 "A": rule 1; 1 held/.test(l)), log.at("info").join("\n"));
 	});
 
-	test("describeBody reads only string tool_name and session_id from an object", () => {
-		assert.deepEqual(describeBody({ tool_name: "Bash", session_id: "x" }), { toolName: "Bash", sessionId: "x" });
-		assert.deepEqual(describeBody({ tool_name: 7, session_id: "" }), { toolName: null, sessionId: null });
-		assert.deepEqual(describeBody(null), { toolName: null, sessionId: null });
-		assert.deepEqual(describeBody("Bash"), { toolName: null, sessionId: null });
+	test("nothing held: a press does nothing", () => {
+		assert.deepEqual(new HeldRequests().press(null, "allow"), { ok: false, why: "empty", held: null });
+	});
+
+	test("a request's session can be filled in later", () => {
+		const held = new HeldRequests();
+		const h = held.hold(req("A", { host: null }), new FakeResponder());
+		held.setHost(h.id, "local_x");
+		assert.equal(held.forHost("local_x").length, 1);
 	});
 });

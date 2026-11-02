@@ -1,18 +1,36 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 
+import { isObj, type Obj, ROUTES } from "../protocol/wire.js";
 import { describeError, type Log, nullLog, quote, redacting, scrub } from "../util/log.js";
-import { allowedHosts, BRIDGE_HOST, MAX_BODY_BYTES, PERMISSION_PATH } from "./config.js";
-import type { HeldQueue, Responder } from "./held.js";
+import type { PollReply } from "./commands.js";
+import { allowedHosts, BRIDGE_HOST, MAX_BODY_BYTES } from "./config.js";
 import { checkBearer } from "./token.js";
 
 export type BridgeState = "starting" | "listening" | "retrying" | "stopped";
+
+/** A route's answer: a status, and a JSON body unless the status is 204. */
+export type RouteAnswer = { status: number; body?: unknown };
+
+/**
+ * What the bridge does with each route, once the Host, the token, the method and the body have passed.
+ * The deck's session model implements it (src/model/sessions.ts). `permission` and `next` may hold their
+ * request; the others answer at once.
+ */
+export interface BridgeRoutes {
+	/** `POST /v1/permission`: the hook's input, and the `X-Deck-Host` header as sent. */
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void;
+	hello(body: Obj): RouteAnswer;
+	events(body: Obj): RouteAnswer;
+	next(query: URLSearchParams, reply: PollReply): void;
+	result(body: Obj): RouteAnswer;
+}
 
 export type BridgeOptions = {
 	/** BRIDGE_PORT in the plugin; 0 (any free port) in tests. */
 	port: number;
 	host?: string;
 	token: string;
-	queue: HeldQueue;
+	routes: BridgeRoutes;
 	log?: Log;
 	maxBodyBytes?: number;
 	/** Node's server options, for tests that shorten its timeouts. */
@@ -22,11 +40,19 @@ export type BridgeOptions = {
 /** Listen retries back off from 1 s to 30 s: the port may be busy, and macOS 26 can refuse loopback for a while after boot. */
 const RETRY_MS = [1000, 2000, 5000, 10_000, 30_000];
 
+const METHODS: Record<string, "GET" | "POST"> = {
+	[ROUTES.permission]: "POST",
+	[ROUTES.hello]: "POST",
+	[ROUTES.events]: "POST",
+	[ROUTES.next]: "GET",
+	[ROUTES.result]: "POST",
+};
+
 /**
- * The bridge: HTTP on 127.0.0.1. Every request must name an allowed Host (else 403) and carry
- * `Authorization: Bearer <token>` (else 401). `POST /permission` with a JSON body is held in the queue until a
- * key press answers it, or until its client goes away. The token is never logged, nor is any header that
- * might hold it.
+ * The bridge: HTTP/1.1 on 127.0.0.1 (PROTOCOL.md, Transport). In order: a Host other than 127.0.0.1:<port> or
+ * localhost:<port> gets 403; a missing or wrong bearer token 401; an unknown route 404; a wrong method 405; a
+ * body over the limit 413; a body that isn't JSON 400. Error answers are `{"error": "<reason>"}`. No CORS
+ * headers. The token is never logged, nor is any header that might hold it.
  */
 export class BridgeServer {
 	readonly #opts: Required<Omit<BridgeOptions, "http">> & { http: http.ServerOptions };
@@ -36,13 +62,14 @@ export class BridgeServer {
 	#port: number | null = null;
 	#retry = 0;
 	#retryTimer: ReturnType<typeof setTimeout> | null = null;
+	#routed = 0;
 
 	constructor(opts: BridgeOptions) {
 		this.#opts = {
 			port: opts.port,
 			host: opts.host ?? BRIDGE_HOST,
 			token: opts.token,
-			queue: opts.queue,
+			routes: opts.routes,
 			// Belt and braces: the token can't reach the log even if a client puts it in a path.
 			log: redacting(opts.log ?? nullLog, opts.token),
 			maxBodyBytes: opts.maxBodyBytes ?? MAX_BODY_BYTES,
@@ -57,6 +84,11 @@ export class BridgeServer {
 	/** The port it listens on, once listening. */
 	get port(): number | null {
 		return this.#port;
+	}
+
+	/** How many requests reached a route so far. The fixture runner waits on it to keep requests in order. */
+	get routed(): number {
+		return this.#routed;
 	}
 
 	onState(listener: (state: BridgeState) => void): () => void {
@@ -107,7 +139,7 @@ export class BridgeServer {
 		);
 	}
 
-	/** Stops listening and drops every connection, held ones included, without an answer. Tests use this. */
+	/** Stops listening and drops every connection, held ones included, without an answer. */
 	async stop(): Promise<void> {
 		if (this.#retryTimer !== null) clearTimeout(this.#retryTimer);
 		this.#retryTimer = null;
@@ -129,9 +161,9 @@ export class BridgeServer {
 	}
 
 	#makeServer(): http.Server {
-		const server = http.createServer(
+		return http.createServer(
 			{
-				// Bodies arrive at once from a local hook. These bound only receiving a request; a request that has
+				// Bodies arrive at once from a local client. These bound only receiving a request; a request that has
 				// arrived and is held isn't subject to them (test/server.test.ts checks that).
 				headersTimeout: 10_000,
 				requestTimeout: 30_000,
@@ -139,25 +171,28 @@ export class BridgeServer {
 			},
 			(req, res) => this.#handle(req, res),
 		);
-		return server;
 	}
 
 	/**
 	 * Text from a client, made fit for the log: the token replaced before anything is cut short (a cut token
 	 * would no longer match), then quoted and cut.
 	 */
-	#show(text: string | null | undefined, max = 60): string {
-		return quote(text === null || text === undefined ? text : scrub(text, this.#opts.token), max);
+	#show(value: string | null | undefined, max = 60): string {
+		return quote(value === null || value === undefined ? value : scrub(value, this.#opts.token), max);
 	}
 
 	#handle(req: IncomingMessage, res: ServerResponse): void {
-		const { log, token } = this.#opts;
+		const { log, token, routes } = this.#opts;
 		// Node's parser only lets through methods it knows, so the method is safe to log as it is.
 		const method = req.method ?? "?";
-		const target = (req.url ?? "").split("?")[0] ?? "";
+		const url = req.url ?? "";
+		const q = url.indexOf("?");
+		const target = q < 0 ? url : url.slice(0, q);
+		const queryString = q < 0 ? "" : url.slice(q + 1);
 		const what = `${method} ${this.#show(target)}`;
-		const reject = (status: number, why: string, headers: Record<string, string> = {}): void => {
+		const refuse = (status: number, why: string, headers: Record<string, string> = {}): void => {
 			log.info(`REQ ${status} ${what}: ${why}`);
+			// The reason stays in the log: the answer names only the status, never echoing what the client sent.
 			reply(res, status, { error: http.STATUS_CODES[status] ?? "error" }, headers);
 			// Drop the rest of any body without reading it.
 			req.resume();
@@ -166,20 +201,28 @@ export class BridgeServer {
 		const host = req.headers.host;
 		const port = this.#port ?? this.#opts.port;
 		if (host === undefined || !allowedHosts(port).includes(host.toLowerCase())) {
-			reject(403, `Host ${this.#show(host)} isn't 127.0.0.1:${port} or localhost:${port}`);
+			refuse(403, `Host ${this.#show(host)} isn't 127.0.0.1:${port} or localhost:${port}`);
 			return;
 		}
 		const auth = checkBearer(req.headers.authorization, token);
 		if (auth !== "ok") {
-			reject(401, auth === "missing" ? "no token" : "wrong token", { "www-authenticate": 'Bearer realm="streamdeck"' });
+			refuse(401, auth === "missing" ? "no token" : "wrong token", { "www-authenticate": 'Bearer realm="streamdeck"' });
 			return;
 		}
-		if (target !== PERMISSION_PATH) {
-			reject(404, "no such route");
+		const allowed = METHODS[target];
+		if (allowed === undefined) {
+			refuse(404, "no such route");
 			return;
 		}
-		if (method !== "POST") {
-			reject(405, "only POST", { allow: "POST" });
+		if (method !== allowed) {
+			refuse(405, `only ${allowed}`, { allow: allowed });
+			return;
+		}
+
+		if (target === ROUTES.next) {
+			req.resume();
+			this.#routed++;
+			this.#guard(what, res, () => routes.next(new URLSearchParams(queryString), this.#heldReply(req, res)));
 			return;
 		}
 
@@ -187,46 +230,78 @@ export class BridgeServer {
 			(text) => {
 				let body: unknown;
 				try {
-					// Only tool_name and session_id are kept from the body, and only for the key and the log; with
-					// the token taken out first, nothing cut from it later can carry part of the token.
+					// With the token taken out first, nothing cut from the body later (a tool's summary on a key, a line
+					// in the log) can carry part of it.
 					body = JSON.parse(scrub(text, token));
 				} catch {
-					reject(400, `the body isn't JSON (${Buffer.byteLength(text)} bytes)`);
+					refuse(400, `the body isn't JSON (${Buffer.byteLength(text)} bytes)`);
 					return;
 				}
-				this.#hold(req, res, body);
+				if (target === ROUTES.permission) {
+					const deckHost = req.headers["x-deck-host"];
+					this.#routed++;
+					this.#guard(what, res, () => routes.permission(body, typeof deckHost === "string" ? deckHost : undefined, this.#heldReply(req, res)));
+					return;
+				}
+				if (!isObj(body)) {
+					refuse(400, "the body isn't a JSON object");
+					return;
+				}
+				const obj = body;
+				this.#routed++;
+				this.#guard(what, res, () => {
+					const answer = target === ROUTES.hello ? routes.hello(obj) : target === ROUTES.events ? routes.events(obj) : routes.result(obj);
+					if (answer.status >= 400) log.info(`REQ ${answer.status} ${what}: ${JSON.stringify(answer.body ?? null)}`);
+					else log.debug(`REQ ${answer.status} ${what}`);
+					reply(res, answer.status, answer.body, {});
+				});
 			},
 			(err: unknown) => {
-				if (err instanceof TooLarge) reject(413, `the body is over ${this.#opts.maxBodyBytes} bytes`);
+				if (err instanceof TooLarge) refuse(413, `the body is over ${this.#opts.maxBodyBytes} bytes`);
 				else log.info(`REQ ${what}: the client went away while sending its body (${describeError(err).split("\n")[0]})`);
 			},
 		);
 	}
 
-	#hold(req: IncomingMessage, res: ServerResponse, body: unknown): void {
-		const { log, queue } = this.#opts;
+	/** Runs a route; a route that throws gets a 500 for its client and a log line, and the bridge carries on. */
+	#guard(what: string, res: ServerResponse, run: () => void): void {
+		try {
+			run();
+		} catch (err) {
+			this.#opts.log.error(`${what} failed: ${describeError(err)}`);
+			reply(res, 500, { error: "internal error" }, {});
+		}
+	}
+
+	/** The answer handle for a request a route may hold. */
+	#heldReply(req: IncomingMessage, res: ServerResponse): PollReply {
 		let answered = false;
-		const responder: Responder = {
+		const onClose: (() => void)[] = [];
+		const closed = (): void => {
+			if (answered) return;
+			answered = true;
+			for (const fn of onClose.splice(0)) fn();
+		};
+		res.once("close", closed);
+		return {
 			get open() {
 				return !answered && !res.writableEnded && !res.destroyed && !req.socket.destroyed;
 			},
 			send(status, text) {
+				if (answered) return;
 				answered = true;
+				onClose.length = 0;
+				if (res.destroyed || res.headersSent) return;
 				res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
 				res.end(text);
 			},
+			onClose(fn) {
+				if (answered) return;
+				onClose.push(fn);
+				// The client may already be gone, before the listener was in place.
+				if (req.socket.destroyed) closed();
+			},
 		};
-		const held = queue.hold(body, responder);
-		const label = `#${held.id} ${held.toolName === null ? "(no tool_name)" : this.#show(held.toolName).slice(1, -1)}`;
-		log.info(`HELD ${label} session ${this.#show(held.sessionId)}; ${queue.size} held`);
-
-		const onClose = (): void => {
-			if (answered) return;
-			if (queue.close(held.id)) log.info(`CLOSED ${label}: the client closed first; removed; ${queue.size} held`);
-		};
-		res.once("close", onClose);
-		// The client may already be gone, before the listener was in place.
-		if (req.socket.destroyed) onClose();
 	}
 }
 
@@ -261,6 +336,11 @@ function readBody(req: IncomingMessage, max: number): Promise<string> {
 
 function reply(res: ServerResponse, status: number, body: unknown, headers: Record<string, string>): void {
 	if (res.headersSent || res.destroyed) return;
+	if (status === 204 || body === undefined) {
+		res.writeHead(status, headers);
+		res.end();
+		return;
+	}
 	const text = JSON.stringify(body);
 	res.writeHead(status, { ...headers, "content-type": "application/json", "content-length": Buffer.byteLength(text) });
 	res.end(text);
