@@ -187,7 +187,7 @@ async function stubDeck(t, answer) {
   return { url: `http://127.0.0.1:${server.address().port}`, driver }
 }
 
-test("play: an Allow or Deny with anything Claude Code would apply fails at its reply, though the fixture's body is all in it", async (t) => {
+test("play: an answer to a permission request with anything beyond one of PROTOCOL.md's three fails at its reply, though the fixture's body is all in it", async (t) => {
   // The stub itself is sound: answering as PROTOCOL.md writes them, both fixtures pass.
   const exact = (key) => (key === 'deny' ? DENY : ALLOW)
   for (const name of ['approve', 'deny']) {
@@ -206,11 +206,17 @@ test("play: an Allow or Deny with anything Claude Code would apply fails at its 
     ['approve', (key, body) => adding(ALLOW, { updatedInput: { ...body.tool_input, content: 'five' } }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedInput: the deck never sends updatedInput/],
     // One whose Deny also writes a rule into the user's settings.
     ['deny', () => adding(DENY, { updatedPermissions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'rm -rf build' }], behavior: 'deny', destination: 'userSettings' }] }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedPermissions: the deck never sends updatedPermissions/],
+    // Fields of its own beside the decision: an answer to a permission request is exactly one of the three.
+    ['approve', () => ({ ...ALLOW, note: 'x' }), /^line \d+ \(reply\): p1: body\.note: not in any of PROTOCOL\.md's answers, got "x"/],
+    ['deny', () => ({ ...DENY, extra: { nested: 1 } }), /^line \d+ \(reply\): p1: body\.extra: not in any of PROTOCOL\.md's answers/],
+    // And beside no decision, where the line expects {}.
+    [altered('approve', `{"reply":{"to":"p1","status":200,"body":${ALLOW_TEXT}}}`, '{"reply":{"to":"p1","status":200,"body":{}}}'), () => ({ note: 'x' }), /^line \d+ \(reply\): p1: body\.note: not in any of PROTOCOL\.md's answers, got "x"/],
   ]
-  for (const [name, answer, why] of cases) {
+  for (const [fixture, answer, why] of cases) {
+    const fx = typeof fixture === 'string' ? readFixture(fixture) : fixture
     const { url, driver } = await stubDeck(t, answer)
-    const r = await play(readFixture(name), { url, token: 'stub', driver })
-    assert.equal(r.ok, false, `${name} should fail with ${why}`)
+    const r = await play(fx, { url, token: 'stub', driver })
+    assert.equal(r.ok, false, `${fx.name} should fail with ${why}`)
     assert.match(r.error, why)
   }
 })

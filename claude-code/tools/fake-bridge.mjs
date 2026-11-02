@@ -45,7 +45,9 @@ Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}
   approve [<id>]                 Approve: the oldest held request, as the key does. With an id, as
                                  a key that showed that request: it alerts if the oldest is another
   deny [<id>]                    Deny: the same
-  prompt <host> <text>           a Saved Prompt key: queues a prompt for that session (local_…)
+  prompt <host> <text>           the Saved Prompt key with that text: queues a prompt for that
+                                 session (local_…), or alerts while the key's last prompt is
+                                 still queued, delivered or waiting
   mode <host> <mode>             the Mode dial: ${MODES.join(', ')}
   rescan                         reads the registry and records now
   reset                          forgets everything: held requests get {}, polls no commands

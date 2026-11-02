@@ -6,7 +6,9 @@
 // fake). A failed request (no answer, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts an
 // outage: one log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is
 // answered, the poll starts again and the queued requests go out in order, a failed one again with its own seq.
-// Each hello opens an epoch, and a send or poll left over from an older one changes nothing when it settles.
+// The outage ends only when the request that began it goes through, so a bridge that answers hello and fails that
+// request again doesn't start the waits over. Each hello opens an epoch, and a send or poll left over from an older
+// one changes nothing when it settles.
 
 import { changed, type DeckEvent, type Settings } from './events'
 
@@ -79,6 +81,8 @@ export type Bridge = {
 
 type Phase = 'new' | 'boot' | 'off' | 'hello' | 'up' | 'down' | 'stopped'
 type Outgoing = { path: '/v1/events' | '/v1/result'; body: Record<string, unknown> }
+/** Where a request goes out: the hello, the long poll, or the line of events and results. */
+type Channel = 'hello' | 'poll' | 'line'
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -162,10 +166,14 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   let phase: Phase = 'new'
   /** Bumped by each hello and each failure: a loop of an older epoch stops, and what it hears changes nothing. */
   let epoch = 0
-  /** Failures since the last answered hello, which pick the next wait. */
+  /** Failures since the outage began, which pick the next wait. */
   let attempt = 0
-  /** Whether this outage has had its log line. */
-  let logged = false
+  /**
+   * The channel whose failed request began the outage, and had its one log line; undefined between outages. The
+   * outage and its waits end only when that request goes through (PROTOCOL.md, "Failure and recovery"): a hello
+   * answered alone ends only an outage a hello began.
+   */
+  let outage: Channel | undefined
   let retry: Timer | undefined
   /** The epoch whose sender is working through the queue, or -1. */
   let sending = -1
@@ -247,8 +255,9 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     await refreshSid()
     const [cwd, read, cc] = await Promise.all([quiet(host.cwd), quiet(host.model), quiet(host.version)])
     if (ep !== epoch) return
-    // The model as it is now, for a deck that restarted. `known` takes it only once the hello is answered.
-    const model = read !== undefined && read !== '' ? read : known.model
+    // The model as it is now, for a deck that restarted, or none when it can't be read (PROTOCOL.md, "Routes"): an
+    // older one isn't passed off as now's. `known` takes it only once the hello is answered.
+    const model = read !== undefined && read !== '' ? read : undefined
     const body = {
       v: PROTOCOL_VERSION,
       ...stamp(),
@@ -263,12 +272,12 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     try {
       res = await send('/v1/hello', JSON.stringify(body))
     } catch (err) {
-      if (ep === epoch) fail(describe(err, ids.token))
+      if (ep === epoch) fail('hello', describe(err, ids.token))
       return
     }
     if (ep !== epoch) return
     if (res === undefined) {
-      fail(`the hello had no answer after ${STALL_MS / 1000} s`)
+      fail('hello', `the hello had no answer after ${STALL_MS / 1000} s`)
       return
     }
     const answer = parse(res.text)
@@ -280,31 +289,33 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       stop(answer.v)
       return
     }
-    fail(res.ok ? "the hello wasn't answered ok" : `the hello was answered ${res.status}`)
+    fail('hello', res.ok ? "the hello wasn't answered ok" : `the hello was answered ${res.status}`)
   }
 
   function connected(ep: number, model: string | undefined): void {
     phase = 'up'
-    attempt = 0
-    logged = false
+    through('hello')
     // A deck that restarted may hand out its command ids again.
     ran.clear()
-    // The deck now has the hello's model, until a settings event still queued tells it one read before the hello.
-    // With none queued it ends on the hello's; either way the model is read again, and sent if it isn't the one
-    // the deck ends on.
-    if (model !== undefined && !queue.some(tellsModel)) known.model = model
+    // The deck now has the hello's model, or none if it restarted and the hello had none, until a settings event
+    // still queued tells it one read before the hello. With none queued it ends on the hello's; either way the model
+    // is read again, and sent if it isn't the one the deck ends on.
+    if (!queue.some(tellsModel)) known.model = model
     checkModel()
     void poll(ep)
     pump()
   }
 
-  /** A request failed in the current epoch: end the epoch, log once per outage, and hello again after a wait. */
-  function fail(why: string): void {
+  /**
+   * A request on `channel` failed in the current epoch: end the epoch, start an outage with its one log line unless
+   * one is on, and hello again after the outage's next wait.
+   */
+  function fail(channel: Channel, why: string): void {
     if (silent()) return
     epoch++
     phase = 'down'
-    if (!logged) {
-      logged = true
+    if (outage === undefined) {
+      outage = channel
       say(`The Stream Deck bridge at ${BRIDGE_URL} isn't answering (${why}); retrying in the background.`)
     }
     const wait = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)] ?? 30_000
@@ -314,6 +325,17 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       retry = undefined
       if (phase === 'down') void hello()
     })
+  }
+
+  /**
+   * A request on `channel` went through in the current epoch. If a failure there began the outage, the outage is
+   * over, and the next one logs and waits from 1 s again. The line resends its failed request first, so the first
+   * line request through after a hello is that one, unless MAX_QUEUED piled up behind it and pushed it out.
+   */
+  function through(channel: Channel): void {
+    if (outage !== channel) return
+    outage = undefined
+    attempt = 0
   }
 
   /** The deck speaks another protocol version: say so once, and stay quiet until the plugin reloads. */
@@ -357,20 +379,22 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
         try {
           res = await send(item.path, body)
         } catch (err) {
-          if (ep === epoch) fail(describe(err, ids.token))
+          if (ep === epoch) fail('line', describe(err, ids.token))
           return
         }
         if (ep !== epoch) return
         if (res === undefined) {
-          fail(`${item.path} had no answer after ${STALL_MS / 1000} s`)
+          fail('line', `${item.path} had no answer after ${STALL_MS / 1000} s`)
           return
         }
         if (res.status >= 500) {
-          fail(`${item.path} was answered ${res.status}`)
+          fail('line', `${item.path} was answered ${res.status}`)
           return
         }
-        // 2xx: delivered. 4xx: refused, and it would be refused again, so it's dropped too.
+        // 2xx: delivered. Any other answer under 500, such as a 4xx: refused, and it would be refused again, so it's
+        // dropped too. Either way the bridge took it and it's off the line: it went through.
         if (queue[0] === item) queue.shift()
+        through('line')
         if (!res.ok) refused(item.path, res.status)
       }
     } finally {
@@ -390,7 +414,7 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     while (phase === 'up' && ep === epoch) {
       let answered = false
       const stall = timer(STALL_MS, () => {
-        if (!answered && ep === epoch) fail(`a poll had no answer after ${STALL_MS / 1000} s`)
+        if (!answered && ep === epoch) fail('poll', `a poll had no answer after ${STALL_MS / 1000} s`)
       })
       let floorReached: () => void = () => {}
       const floor = new Promise<void>(resolve => {
@@ -404,7 +428,7 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
         answered = true
         stall?.cancel()
         soon?.cancel()
-        if (ep === epoch) fail(describe(err, ids.token))
+        if (ep === epoch) fail('poll', describe(err, ids.token))
         return
       }
       answered = true
@@ -414,9 +438,10 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       const delivered = res.ok ? deliver(res.text) : 0
       if (ep !== epoch || !res.ok) {
         soon?.cancel()
-        if (ep === epoch) fail(`a poll was answered ${res.status}`)
+        if (ep === epoch) fail('poll', `a poll was answered ${res.status}`)
         return
       }
+      through('poll')
       if (delivered === 0 && soon !== undefined) await floor
       else soon?.cancel()
     }

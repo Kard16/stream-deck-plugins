@@ -13,6 +13,11 @@ export class BadRequest extends Error {}
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
+/**
+ * A field PROTOCOL.md gives as a string, as sent, or null. Nothing else from a mod's body is kept: a value nested
+ * too deep would stop every later state from being written out.
+ */
+const asString = (v) => (typeof v === 'string' ? v : null)
 const IN_FLIGHT = new Set(['delivered', 'waiting'])
 const FINAL = new Set(FINAL_STATES)
 const RECENT_KEPT = 50
@@ -38,6 +43,8 @@ function newSession(host) {
     /** Unfinished tool calls by `use`, with the order they started in. */
     tools: new Map(),
     toolOrder: 0,
+    /** The tool.starts since the session's last turn end, for pairing with held requests by fp. */
+    fpStarts: [],
     /** The main loop's current or last turn: did the deck see it end, how, and did it fail. */
     turn: { sawEnd: false, lastEnd: null, failed: false },
     context: null,
@@ -76,8 +83,12 @@ export class FakeDeck {
   #held = []
   /** Requests that ended, newest last, so `answer` can say how one ended. */
   #recent = []
+  /** Held requests, ended or not, that no tool.start has paired with by fp yet. */
+  #fpWaiting = []
   /** id → command, in the order they were queued. */
   #commands = new Map()
+  /** A Saved Prompt key's text → the id of the last prompt it queued. */
+  #promptKeys = new Map()
   #lastPress = null
   #heldSeq = 0
   #cmdSeq = 0
@@ -85,8 +96,9 @@ export class FakeDeck {
 
   /**
    * Options: `now` (ms clock), `log(event)` (structured events; `say` is a line for people), `inFlightMs`
-   * (how long a delivered command waits for its final result), `cmdPrefix` (command ids are the prefix and a
-   * number: deliberately not the fixtures' `c1`, so the tests exercise binding), `setTimer`/`clearTimer`.
+   * (how long a delivered command waits for its final result, and a queued one for a poll), `cmdPrefix`
+   * (command ids are the prefix and a number: deliberately not the fixtures' `c1`, so the tests exercise
+   * binding), `setTimer`/`clearTimer`.
    */
   constructor({ now = Date.now, log = () => {}, inFlightMs = IN_FLIGHT_MS, cmdPrefix = 'cmd-', setTimer, clearTimer } = {}) {
     this.#now = now
@@ -145,18 +157,29 @@ export class FakeDeck {
     throw new BadRequest('the request names no session the bridge can place: give its host (local_…), or a sid the registry knows')
   }
 
-  /** PROTOCOL.md, Identity: a new inst forgets the session's current tool and fails its delivered and waiting commands. */
+  /**
+   * PROTOCOL.md, Identity: a new inst forgets the session's current tool, fails its delivered and waiting
+   * commands, and answers the old instance's open poll with no commands, so what's queued from then on waits for
+   * the new one.
+   */
   #modRestarted(s, inst) {
     s.tools.clear()
     for (const c of this.#commands.values()) {
       if (c.host === s.host && IN_FLIGHT.has(c.state)) this.#finish(c, 'failed', { error: 'the mod restarted' })
     }
+    this.#endPoll(s, [])
     this.#armPollGap(s)
     this.#log({ kind: 'mod-restart', host: s.host, from: s.inst, to: inst, say: `${s.host}: the mod restarted (inst ${s.inst} → ${inst})` })
+    this.#fpGiveUp(s, 'the mod restarted')
   }
 
   #heldOf(host, sid = this.#registry.get(host)?.sessionId) {
-    return this.#held.filter((h) => (host !== null && h.host === host) || (h.host === null && str(sid) && h.sid === sid))
+    return this.#held.filter((h) => this.#isOf(h, host, sid))
+  }
+
+  /** Whether held request `h` is the session's: by its host, or by its sid when it came without one. */
+  #isOf(h, host, sid) {
+    return (host !== null && h.host === host) || (h.host === null && Boolean(str(sid)) && h.sid === sid)
   }
 
   // ---- POST /v1/hello ------------------------------------------------------------------------------------
@@ -169,9 +192,10 @@ export class FakeDeck {
     }
     const s = this.#touchMod(b.sid, b.host, b.inst)
     if (!s) this.#unplaced('hello')
-    s.hello = { at: this.#now(), cwd: b.cwd ?? null, model: b.model ?? null, mode: b.mode ?? null, effort: b.effort ?? null, plugin: b.plugin ?? null, cc: b.cc ?? null }
+    const [cwd, model, mode, effort, plugin, cc] = [b.cwd, b.model, b.mode, b.effort, b.plugin, b.cc].map(asString)
+    s.hello = { at: this.#now(), cwd, model, mode, effort, plugin, cc }
     for (const k of ['model', 'mode', 'effort']) if (str(b[k])) s.settings[k] = b[k]
-    this.#log({ kind: 'hello', ok: true, host: s.host, inst: s.inst, plugin: b.plugin ?? null, cc: b.cc ?? null, model: b.model ?? null, say: `hello ${s.host} inst ${s.inst} (plugin ${b.plugin ?? '?'}, cc ${b.cc ?? '?'}, ${b.model ?? '?'})` })
+    this.#log({ kind: 'hello', ok: true, host: s.host, inst: s.inst, plugin, cc, model, say: `hello ${s.host} inst ${s.inst} (plugin ${plugin ?? '?'}, cc ${cc ?? '?'}, ${model ?? '?'})` })
     return { v: VERSION, ok: true }
   }
 
@@ -182,18 +206,22 @@ export class FakeDeck {
     const s = this.#touchMod(b.sid, b.host, b.inst)
     if (!s) this.#unplaced('events')
     if (Number.isFinite(b.seq)) {
-      const last = s.seq.get(b.inst) ?? 0
+      // By the inst as a string, as every inst the deck keeps: any other value would be a key the state can't write.
+      const inst = str(b.inst)
+      const last = s.seq.get(inst) ?? 0
       if (b.seq <= last) {
         this.#log({ kind: 'events', host: s.host, seq: b.seq, dropped: true, say: `${s.host}: events seq ${b.seq} dropped (last ${last})` })
         return
       }
-      s.seq.set(b.inst, b.seq)
+      s.seq.set(inst, b.seq)
     }
     for (const e of Array.isArray(b.events) ? b.events : []) if (isObject(e)) this.#event(s, e)
   }
 
   #event(s, e) {
-    const main = e.agent === undefined || e.agent === null
+    // The engine's agentId, on a subagent's events. One that isn't a string counts as missing, as the deck reads it.
+    const agent = str(e.agent)
+    const main = agent === null
     switch (e.t) {
       case 'turn.start':
         if (main) {
@@ -206,18 +234,22 @@ export class FakeDeck {
           s.turn.sawEnd = true
           s.turn.lastEnd = str(e.reason)
           this.#clearMainTools(s)
+          this.#fpGiveUp(s, 'the turn ended')
         }
         break
       case 'failed':
-        s.turn.sawEnd = true
-        s.turn.failed = true
-        this.#clearMainTools(s)
+        if (main) {
+          s.turn.sawEnd = true
+          s.turn.failed = true
+          this.#clearMainTools(s)
+          this.#fpGiveUp(s, 'the turn ended')
+        }
         break
       case 'tool.start':
         if (str(e.use)) {
-          s.tools.set(e.use, { tool: str(e.tool), summary: str(e.summary) ?? str(e.tool), fp: str(e.fp), agent: e.agent ?? null, order: ++s.toolOrder })
+          s.tools.set(e.use, { tool: str(e.tool), summary: str(e.summary) ?? str(e.tool), fp: str(e.fp), agent, order: ++s.toolOrder })
         }
-        this.#fpCheckFromTool(s, e)
+        this.#fpFromTool(s, e)
         break
       case 'tool.end':
         if (str(e.use)) s.tools.delete(e.use)
@@ -257,41 +289,65 @@ export class FakeDeck {
     if (h) this.#release(h, 1, 'tool.end with the same fp')
   }
 
-  /**
-   * Ladder step 4 compares both sides' fingerprints (PROTOCOL.md, "Fingerprints and summaries"). A held
-   * request and the mod's tool.start for the same tool in the same session should carry the same fp and
-   * summary; whichever comes second logs the comparison.
-   */
-  #fpCheck(h, t) {
-    h.fpChecked = true
+  // ---- fingerprints --------------------------------------------------------------------------------------
+  //
+  // Ladder step 4 compares both sides' fingerprints (PROTOCOL.md, "Fingerprints and summaries"): a held request
+  // and the mod's tool.start for the same call should carry the same fp and summary. A request pairs with a
+  // tool.start of its session's with its tool and fp, whichever of the two comes second. One that finds none
+  // waits: its own tool.start may still be on the mod's line, behind a parallel call of the same tool. It's
+  // given up only when the session's turn ends, since every tool.start of the turn has come by then (or its mod
+  // restarts, its session ends, the bridge resets). Then it's a mismatch when it can pair only one way, with the
+  // turn's one call of its tool that paired with nothing, and no other request waiting for one; else unpaired.
+
+  /** A held request: pairs with a tool.start of the session's that has its tool and fp, or waits. */
+  #fpFromHeld(h, s) {
+    const t = s?.fpStarts.find((x) => !x.paired && x.tool === h.tool && x.fp === h.fp)
+    if (t) this.#fpCheck(h, t)
+    else this.#fpWaiting.push(h)
+  }
+
+  /** A tool.start: pairs with the session's oldest waiting request that has its tool and fp. */
+  #fpFromTool(s, e) {
+    const t = { tool: str(e.tool), fp: str(e.fp), summary: str(e.summary), paired: false }
+    s.fpStarts.push(t)
+    const h = this.#fpWaiting.find((x) => this.#isOf(x, s.host, s.sid) && x.tool === t.tool && x.fp === t.fp)
+    if (!h) return
+    this.#fpWaiting.splice(this.#fpWaiting.indexOf(h), 1)
+    this.#fpCheck(h, t)
+  }
+
+  /** The session's waiting requests, once no more of their tool.starts can come: a mismatch, or unpaired. */
+  #fpGiveUp(s, why) {
+    const waiting = this.#fpWaiting.filter((h) => this.#isOf(h, s.host, s.sid))
+    this.#fpWaiting = this.#fpWaiting.filter((h) => !waiting.includes(h))
+    const calls = s.fpStarts.filter((t) => !t.paired)
+    s.fpStarts = []
+    // A session without the plugin has no tool.starts to compare.
+    if (!s.plugin) return
+    for (const h of waiting) {
+      const its = calls.filter((t) => t.tool === h.tool)
+      const requests = waiting.filter((x) => x.tool === h.tool).length
+      this.#fpCheck(h, its.length === 1 && requests === 1 ? its[0] : null, { why, calls: its, requests })
+    }
+  }
+
+  /** Logs the comparison: with `t` the tool.start paired with `h`, or with none when it can't tell which it was. */
+  #fpCheck(h, t, { why = null, calls = [], requests = 0 } = {}) {
+    const base = { kind: 'fp-check', request: h.id, host: h.host, tool: h.tool, bridgeFp: h.fp, bridgeSummary: h.summary, ...(why ? { why } : {}) }
+    if (!t) {
+      const left = calls.length ? `${calls.length} call(s) of it unpaired for ${requests} request(s), so it can't tell which was its own` : 'no other call of it came either'
+      this.#log({
+        ...base, match: null, unpaired: true, modFp: null, modSummary: null, calls: calls.map(({ fp, summary }) => ({ fp, summary })),
+        say: `${h.id} fp unpaired (${h.tool}) when ${why}: no tool.start had its fp; ${left}`,
+      })
+      return
+    }
+    t.paired = true
     const match = h.fp === t.fp
     this.#log({
-      kind: 'fp-check', request: h.id, host: h.host, tool: h.tool, match,
-      bridgeFp: h.fp, modFp: t.fp ?? null, bridgeSummary: h.summary, modSummary: t.summary ?? null,
+      ...base, match, modFp: t.fp, modSummary: t.summary,
       say: `${h.id} fp ${match ? 'matches' : `differs: bridge ${h.fp}, mod ${t.fp}`} (${h.tool})`,
     })
-  }
-
-  // Parallel calls of one tool are unfinished at once, so each side pairs with the other's call that has its fp
-  // when there is one, and only then with the nearest call of the same tool, whose fp may truly differ.
-
-  #fpCheckFromTool(s, e) {
-    const unchecked = this.#heldOf(s.host, s.sid).filter((x) => !x.fpChecked && x.tool === e.tool)
-    const h = unchecked.find((x) => x.fp === str(e.fp)) ?? unchecked[0]
-    if (h) this.#fpCheck(h, { fp: str(e.fp), summary: str(e.summary) })
-  }
-
-  #fpCheckFromHeld(h, s) {
-    if (!s) return
-    let latest = null
-    let same = null
-    for (const t of s.tools.values()) {
-      if (t.tool !== h.tool) continue
-      if (latest === null || t.order > latest.order) latest = t
-      if (t.fp === h.fp && (same === null || t.order > same.order)) same = t
-    }
-    const t = same ?? latest
-    if (t) this.#fpCheck(h, t)
   }
 
   // ---- POST /v1/permission -------------------------------------------------------------------------------
@@ -330,11 +386,11 @@ export class FakeDeck {
     const kind = ASK_TOOLS.includes(tool) ? 'ask' : 'tool'
     const h = {
       id: `p${++this.#heldSeq}`, host, sid, tool, kind, summary: sum, fp,
-      arrived: this.#now(), seenWaiting: false, fpChecked: false, responder,
+      arrived: this.#now(), seenWaiting: false, responder,
     }
     this.#held.push(h)
     this.#log({ kind: 'held', id: h.id, host, sid, tool, requestKind: kind, summary: sum, fp, say: `${h.id} HELD ${kind} ${host ?? `(no host, sid ${sid ?? '?'})`} ${tool}: ${sum} fp ${fp}` })
-    this.#fpCheckFromHeld(h, s)
+    this.#fpFromHeld(h, s)
     return { kind, id: h.id }
   }
 
@@ -456,6 +512,7 @@ export class FakeDeck {
 
   #deliver(cmds, s) {
     for (const c of cmds) {
+      this.#clearTimer(c.timer)
       c.state = 'delivered'
       c.deliveredAt = this.#now()
       c.inst = s.inst
@@ -502,7 +559,7 @@ export class FakeDeck {
       return
     }
     if (!FINAL.has(b.state)) return ignore(`unknown state ${JSON.stringify(b.state)}`)
-    this.#finish(c, b.state, { error: b.error ?? null, detail: b.detail ?? null })
+    this.#finish(c, b.state, { error: asString(b.error), detail: asString(b.detail) })
     this.#armPollGap(s)
   }
 
@@ -542,13 +599,21 @@ export class FakeDeck {
     return null
   }
 
-  /** A Saved Prompt key: queues a prompt for `host`. */
+  /**
+   * A Saved Prompt key, known by its text: queues a prompt for `host`. PROTOCOL.md, "Commands": while the
+   * last prompt the key queued is still queued, delivered or waiting, another press alerts and queues nothing.
+   */
   prompt({ host, text }) {
     if (typeof host !== 'string' || host === '') throw new BadRequest('host must be a session host (local_…)')
     if (typeof text !== 'string' || text === '') throw new BadRequest('text must be a non-empty string')
+    const last = this.#commands.get(this.#promptKeys.get(text))
+    if (last && !FINAL.has(last.state)) {
+      return this.#pressed({ key: 'prompt', session: host, alert: true, error: `the key's last prompt, ${last.id} for ${last.host}, is still ${last.state}` })
+    }
     const why = this.#cannotSend(host)
     if (why) return this.#pressed({ key: 'prompt', session: host, alert: true, error: why })
     const c = this.#queue(host, { t: 'prompt', text })
+    this.#promptKeys.set(text, c.id)
     return this.#pressed({ key: 'prompt', session: host, cmd: c.id })
   }
 
@@ -568,6 +633,10 @@ export class FakeDeck {
       deliveredAt: null, finishedAt: null, inst: null, error: null, detail: null, allowedRequest: false, timer: null,
     }
     this.#commands.set(c.id, c)
+    // PROTOCOL.md, "Commands": one that no poll takes in time fails, so a key waiting on it can't stay locked.
+    c.timer = this.#setTimer(() => {
+      if (c.state === 'queued') this.#finish(c, 'failed', { error: 'not delivered' })
+    }, this.#inFlightMs)
     this.#log({ kind: 'command', id: c.id, host, state: 'queued', t: c.t, say: `${c.id} queued for ${host}: ${c.t} ${c.t === 'prompt' ? JSON.stringify(c.text) : c.mode}` })
     const s = this.#sessions.get(host)
     if (s?.poll && s.poll.responder.open) {
@@ -607,9 +676,12 @@ export class FakeDeck {
   /**
    * A new reading of the registry: the kept fields of every file. Applies release rules 2 to 4.
    *
-   * Rule 2's "held from before that change" is judged by what the bridge itself saw: the request was held
-   * when a reading showed the session `waiting`. Comparing its arrival with `statusUpdatedAt` instead would
-   * mix the bridge's clock with the registry's, which differ in the fixtures (their times are made up).
+   * Rules 2 and 3 are judged by what the bridge itself saw, as PROTOCOL.md lets a fake bridge. Rule 2's "held
+   * from before that change": the request was held when a reading showed the session `waiting`. Rule 3: a
+   * reading shows the session `idle` and the one before showed it otherwise, so the change came after every
+   * request held now arrived; a session's first reading is no change. Comparing arrivals with
+   * `statusUpdatedAt` instead would mix the bridge's clock with the registry's, which differ in the fixtures
+   * (their times are made up).
    */
   applyRegistry(entries) {
     const next = new Map()
@@ -643,12 +715,9 @@ export class FakeDeck {
       }
     }
     for (const [host, f] of next) {
-      if (f.status !== 'idle') continue
-      // Without statusUpdatedAt, the change to idle is this reading's, if it saw one: after every request held now.
-      const sawChange = prev.get(host)?.status !== 'idle'
-      for (const h of this.#heldOf(host, f.sessionId)) {
-        if (Number.isFinite(f.statusUpdatedAt) ? f.statusUpdatedAt > h.arrived : sawChange) this.#release(h, 3, 'the registry shows the session idle since after it arrived')
-      }
+      const before = prev.get(host)
+      if (f.status !== 'idle' || !before || before.status === 'idle') continue
+      for (const h of this.#heldOf(host, f.sessionId)) this.#release(h, 3, 'the registry shows the session turning idle since it arrived')
     }
     for (const [host, f] of next) {
       if (f.status === 'waiting') for (const h of this.#heldOf(host, f.sessionId)) h.seenWaiting = true
@@ -667,6 +736,7 @@ export class FakeDeck {
     if (!s) return
     this.#endPoll(s, [])
     this.#clearTimer(s.gapTimer)
+    this.#fpGiveUp(s, 'the session ended')
     this.#sessions.delete(host)
   }
 
@@ -786,8 +856,10 @@ export class FakeDeck {
 
   /** Forgets everything but the id counters (command ids stay unique for the bridge's run). */
   reset(why = 'reset') {
-    for (const h of [...this.#held]) this.#release(h, why, `the bridge was ${why === 'reset' ? 'reset' : 'shut down'}`)
+    const what = `the bridge was ${why === 'reset' ? 'reset' : 'shut down'}`
+    for (const h of [...this.#held]) this.#release(h, why, what)
     for (const s of this.#sessions.values()) {
+      this.#fpGiveUp(s, what)
       this.#clearTimer(s.gapTimer)
       if (!s.poll) continue
       this.#clearTimer(s.poll.timer)
@@ -795,8 +867,10 @@ export class FakeDeck {
       s.poll = null
     }
     for (const c of this.#commands.values()) this.#clearTimer(c.timer)
+    this.#fpWaiting = []
     this.#sessions.clear()
     this.#commands.clear()
+    this.#promptKeys.clear()
     this.#registry = new Map()
     this.#registryBySid = new Map()
     this.#records.clear()

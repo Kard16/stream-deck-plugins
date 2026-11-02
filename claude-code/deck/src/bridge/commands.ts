@@ -36,11 +36,12 @@ export interface PollReply extends Responder {
 }
 
 /**
- * A delivered command without a final result counts as failed, with "no result", after this long (PROTOCOL.md,
- * Commands), unless it's a prompt the mod said it's waiting with: the engine holds a prompt until the session's
- * turn ends, which can take far longer than this. Such a prompt ends with its final result, the mod's restart
- * or the session's end instead, or fails with "no result" once its session has gone this long without an open
- * poll, since a live mod always keeps one open.
+ * The protocol's 60 s (PROTOCOL.md, Commands). A queued command that no poll has taken this long after it was
+ * queued counts as failed, with "not delivered": the session's mod isn't polling. A delivered command without a
+ * final result counts as failed, with "no result", this long after delivery, unless it's a prompt the mod said
+ * it's waiting with: the engine holds a prompt until the session's turn ends, which can take far longer than
+ * this. Such a prompt ends with its final result, the mod's restart or the session's end instead, or fails with
+ * "no result" once its session has gone this long without an open poll, since a live mod always keeps one open.
  */
 export const IN_FLIGHT_MS = 60_000;
 
@@ -54,8 +55,9 @@ type Unpolled = { since: number; timer: TimerHandle | null };
 
 /**
  * The commands the deck queues for sessions when the user presses a key, and the mod's long polls for them.
- * One open poll per session; a command answered to a poll is in flight until its final result, or for 60 s
- * without one, a limit a prompt's `waiting` lifts for as long as its session keeps a poll open.
+ * One open poll per session. A queued command waits up to 60 s for a poll to take it; a command answered to a
+ * poll is in flight until its final result, or for 60 s without one, a limit a prompt's `waiting` lifts for as
+ * long as its session keeps a poll open.
  */
 export class CommandQueue {
 	readonly #clock: Clock;
@@ -98,6 +100,8 @@ export class CommandQueue {
 		this.#commands.set(cmd.id, cmd);
 		this.#log.info(`QUEUED ${cmd.id} ${describe(cmd)} for ${host}`);
 		this.#prune();
+		// Until a poll takes it. That frees a Saved Prompt key waiting on it when the session's mod isn't polling.
+		this.#limit(cmd, "not delivered");
 		const poll = this.#polls.get(host);
 		if (poll) {
 			this.#endPoll(poll);
@@ -181,13 +185,22 @@ export class CommandQueue {
 		return null;
 	}
 
-	/** The mod restarted (a new `inst`): its in-flight commands are lost, so they fail. Queued ones stay queued. */
-	forgetInFlight(host: string, why: string): void {
+	/**
+	 * The mod restarted, as instance `inst`: its delivered and waiting commands are lost, so they fail, and queued
+	 * ones stay queued. A poll the old instance left open is answered with none, so commands queued from now on
+	 * wait for the new instance's poll.
+	 */
+	restarted(host: string, inst: string, why: string): void {
 		let any = false;
 		for (const cmd of this.#commands.values()) {
 			if (cmd.host !== host || (cmd.state !== "delivered" && cmd.state !== "waiting")) continue;
 			this.#fail(cmd, why);
 			any = true;
+		}
+		const poll = this.#polls.get(host);
+		if (poll && poll.inst !== inst) {
+			this.#endPoll(poll);
+			send(poll.reply, []);
 		}
 		this.#watchPolls(host);
 		if (any) this.#emit();
@@ -278,21 +291,31 @@ export class CommandQueue {
 			cmd.state = "delivered";
 			cmd.inst = inst;
 			cmd.deliveredAt = now;
-			this.#timers.set(
-				cmd.id,
-				this.#clock.setTimeout(() => {
-					this.#timers.delete(cmd.id);
-					if (cmd.state !== "delivered" && cmd.state !== "waiting") return;
-					this.#fail(cmd, "no result");
-					this.#emit();
-				}, this.#inFlightMs),
-			);
+			this.#limit(cmd, "no result");
 		}
 		send(reply, cmds);
 		if (cmds.length > 0) {
 			this.#log.info(`DELIVERED ${cmds.map((c) => c.id).join(", ")} to ${host}`);
 			this.#emit();
 		}
+	}
+
+	/**
+	 * Fails the command with `why` IN_FLIGHT_MS from now, in place of any limit it had. Each step that changes
+	 * the limit sets or stops this timer: delivery sets "no result", a prompt's `waiting` stops it, and so does
+	 * a final state.
+	 */
+	#limit(cmd: Command, why: string): void {
+		this.#stopTimer(cmd.id);
+		this.#timers.set(
+			cmd.id,
+			this.#clock.setTimeout(() => {
+				this.#timers.delete(cmd.id);
+				if (FINAL_STATES.has(cmd.state)) return;
+				this.#fail(cmd, why);
+				this.#emit();
+			}, this.#inFlightMs),
+		);
 	}
 
 	#fail(cmd: Command, why: string): void {

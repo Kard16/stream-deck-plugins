@@ -1,6 +1,6 @@
 // The mod with the bridge down, gone, stuck or on another version (PROTOCOL.md, "Failure and recovery"): it backs
-// off 1, 2, 5, 10 and 30 s, then every 30 s, logs once per outage, says hello again when the bridge answers, and
-// never holds up the session. The clock is the kit's mock, so the waits are exact.
+// off 1, 2, 5, 10 and 30 s, then every 30 s, with a hello each time, until the request that failed goes through;
+// it logs once per outage, and never holds up the session. The clock is the kit's mock, so the waits are exact.
 
 import { expect, test } from 'claude-code/testing'
 import { HOST, MODEL, START, TOKEN, world } from './world'
@@ -21,7 +21,7 @@ test("without DECK_TOKEN the mod sends nothing, says so once in the log, and pas
   expect(w.logs[0]).toMatch(/DECK_TOKEN/)
 })
 
-test('with the bridge down from the start, hello backs off 1, 2, 5, 10 and 30 s, then every 30 s, and logs once', async ($, on) => {
+test('with the bridge down from the start, hello backs off 1, 2, 5, 10 and 30 s, then every 30 s, and logs once; the hello answered at last ends that outage', async ($, on) => {
   const w = world(on, { mode: 'down' })
   await $.session.start(START)
   await w.settle()
@@ -47,6 +47,15 @@ test('with the bridge down from the start, hello backs off 1, 2, 5, 10 and 30 s,
   expect(sinceUp[0]).toBe('/v1/hello')
   expect(sinceUp.filter(r => r === '/v1/next')).toHaveLength(1)
   expect(w.logs).toHaveLength(1)
+
+  // The hello began that outage, so its answer ended it: a later failure is a new one, with a line of its own and
+  // hello again after 1 s.
+  w.bridge.events = 503
+  await $.turn.start({ text: 'again', turnId: 't2' })
+  await w.settle()
+  expect(w.logs).toHaveLength(2)
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at).slice(8)).toEqual([109_000])
 })
 
 test('when the bridge goes away mid-session, the mod logs once more, says hello again as the same inst, and resends what failed with its seq', async ($, on) => {
@@ -256,6 +265,102 @@ test('an event the bridge takes and never answers fails after 35 s: after the ne
   expect(w.logs).toHaveLength(1)
 })
 
+test('a bridge that answers each hello but 503s the event: the outage goes on, hello backs off 1, 2, 5, 10 and 30 s, then every 30 s, and logs once; once the event goes through, the next outage starts over', async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  w.bridge.events = 503
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.settle()
+  await w.clock.advance(108_000)
+  // Each hello is answered and the event goes again, and fails again: an answered hello alone ends no outage.
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000, 3000, 8000, 18_000, 48_000, 78_000, 108_000])
+  expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+    [1, 0],
+    [1, 1000],
+    [1, 3000],
+    [1, 8000],
+    [1, 18_000],
+    [1, 48_000],
+    [1, 78_000],
+    [1, 108_000],
+  ])
+  expect(w.logs).toHaveLength(1)
+
+  // The event goes through after the next hello, which ends the outage. A later failure begins a new one, with a
+  // line of its own and hello again after 1 s, then 2 s.
+  w.bridge.events = 204
+  await w.clock.advance(30_000)
+  w.bridge.events = 503
+  await $.turn.start({ text: 'b', turnId: 't2' })
+  await w.settle()
+  expect(w.logs).toHaveLength(2)
+  await w.clock.advance(3000)
+  expect(w.to('/v1/hello').map(r => r.at).slice(8)).toEqual([138_000, 139_000, 141_000])
+  expect(w.to('/v1/events').slice(8).map(r => [r.body.seq, r.at])).toEqual([
+    [1, 138_000],
+    [2, 138_000],
+    [2, 139_000],
+    [2, 141_000],
+  ])
+  expect(w.logs).toHaveLength(2)
+})
+
+test('a bridge that answers each hello but never the event: each send fails after 35 s, and hello backs off 1, 2, 5, 10 and 30 s past each, logging once; the event answered at last ends the outage', async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  w.bridge.events = 'hang'
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.settle()
+  await w.clock.advance(288_000)
+  // The polls are answered all along, each after its 20 s, and end nothing: the event began the outage.
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 36_000, 73_000, 113_000, 158_000, 223_000, 288_000])
+  expect(w.to('/v1/events').map(r => r.at)).toEqual([0, 36_000, 73_000, 113_000, 158_000, 223_000, 288_000])
+  expect(w.to('/v1/next').filter(r => r.at === 56_000)).toHaveLength(1)
+  expect(w.logs).toHaveLength(1)
+
+  // The bridge answers the latest send within its 35 s: the event went through, so a later failure is a new outage.
+  w.answerHung(204)
+  await w.settle()
+  w.bridge.events = 503
+  await $.turn.start({ text: 'b', turnId: 't2' })
+  await w.settle()
+  expect(w.logs).toHaveLength(2)
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at).slice(7)).toEqual([289_000])
+})
+
+test('a bridge that answers each hello but never a poll: hello backs off past each 35 s stall and logs once, events going through meanwhile end nothing, and a poll answered ends the outage', async ($, on) => {
+  const w = world(on)
+  w.bridge.pollHold = Number.POSITIVE_INFINITY
+  await $.session.start(START)
+  await w.settle()
+  await w.clock.advance(40_000)
+  expect(w.logs).toHaveLength(1)
+  // An event goes through between the stalls: it isn't the request that failed, so the outage goes on.
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.settle()
+  expect(w.to('/v1/events').map(r => r.at)).toEqual([40_000])
+  await w.clock.advance(248_000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 36_000, 73_000, 113_000, 158_000, 223_000, 288_000])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 36_000, 73_000, 113_000, 158_000, 223_000, 288_000])
+  expect(w.logs).toHaveLength(1)
+
+  // Polls are answered again: after the next stall and hello, the poll goes through in its 20 s and the outage is
+  // over, so a later failure is a new one, with a line of its own and hello again after 1 s.
+  w.bridge.pollHold = undefined
+  await w.clock.advance(85_000)
+  expect(w.to('/v1/hello').map(r => r.at).slice(7)).toEqual([353_000])
+  expect(w.logs).toHaveLength(1)
+  w.bridge.events = 503
+  await $.turn.start({ text: 'b', turnId: 't2' })
+  await w.settle()
+  expect(w.logs).toHaveLength(2)
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at).slice(7)).toEqual([353_000, 374_000])
+})
+
 test('a model that changed twice while the bridge was away, once before a turn ended and once after: the deck ends on the model now', async ($, on) => {
   const w = world(on)
   await $.session.start(START)
@@ -308,6 +413,28 @@ test('the model is read again once a hello is answered: a change made while the 
   w.answerHung(200, { v: 1, ok: true })
   await w.settle()
   expect(w.settings()).toEqual([{ model: 'claude-opus-5-5' }])
+})
+
+test("a model the mod can't read is left out of the hello, though the deck was told one before; once it reads again, the deck hears it", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // The deck restarts, and while it's away the model can't be read.
+  w.bridge.mode = 'down'
+  w.drop()
+  await w.settle()
+  w.session.model = undefined
+  w.bridge.mode = 'up'
+  await w.clock.advance(1000)
+  const hellos = w.to('/v1/hello')
+  expect(hellos.map(r => r.at)).toEqual([0, 1000])
+  expect(hellos[0]?.body.model).toBe(MODEL)
+  expect(hellos[1]?.body).not.toHaveProperty('model')
+  // A deck that restarted knows no model from this mod now, so the model goes out once it reads, though unchanged.
+  w.session.model = MODEL
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await w.settle()
+  expect(w.settings()).toEqual([{ model: MODEL }])
 })
 
 test('the bridge holding each poll its 20 s: the mod polls again as each answers, one open at a time', async ($, on) => {

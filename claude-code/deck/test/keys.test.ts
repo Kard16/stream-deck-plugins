@@ -292,6 +292,36 @@ describe("Saved Prompt keys", () => {
 		assert.equal(feedback.length, 3);
 	});
 
+	test("a prompt that no poll takes within 60 s fails as not delivered, which frees the key", () => {
+		const { clock, model, surface, feedback, log } = setup();
+		// The session has the plugin, but its mod has stopped polling.
+		model.hello({ v: 1, host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
+		model.pick(A);
+		const keys = new PromptKeys(model, { clock, log });
+		keys.add("k", surface("k"), { text: "Carry on." });
+		keys.press("k");
+		clock.advance(IN_FLIGHT_MS - 1);
+		keys.press("k");
+		assert.deepEqual(feedback, ["k:alert"], "still queued, so the key is locked");
+		assert.equal(keys.look("k")?.state, "waiting");
+		clock.advance(1);
+		assert.deepEqual(
+			model.commands.list().map((c) => [c.id, c.state, c.error]),
+			[["c1", "failed", "not delivered"]],
+		);
+		assert.equal(keys.look("k")?.state, "refused");
+		assert.ok(log.at("info").some((l) => l.includes('Saved Prompt c1: failed: "not delivered"')));
+		keys.press("k");
+		assert.deepEqual(
+			model.commands.list().map((c) => [c.id, c.state]),
+			[
+				["c1", "failed"],
+				["c2", "queued"],
+			],
+		);
+		assert.equal(feedback.length, 1);
+	});
+
 	test("no text, no target, an ended target, or a session without the plugin: the press alerts and nothing is queued", () => {
 		const { clock, model, surface, feedback, mod } = setup();
 		const keys = new PromptKeys(model, { clock });

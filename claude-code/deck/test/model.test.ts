@@ -218,6 +218,36 @@ describe("session model", () => {
 		assert.deepEqual([r1.answers.length, r2.answers.length], [1, 1]);
 	});
 
+	test("rule 3 without statusUpdatedAt: only a change to idle the deck saw counts, never a session's first reading", () => {
+		const { model, at, permission } = setup([]);
+		at(5000);
+		// Held for a session the registry doesn't list yet.
+		const r = permission(A, "Bash", { command: "a" });
+		at(6000);
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: null })]);
+		assert.deepEqual(r.answers, [], "its first reading");
+		at(7000);
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: null })]);
+		assert.deepEqual(r.answers, [], "idle again, with no change seen");
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: null })]);
+		at(8000);
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: null })]);
+		assert.deepEqual(r.answers, [{ status: 200, body: {} }], "a change to idle the deck saw, after the request came");
+	});
+
+	test("a tool_input too deep to fingerprint is held without an fp; rules 2–5 still release it", () => {
+		const { model, at, events, permission } = setup([reg(1, A, { status: "busy" })]);
+		let deep: unknown = [];
+		for (let i = 0; i < 20_000; i++) deep = [deep];
+		at(5000);
+		const r = permission(A, "Custom", { a: deep });
+		assert.deepEqual(model.held.list().map((h) => [h.host, h.summary, h.fp]), [[A, "Custom", null]]);
+		events(A, { t: "tool.end", tool: "Custom", use: "u1", fp: "00000000", ok: true });
+		assert.deepEqual(r.answers, [], "rule 1 has no fp to match");
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 6000 })]);
+		assert.deepEqual(r.answers, [{ status: 200, body: {} }], "rule 3");
+	});
+
 	test("rule 4: a session whose file disappears ends: its requests are released, its commands fail", () => {
 		const { model, permission } = setup();
 		model.hello({ v: 1, host: A, inst: "ia", model: "m" });
@@ -305,15 +335,52 @@ describe("session model", () => {
 		assert.deepEqual([queued.state, view(A)?.doing], ["delivered", "b.md"]);
 	});
 
-	test("an instance seen before never counts as a restart again, however many came after it", () => {
+	test("an instance seen before never counts as a restart again, however many came after it, and its requests are still taken", () => {
 		const { model, view } = setup([reg(1, A, { status: "busy" })]);
 		for (let i = 0; i < 12; i++) model.hello({ v: 1, host: A, inst: `i${i}`, model: "m" });
 		model.events({ host: A, inst: "i11", seq: 1, events: [{ t: "tool.start", tool: "Read", use: "u1", summary: "a.md", fp: "1" }] });
 		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
 		model.next(new URLSearchParams({ host: A, inst: "i11" }), new FakeReply());
-		// The first instance, eleven restarts back, sends something late.
-		model.events({ host: A, inst: "i0", seq: 1, events: [] });
-		assert.deepEqual([cmd.state, view(A)?.doing], ["delivered", "a.md"]);
+		const open = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "i11", wait: "20" }), open);
+		// The first instance, eleven restarts back, sends something late, and it's taken.
+		assert.equal(model.events({ host: A, inst: "i0", seq: 1, events: [{ t: "settings", mode: "plan" }] }).status, 204);
+		assert.deepEqual([cmd.state, view(A)?.doing, view(A)?.mode, open.answers], ["delivered", "a.md", "plan", []]);
+	});
+
+	test("a new instance's hello answers the poll the old one left open, so a command queued after it waits for the new one", () => {
+		const { model } = setup();
+		model.hello({ v: 1, host: A, inst: "ia", model: "m" });
+		const old = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "ia", wait: "20" }), old);
+		assert.deepEqual(old.answers, []);
+		model.hello({ v: 1, host: A, inst: "ib", model: "m" });
+		assert.deepEqual(old.answers, [{ status: 200, body: { cmds: [] } }]);
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.equal(cmd.state, "queued", "not handed to the old instance");
+		const fresh = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "ib", wait: "20" }), fresh);
+		assert.deepEqual(fresh.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+		assert.deepEqual([cmd.state, cmd.inst], ["delivered", "ib"]);
+	});
+
+	test("without a usable host, the registry's sid places a mod request, and then the sid and host pairs the mods sent", () => {
+		const { model } = setup([reg(1, A)]);
+		// A session the registry doesn't list: its mod said hello with both.
+		model.hello({ v: 1, sid: "sid-x", host: "local_x", inst: "ix", model: "m" });
+		const r = new FakeReply();
+		model.permission({ session_id: "sid-x", tool_name: "Bash", tool_input: { command: "ls" } }, "", r);
+		assert.equal(model.held.oldest?.host, "local_x");
+		// The variable unset: the mod sends its host as "".
+		assert.equal(model.events({ sid: "sid-x", host: "", inst: "ix", seq: 1, events: [{ t: "turn.start", turn: "t1" }] }).status, 204);
+		const poll = new FakeReply();
+		model.next(new URLSearchParams({ sid: "sid-x", host: "", inst: "ix", wait: "0" }), poll);
+		assert.deepEqual(poll.answers, [{ status: 200, body: { cmds: [] } }]);
+		// The registry comes first: a pair a mod sent can't move a sid the registry places.
+		model.hello({ v: 1, sid: "sid-1", host: "local_y", inst: "iy", model: "m" });
+		model.permission({ session_id: "sid-1", tool_name: "Bash", tool_input: { command: "pwd" } }, undefined, new FakeReply());
+		assert.equal(model.held.list()[1]?.host, A);
+		assert.equal(model.events({ sid: "sid-unknown", host: "", inst: "iz", seq: 1, events: [] }).status, 400);
 	});
 
 	test("the target: the session picked on the dial; until then the one last on screen", () => {

@@ -18,7 +18,7 @@ export type AppRecord = {
 	permissionMode: string | null;
 	/** When the session was last on screen in the app, wall-clock ms. */
 	lastFocusedAt: number | null;
-	/** The app says its last turn needs the user: `turnWrapUp.needsUser` or `postTurnSummary.needs_action`. */
+	/** The app says its last turn needs the user: the wrap-up's `needsUser`, or without one the summary's `needs_action`. */
 	needsUser: boolean;
 };
 
@@ -44,6 +44,17 @@ function needsAction(v: unknown): boolean {
 	return v === true || (typeof v === "string" && v !== "");
 }
 
+/**
+ * Whether the record says its last turn needs the user, read as the app reads it (its `Dw`; PROTOCOL.md, status
+ * rule 6). A `turnWrapUp` with a string `description` decides alone, by its `needsUser`: the app then ignores the
+ * summary's `needs_action`, and shows a summary that says blocked as ready for review. Without one, `needs_action`
+ * decides.
+ */
+function turnNeedsUser(wrapUp: Record<string, unknown>, summary: Record<string, unknown>): boolean {
+	if (typeof wrapUp.description === "string") return needsAction(wrapUp.needsUser);
+	return needsAction(summary.needs_action);
+}
+
 /** A record from one file's text; null when it isn't a complete JSON object (say, caught mid-write). */
 export function parseRecord(host: string, text: string): AppRecord | null {
 	let raw: unknown;
@@ -63,7 +74,7 @@ export function parseRecord(host: string, text: string): AppRecord | null {
 		effort: str(o.effort, 40),
 		permissionMode: str(o.permissionMode, 40),
 		lastFocusedAt: typeof o.lastFocusedAt === "number" && Number.isFinite(o.lastFocusedAt) ? o.lastFocusedAt : null,
-		needsUser: needsAction(obj(o.turnWrapUp).needsUser) || needsAction(obj(o.postTurnSummary).needs_action),
+		needsUser: turnNeedsUser(obj(o.turnWrapUp), obj(o.postTurnSummary)),
 	};
 }
 

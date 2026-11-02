@@ -1,7 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 
 import { isObj, type Obj, ROUTES } from "../protocol/wire.js";
-import { describeError, type Log, nullLog, quote, redacting, scrub } from "../util/log.js";
+import { describeError, type Log, nullLog, quote, redacting, Scrubber } from "../util/log.js";
 import type { PollReply } from "./commands.js";
 import { allowedHosts, BRIDGE_HOST, MAX_BODY_BYTES } from "./config.js";
 import { checkBearer } from "./token.js";
@@ -56,6 +56,8 @@ const METHODS: Record<string, "GET" | "POST"> = {
  */
 export class BridgeServer {
 	readonly #opts: Required<Omit<BridgeOptions, "http">> & { http: http.ServerOptions };
+	/** Takes the token out of what clients send, and out of the log. */
+	readonly #scrubber: Scrubber;
 	readonly #listeners = new Set<(state: BridgeState) => void>();
 	#server: http.Server | null = null;
 	#state: BridgeState = "stopped";
@@ -65,13 +67,14 @@ export class BridgeServer {
 	#routed = 0;
 
 	constructor(opts: BridgeOptions) {
+		this.#scrubber = new Scrubber(opts.token);
 		this.#opts = {
 			port: opts.port,
 			host: opts.host ?? BRIDGE_HOST,
 			token: opts.token,
 			routes: opts.routes,
 			// Belt and braces: the token can't reach the log even if a client puts it in a path.
-			log: redacting(opts.log ?? nullLog, opts.token),
+			log: redacting(opts.log ?? nullLog, this.#scrubber),
 			maxBodyBytes: opts.maxBodyBytes ?? MAX_BODY_BYTES,
 			http: opts.http ?? {},
 		};
@@ -178,7 +181,7 @@ export class BridgeServer {
 	 * leave too little of it to recognise), then quoted and cut.
 	 */
 	#show(value: string | null | undefined, max = 60): string {
-		return quote(value === null || value === undefined ? value : scrub(value, this.#opts.token), max);
+		return quote(value === null || value === undefined ? value : this.#scrubber.scrub(value), max);
 	}
 
 	#handle(req: IncomingMessage, res: ServerResponse): void {
@@ -224,7 +227,7 @@ export class BridgeServer {
 			// The token is taken out of the query as it is out of bodies, once decoded, so nothing cut from it later
 			// (the mod's inst in a log line, say) can carry part of it.
 			const query = new URLSearchParams();
-			for (const [name, value] of new URLSearchParams(queryString)) query.append(scrub(name, token), scrub(value, token));
+			for (const [name, value] of new URLSearchParams(queryString)) query.append(this.#scrubber.scrub(name), this.#scrubber.scrub(value));
 			this.#routed++;
 			this.#guard(what, res, () => routes.next(query, this.#heldReply(req, res)));
 			return;
@@ -232,30 +235,32 @@ export class BridgeServer {
 
 		readBody(req, this.#opts.maxBodyBytes).then(
 			(text) => {
-				let body: unknown;
+				let parsed: unknown;
 				try {
-					// With the token taken out of every string first, nothing cut from the body later (a tool's summary
-					// on a key, a line in the log) can carry part of it. It's taken out after parsing, since a run of
-					// the token's digits in the raw text could be part of a number.
-					body = scrubJson(JSON.parse(text), token);
+					parsed = JSON.parse(text);
 				} catch {
 					refuse(400, `the body isn't JSON (${Buffer.byteLength(text)} bytes)`);
 					return;
 				}
-				if (target === ROUTES.permission) {
-					const deckHost = req.headers["x-deck-host"];
-					this.#routed++;
-					this.#guard(what, res, () => routes.permission(body, typeof deckHost === "string" ? deckHost : undefined, this.#heldReply(req, res)));
-					return;
-				}
-				if (!isObj(body)) {
-					refuse(400, "the body isn't a JSON object");
-					return;
-				}
-				const obj = body;
-				this.#routed++;
 				this.#guard(what, res, () => {
-					const answer = target === ROUTES.hello ? routes.hello(obj) : target === ROUTES.events ? routes.events(obj) : routes.result(obj);
+					// With the token taken out of every string first, nothing cut from the body later (a tool's summary
+					// on a key, a line in the log) can carry part of it. It's taken out after parsing, since a run of the
+					// token's digits in the raw text could be part of a number. It can't fail on a body that parsed,
+					// however long its strings or deep its nesting, so a valid body never gets 400 for it; were it to
+					// throw all the same, the guard answers 500 and the bridge carries on.
+					const body = scrubJson(parsed, this.#scrubber);
+					if (target === ROUTES.permission) {
+						const deckHost = req.headers["x-deck-host"];
+						this.#routed++;
+						routes.permission(body, typeof deckHost === "string" ? deckHost : undefined, this.#heldReply(req, res));
+						return;
+					}
+					if (!isObj(body)) {
+						refuse(400, "the body isn't a JSON object");
+						return;
+					}
+					this.#routed++;
+					const answer = target === ROUTES.hello ? routes.hello(body) : target === ROUTES.events ? routes.events(body) : routes.result(body);
 					if (answer.status >= 400) log.info(`REQ ${answer.status} ${what}: ${JSON.stringify(answer.body ?? null)}`);
 					else log.debug(`REQ ${answer.status} ${what}`);
 					reply(res, answer.status, answer.body, {});
@@ -268,7 +273,10 @@ export class BridgeServer {
 		);
 	}
 
-	/** Runs a route; a route that throws gets a 500 for its client and a log line, and the bridge carries on. */
+	/**
+	 * Runs a route, with the scrubbing of its body; whatever throws there gets a 500 for its client and a log
+	 * line, and the bridge carries on.
+	 */
 	#guard(what: string, res: ServerResponse, run: () => void): void {
 		try {
 			run();
@@ -312,12 +320,39 @@ export class BridgeServer {
 
 class TooLarge extends Error {}
 
-/** A parsed body with the token taken out of every string in it, names included (see scrub). */
-function scrubJson(value: unknown, token: string): unknown {
-	if (typeof value === "string") return scrub(value, token);
-	if (Array.isArray(value)) return value.map((v: unknown) => scrubJson(v, token));
-	if (isObj(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [scrub(k, token), scrubJson(v, token)]));
-	return value;
+/**
+ * A parsed body with the token taken out of every string in it, names included (see Scrubber). The body is
+ * changed in place, since nothing else holds it, and walked from a list of the objects and arrays still to visit
+ * rather than by recursion, so no depth of nesting can overflow the stack.
+ */
+function scrubJson(body: unknown, scrubber: Scrubber): unknown {
+	if (typeof body === "string") return scrubber.scrub(body);
+	const todo: unknown[] = [body];
+	while (todo.length > 0) {
+		const value = todo.pop();
+		if (Array.isArray(value)) {
+			for (let i = 0; i < value.length; i++) {
+				const v: unknown = value[i];
+				if (typeof v === "string") value[i] = scrubber.scrub(v);
+				else if (typeof v === "object" && v !== null) todo.push(v);
+			}
+		} else if (isObj(value)) {
+			let renamed = false;
+			for (const k of Object.keys(value)) {
+				const v = value[k];
+				if (typeof v === "string") value[k] = scrubber.scrub(v);
+				else if (typeof v === "object" && v !== null) todo.push(v);
+				if (scrubber.scrub(k) !== k) renamed = true;
+			}
+			if (!renamed) continue;
+			// The names go back in their order, each defined as JSON.parse defines it, so a "__proto__" among them
+			// stays an ordinary key; of two names that scrub alike, the later value wins, in the earlier's place.
+			const entries = Object.entries(value);
+			for (const [k] of entries) delete value[k];
+			for (const [k, v] of entries) Object.defineProperty(value, scrubber.scrub(k), { value: v, writable: true, enumerable: true, configurable: true });
+		}
+	}
+	return body;
 }
 
 /** Reads a request body as UTF-8, failing with TooLarge past `max` bytes, or with the error if the client aborts. */

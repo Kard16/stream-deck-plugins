@@ -476,6 +476,25 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - The tools import the reference implementation from `make-fixtures.mjs` instead of copying it.
   - **Re-run by the main thread:** plugin 51/51 with `tsc`, validate and the fixtures check; deck 155/155 with typecheck, build and validate; tools 89/89. The deck's and the tools' tests pass with the clock two days ahead too.
   - **The questions it raised went into a second set of amendments,** the most visible being that status rule 6 now follows the app's own `Dw`: a turn wrap-up's `needsUser` replaces the summary's `needs_action`. A third round brings the code up to them.
+- 2026-11-01, **ladder step 4 started** with S0, on a snapshot of the plugin and tools at b5685f5 (in the scratchpad, so the third round's edits can't reload mid-test). The spike bridge is stopped; the fake bridge holds 47600 with the spike token. `claude-code/sandbox-plugin` points at the snapshot for now.
+  - **Works:**
+    - **The real mod loads by hot reload** about 4 s after the old plugin folder was touched. Its hello carried plugin 0.1.0, Claude Code 2.1.309 and the engine's model (`claude-sonnet-5-5`, while the app's record still says Haiku, as S4 found).
+    - **Mode command:** lowering to Manual was `done` in 31 ms with no permission request, then `settings {mode: "default"}` on the same ordered line.
+    - **Prompt command:** `waiting`, then `done` within 35 ms. Then `turn.start`, `tool.start` for Write (summary `s7.txt`, fp `4723aacf`), and `measure` (`context {percent 10, tokens 100995, window 1000000}`, `cost {usd}`).
+  - **Found: a hot reload that swaps in a different plugin keeps the old plugin's `hooks.json` hooks.** The new mod ran, but the PermissionRequest still went to the spike's `/permission`, got 404, and fell back to the app's dialog. The spike's name differed (`deck-spike` against `streamdeck-bridge`), which is the likely cause. So the http hook needs a session started with the plugin already in place, which matters for Phase 5 too.
+  - **Found: on its first load the engine writes `.claude-plugin/types/` and `tsconfig.json` into the plugin folder.** That write reloads the mod once more at the next turn (a new `inst` and hello), as Track A predicted. The types folder ignores itself; the plugin's `tsconfig.json` needs a `.gitignore` entry before the link points at `claude-code/plugin/`.
+  - **Blocked:** S0 is waiting on the app's dialog for that Write. Stopping its turn from here was refused by the app's auto-mode classifier.
+  - The user then said yes to a fresh session: **Deck test T1** (`local_5b6232aa-…`), from the `deck-sandbox` preset, in Manual. The preset sets no model, so T1 inherited the main thread's (Opus 5.5). Its mod said hello at once.
+- 2026-11-01, **round 3: the code meets the second set of amendments** (workflow `wf_cf2e3d17-43e`).
+  - **Plugin:** an outage ends only when the request that began it goes through, and hello leaves out a model it can't read.
+  - **Deck:**
+    - The scrubber is built once per secret and scans in linear time, without recursion: 1.6M short strings take 8 ms instead of 2.3 s, and no valid body gets 400.
+    - A new `inst` answers the old instance's poll.
+    - A command no poll takes within 60 s fails with "not delivered".
+    - Rule 6 follows the app.
+  - **Tools:** permission answers are checked exactly, values from mod bodies are stored only as strings, the fingerprint check pairs only by fp, rule 3 goes by observation, and the write guard sees the firmlink. Also the Saved Prompt lock, the old poll's answer, "not delivered" and rule 6. The refixer fixed one major: a subagent's `failed` had ended the main loop's fingerprint wait.
+  - **Re-run by the main thread:** plugin 55/55, `tsc`, validate and the fixtures check; deck 168/168, typecheck, build and validate; tools 100/100. The deck's and the tools' tests pass with the clock two days ahead too.
+  - **Left open:** a handful of minors and contract questions, batched with step 4's findings into the next round.
 
 ## Progress
 

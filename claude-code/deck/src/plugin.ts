@@ -24,7 +24,7 @@ import { RegistryReader } from "./registry/registry.js";
 import { RegistryWatcher } from "./registry/watcher.js";
 import { SessionsDials } from "./sessions/dials.js";
 import { loadLogLevelFile, LOG_LEVEL_FILE } from "./util/log-level.js";
-import { describeError, type Log, redacting } from "./util/log.js";
+import { describeError, type Log, redacting, Scrubber } from "./util/log.js";
 
 // bin/plugin.js → the .sdPlugin folder, which holds run/token and the optional log-level.txt.
 const pluginDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -54,7 +54,8 @@ try {
 	log.error(`can't set up ${RUN_DIR}/${TOKEN_FILE}, so the bridge stays off: ${describeError(err)}`);
 }
 /** Every logger below has the token taken out of its lines. */
-const scope = (name: string): Log => redacting(streamDeck.logger.createScope(name), loaded?.token ?? "");
+const scrubber = new Scrubber(loaded?.token ?? "");
+const scope = (name: string): Log => redacting(streamDeck.logger.createScope(name), scrubber);
 
 // A jump opens the app's own link for the session (spike S5): it focuses the main window and shows that session.
 // openUrl can't open custom schemes, so it goes through /usr/bin/open.

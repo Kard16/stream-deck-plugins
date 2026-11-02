@@ -40,6 +40,14 @@ const inside = (child, parent) => {
 }
 
 /**
+ * The Mac keeps the user's files on a volume mounted at /System/Volumes/Data and firmlinks /Users, /private and the
+ * rest into it, so one folder has two real paths: realpath keeps whichever it's given. Paths are compared with that
+ * prefix taken off.
+ */
+const DATA_VOLUME = '/System/Volumes/Data'
+const unfirm = (p) => (p === DATA_VOLUME ? '/' : p.startsWith(`${DATA_VOLUME}/`) ? p.slice(DATA_VOLUME.length) : p)
+
+/**
  * The real path, by the system's own realpath: on a case-insensitive volume it also gives each name its case on
  * disk, so `~/.CLAUDE` compares as `~/.claude`, which Node's own realpathSync doesn't do. The path as it is
  * when it doesn't exist.
@@ -61,7 +69,7 @@ export function checkDir(dir, what) {
     throw new Error(`the fake bridge's ${what} folder ${dir} doesn't exist: start it with --${what}-dir set to an empty folder`)
   }
   for (const p of PROTECTED) {
-    if (inside(real, realOr(p)) || inside(path.resolve(dir), p)) {
+    if (inside(unfirm(real), unfirm(realOr(p))) || inside(unfirm(path.resolve(dir)), unfirm(p))) {
       throw new Error(`won't write fixture files into ${dir}, inside ${p}: start the fake bridge with --registry-dir and --records-dir set to empty folders of its own`)
     }
   }

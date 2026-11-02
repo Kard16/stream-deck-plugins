@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { parseWait, readToken, scrubber, startFakeBridge } from '../lib/bridge.mjs'
-import { send } from '../lib/client.mjs'
+import { send, within } from '../lib/client.mjs'
 import { MAX_BODY, fingerprint, summary } from '../lib/protocol.mjs'
 import { request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
@@ -104,6 +104,91 @@ test('bridge: a request a route throws on gets 500, which the hook takes as no d
   assert.ok(log.some((e) => e.kind === 'route-error' && e.n === req.n && e.route === '/v1/permission' && /RangeError: Maximum call stack/.test(e.error)))
   assert.ok(log.some((e) => e.kind === 'answer' && e.n === req.n && e.status === 500))
   assert.ok(lines.some((l) => / \/v1\/permission failed: RangeError: Maximum call stack size exceeded$/.test(l)))
+})
+
+test('bridge: an answer that can\'t be written out, one nested too deep, gets a plain 500 rather than no answer', async (t) => {
+  const env = tempEnv(t)
+  const bridge = await startBridge(t, env)
+  // /control/answer says it has no request with the id it was given, and gives the id back.
+  const deep = `${'{"a":'.repeat(20_000)}1${'}'.repeat(20_000)}`
+  const r = await within(request(bridge, env.token, { method: 'POST', path: '/control/answer', raw: `{"id":${deep},"decision":"allow"}` }).answer, 3000, 'no answer within 3 s')
+  assert.equal(r.status, 500)
+  assert.match(r.json.error, /^the fake bridge can't write its answer: RangeError: Maximum call stack size exceeded$/)
+  const state = await request(bridge, env.token, { path: '/control/state' }).answer
+  assert.equal(state.status, 200, 'and it carries on')
+  assert.ok(runLog(env).some((e) => e.kind === 'answer' && e.status === 500 && /can't write its answer/.test(e.body?.error)))
+})
+
+test('bridge: values nested too deep in a mod\'s fields that PROTOCOL.md gives as strings aren\'t kept, so the state still answers', async (t) => {
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const bridge = await startBridge(t, env)
+  const deep = `${'['.repeat(20_000)}${']'.repeat(20_000)}`
+  const post = (p, raw) => within(request(bridge, env.token, { method: 'POST', path: p, raw }).answer, 3000, `${p}: no answer within 3 s`)
+  const mod = `"sid":"${A.sid}","host":"${A.host}","inst":"${A.inst}"`
+  let r = await post('/v1/hello', `{"v":1,${mod},"cwd":${deep},"model":${deep},"mode":${deep},"effort":${deep},"plugin":${deep},"cc":${deep}}`)
+  assert.deepEqual([r.status, r.json], [200, { v: 1, ok: true }])
+  r = await post('/v1/events', `{${mod},"seq":1,"events":[{"t":"tool.start","tool":"Read","use":"u1","agent":${deep},"summary":"a.md","fp":"x","at":1}]}`)
+  assert.equal(r.status, 204)
+  r = await post('/v1/events', `{"sid":"${A.sid}","host":"${A.host}","inst":${deep},"seq":1,"events":[]}`)
+  assert.equal(r.status, 204)
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'x' } }).answer
+  await request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=0` }).answer
+  r = await post('/v1/result', `{${mod},"id":"${press.json.cmd}","state":"failed","error":${deep},"detail":${deep}}`)
+  assert.equal(r.status, 204)
+
+  const state = await within(request(bridge, env.token, { path: '/control/state' }).answer, 3000, 'the state: no answer within 3 s')
+  assert.equal(state.status, 200, state.text.slice(0, 200))
+  const s = state.json.sessions[A.host]
+  assert.deepEqual(s.hello, { at: s.hello.at, cwd: null, model: null, mode: null, effort: null, plugin: null, cc: null })
+  assert.deepEqual(s.tools.map((x) => [x.use, x.agent]), [['u1', null]], 'an agent that isn\'t a string counts as missing')
+  assert.deepEqual(state.json.deck.doing[A.host], 'a.md')
+  assert.deepEqual(Object.keys(s.lastSeq).sort(), [A.inst, 'null'])
+  assert.deepEqual(state.json.commands.map((c) => [c.state, c.error, c.detail]), [['failed', null, null]])
+})
+
+test('bridge: a control answer is scrubbed of the token, the registry\'s and records\' fields included', async (t) => {
+  const env = tempEnv(t)
+  // A session named after a command line that set the token, and a record that took a run of it.
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, name: `export DECK_TOKEN=${env.token.slice(0, 20)}`, status: 'idle', statusUpdatedAt: 1 })
+  writeRecord(env, A.host, { model: `model-${env.token.slice(6, 18)}`, lastFocusedAt: 1 })
+  const bridge = await startBridge(t, env)
+  const runs = []
+  for (let i = 0; i + 8 <= env.token.length; i++) runs.push(env.token.slice(i, i + 8))
+  for (const p of ['/control/state', '/control/rescan']) {
+    const r = await request(bridge, env.token, { method: p === '/control/state' ? 'GET' : 'POST', path: p }).answer
+    assert.equal(r.status, 200)
+    assert.deepEqual(runs.filter((run) => r.text.includes(run)), [], `no run of the token in ${p}`)
+  }
+  const state = (await request(bridge, env.token, { path: '/control/state' }).answer).json
+  assert.equal(state.registry[A.host].name, 'export DECK_TOKEN=<token>')
+  assert.equal(state.records[A.host].model, 'model-<token>')
+  assert.equal(state.deck.settings[A.host].model, 'model-<token>')
+})
+
+test('bridge: status rule 6 reads a record as the app does: a wrap-up with a description decides by its needsUser alone', async (t) => {
+  const env = tempEnv(t)
+  const cases = [
+    // [record, status]
+    [{ turnWrapUp: { description: 'Done.', needsUser: false }, postTurnSummary: { needs_action: true } }, 'idle'],
+    [{ turnWrapUp: { description: 'Blocked on you.', needsUser: 'Approve the plan before I go on.' } }, 'needs-you'],
+    [{ turnWrapUp: { description: 'Done.', needsUser: '' }, postTurnSummary: { needs_action: 'Pick a colour.' } }, 'idle'],
+    [{ turnWrapUp: { description: '', needsUser: true } }, 'needs-you'],
+    // Without a string description the wrap-up doesn't count, and the summary decides.
+    [{ turnWrapUp: { needsUser: true } }, 'idle'],
+    [{ turnWrapUp: { description: 7, needsUser: false }, postTurnSummary: { needs_action: 'Pick a colour.' } }, 'needs-you'],
+    [{ postTurnSummary: { needs_action: true } }, 'needs-you'],
+    [{ postTurnSummary: { needs_action: '' } }, 'idle'],
+    [{ postTurnSummary: { needs_action: false } }, 'idle'],
+  ]
+  const hosts = cases.map((_, i) => `local_r${i}`)
+  cases.forEach(([record], i) => {
+    writeRegistry(env, 100 + i, { sessionId: `sid-r${i}`, hostSessionId: hosts[i], status: 'idle', statusUpdatedAt: 1 })
+    writeRecord(env, hosts[i], record)
+  })
+  const bridge = await startBridge(t, env)
+  const status = bridge.deck.view().status
+  assert.deepEqual(hosts.map((h) => [h, status[h]]), cases.map(([, want], i) => [hosts[i], want]))
 })
 
 test('bridge: a long poll waits, answers when a command is queued, and needs a session', async (t) => {

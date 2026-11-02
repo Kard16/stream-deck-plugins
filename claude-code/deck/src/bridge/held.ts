@@ -27,7 +27,8 @@ export type Held = {
 	readonly tool: string;
 	readonly kind: HeldKind;
 	readonly summary: string;
-	readonly fp: string;
+	/** Null for a `tool_input` nested too deeply to fingerprint: rule 1 can't release it, but rules 2–5 still do. */
+	readonly fp: string | null;
 };
 
 export type Decision = "allow" | "deny";
@@ -84,7 +85,7 @@ export class HeldRequests {
 		const held: Held = { ...req, id: this.#nextId++ };
 		this.#entries.push({ held, responder });
 		// The fp is logged so ladder step 4 can compare it with the mod's for the same call (PROTOCOL.md).
-		this.#log.info(`HELD #${held.id} ${held.kind} ${quote(held.tool, 60)} ${quote(held.summary, 40)} fp ${held.fp} from ${held.host ?? `sid ${quote(held.sid, 40)}`}; ${this.size} held`);
+		this.#log.info(`HELD #${held.id} ${held.kind} ${quote(held.tool, 60)} ${quote(held.summary, 40)} fp ${held.fp ?? "none"} from ${held.host ?? `sid ${quote(held.sid, 40)}`}; ${this.size} held`);
 		this.#emit();
 		return held;
 	}

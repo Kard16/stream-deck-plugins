@@ -244,7 +244,7 @@ export class SessionModel implements BridgeRoutes {
 				tool: p.tool,
 				kind: ASK_TOOLS.has(p.tool) ? "ask" : "tool",
 				summary: summary(p.tool, p.input),
-				fp: fingerprint(p.tool, p.input),
+				fp: fingerprintOrNull(p.tool, p.input),
 			},
 			reply,
 		);
@@ -467,7 +467,11 @@ export class SessionModel implements BridgeRoutes {
 		}
 	}
 
-	/** The session of a mod request, by its host or else its sid. An `inst` not seen before means the mod restarted. */
+	/**
+	 * The session of a mod request, by its host or else its sid. An `inst` not seen before means the mod
+	 * restarted: the session's current tool and in-flight commands are forgotten, and a poll the old instance
+	 * left open is answered with none.
+	 */
 	#modSession(ref: ModRef): BridgeSession | null {
 		const host = ref.host ?? this.#hostForSid(ref.sid);
 		if (host === null) return null;
@@ -476,9 +480,9 @@ export class SessionModel implements BridgeRoutes {
 		b.mod = true;
 		if (ref.inst !== null && !b.insts.has(ref.inst)) {
 			if (b.inst !== null) {
-				this.#log.info(`RESTART ${host}: mod instance ${quote(ref.inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten`);
+				this.#log.info(`RESTART ${host}: mod instance ${quote(ref.inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten, and any poll the old one left open is answered`);
 				b.tools = [];
-				this.commands.forgetInFlight(host, "the mod restarted");
+				this.commands.restarted(host, ref.inst, "the mod restarted");
 			}
 			b.insts.add(ref.inst);
 			b.inst = ref.inst;
@@ -577,4 +581,18 @@ export class SessionModel implements BridgeRoutes {
 /** The deck keys sessions by host; a registry file without one by its pid. */
 export function keyOf(s: RegistrySession): string {
 	return asHost(s.hostSessionId) ?? `pid:${s.key}`;
+}
+
+/**
+ * A PermissionRequest's fingerprint, or null when its `tool_input` is nested too deeply to write out: canonical()
+ * recurses, and the stack runs out first. The bridge still holds such a request, without one, so the key can
+ * answer it and rules 2–5 release it; only rule 1 can't.
+ */
+function fingerprintOrNull(tool: string, input: unknown): string | null {
+	try {
+		return fingerprint(tool, input);
+	} catch (err) {
+		if (err instanceof RangeError) return null;
+		throw err;
+	}
 }

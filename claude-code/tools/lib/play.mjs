@@ -8,8 +8,8 @@
 // - `press`, `registry` and `expect` lines go to a driver (drivers.mjs), which knows how to press keys, change
 //   the registry and read the deck's state, or to ask a person to.
 // The deck's command ids bind to the fixture's names at their first appearance in a reply. An answer to a
-// permission request must also be one of PROTOCOL.md's three, whatever its reply line expects, since it's
-// what Claude Code acts on (permissionAnswerMismatch).
+// permission request must also be exactly one of PROTOCOL.md's three, whatever its reply line expects, since
+// it's what Claude Code acts on, or an error answer when it isn't 2xx (permissionAnswerMismatch).
 
 import { hostHeader, send, within } from './client.mjs'
 import { Bindings, commandIdHook, mismatch, show } from './match.mjs'
@@ -68,21 +68,29 @@ function extraField(expected, actual, at, name) {
 }
 
 /**
- * Why an answer to a permission request isn't one of PROTOCOL.md's three, or null. It holds whatever the
- * reply line expects: the general rule lets extra fields through, and these are fields Claude Code acts on.
+ * Why an answer to a permission request isn't one PROTOCOL.md allows, or null. It holds whatever the reply line
+ * expects, since Claude Code acts on the answer: "Transport" exempts it from "unknown fields are ignored".
  * - `updatedPermissions` and `updatedInput` are nowhere in it. A deck that echoed the request's
  *   `permission_suggestions` would otherwise raise the session's mode, or add rules to the user's settings,
  *   at every press, and still pass.
- * - None of Claude Code's own top-level fields (HOOK_FIELDS). Any other top-level field is one Claude Code
- *   doesn't know, which PROTOCOL.md lets either side add.
- * - A `hookSpecificOutput` is Allow's or Deny's exactly, as PROTOCOL.md writes them.
+ * - A 2xx answer, the one Claude Code parses, is Allow, Deny or {} exactly: no field of its own, at the top
+ *   (Claude Code's own HOOK_FIELDS among them) or inside `hookSpecificOutput`.
+ * - Any other is an error answer, which Claude Code doesn't parse: `{"error": "<reason>"}` exactly, as
+ *   "Transport" writes it. auth's 405 for `GET /v1/permission` is one.
  */
-export function permissionAnswerMismatch(actual) {
+export function permissionAnswerMismatch(actual, status = 200) {
   const stray = findKey(actual, NEVER_SENT, 'body')
   if (stray) return `${stray.at}: the deck never sends ${stray.key} (PROTOCOL.md), got ${show(stray.value)}`
-  if (!isObject(actual)) return null
+  if (status < 200 || status > 299) {
+    const extra = isObject(actual) ? Object.keys(actual).find((k) => k !== 'error') : undefined
+    if (extra !== undefined) return `body.${extra}: not in an error answer, got ${show(actual[extra])} (an error answer is {"error": "<reason>"} exactly)`
+    return isObject(actual) && typeof actual.error === 'string' ? null : `body: expected an error answer, {"error": "<reason>"}, got ${show(actual)}`
+  }
+  if (!isObject(actual)) return `body: expected Allow, Deny or {}, got ${show(actual)}`
   const field = HOOK_FIELDS.find((k) => Object.hasOwn(actual, k))
   if (field) return `body.${field}: Claude Code acts on it, and none of PROTOCOL.md's answers has it, got ${show(actual[field])}`
+  const extra = Object.keys(actual).find((k) => k !== 'hookSpecificOutput')
+  if (extra !== undefined) return `body.${extra}: not in any of PROTOCOL.md's answers, got ${show(actual[extra])} (an answer is Allow, Deny or {} exactly)`
   if (!Object.hasOwn(actual, 'hookSpecificOutput')) return null
   const out = actual.hookSpecificOutput
   const [name, want] = out?.decision?.behavior === 'deny' ? ['Deny', DENY] : ['Allow', ALLOW]
@@ -92,15 +100,15 @@ export function permissionAnswerMismatch(actual) {
 }
 
 /**
- * Why a reply's body doesn't match, or null; `expected` is undefined when the reply line gives no body. An
- * answer to a permission request must be one of PROTOCOL.md's first (permissionAnswerMismatch). Then an
- * expected `{}` for it means no decision, so it fails on an answer that carries one: by the general rule an
- * empty object would match any answer, an Allow included, and the fixture would pass on the very thing it
- * rules out.
+ * Why a reply's body doesn't match, or null; `expected` is undefined when the reply line gives no body, and
+ * `actual` when the answer had none that parses. An answer to a permission request, with its `status`, must be
+ * one PROTOCOL.md allows first (permissionAnswerMismatch). Then an expected `{}` for it means no decision, so it
+ * fails on an answer that carries one: by the general rule an empty object would match any answer, an Allow
+ * included, and the fixture would pass on the very thing it rules out.
  */
-export function replyMismatch(route, expected, actual, bindings) {
+export function replyMismatch(route, expected, actual, bindings, status = 200) {
   if (route === ROUTES.permission) {
-    const why = permissionAnswerMismatch(actual)
+    const why = permissionAnswerMismatch(actual, status)
     if (why) return why
     if (isObject(expected) && Object.keys(expected).length === 0) {
       return isObject(actual) && !Object.hasOwn(actual, 'hookSpecificOutput') ? null : `body: expected no decision ({}), got ${show(actual)}`
@@ -222,7 +230,7 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     if (r.status !== status) throw new PlayFailure(line, `${to}: status: expected ${status}, got ${r.status} ${r.text}`)
     if (body !== undefined && r.json === undefined) throw new PlayFailure(line, `${to}: expected a JSON body, got ${show(r.text)}`)
     // Checked even when the line gives no body: an answer to a permission request must still be PROTOCOL.md's.
-    const why = r.json === undefined ? null : replyMismatch(entry.route, body, r.json, bindings)
+    const why = r.json === undefined && entry.route !== ROUTES.permission ? null : replyMismatch(entry.route, body, r.json, bindings, r.status)
     if (why) throw new PlayFailure(line, `${to}: ${why}`)
     result.checked++
     say(`✓ reply ${to}: ${status}${r.text ? ` ${r.text.length > 100 ? `${r.text.slice(0, 99)}…` : r.text}` : ''}`)

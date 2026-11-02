@@ -73,7 +73,6 @@ test('match: a permission reply of {} means no decision, so a decision fails it'
   assert.equal(replyMismatch('/v1/permission', {}, {}, b), null)
   assert.match(replyMismatch('/v1/permission', {}, ALLOW, b), /expected no decision/)
   assert.match(replyMismatch('/v1/permission', {}, DENY, b), /expected no decision/)
-  assert.equal(replyMismatch('/v1/permission', {}, { note: 'a field added later' }, b), null)
   assert.equal(replyMismatch('/v1/permission', ALLOW, ALLOW, b), null)
   assert.match(replyMismatch('/v1/permission', ALLOW, DENY, b), /behavior: expected "allow", got "deny"/)
   // Elsewhere {} keeps the general rule.
@@ -106,20 +105,44 @@ test("match: an answer to a permission request is one of PROTOCOL.md's three, wh
   // Whatever the line expects: part of a decision, an error, no decision, or no body at all.
   const echo = adding(ALLOW, { updatedPermissions: setMode })
   assert.match(replyMismatch('/v1/permission', { hookSpecificOutput: { decision: { behavior: 'allow' } } }, echo, b), /updatedPermissions: the deck never sends/)
-  assert.match(replyMismatch('/v1/permission', { error: '*' }, { error: 'x', updatedInput: {} }, b), /^body\.updatedInput: the deck never sends/)
+  assert.match(replyMismatch('/v1/permission', { error: '*' }, { error: 'x', updatedInput: {} }, b, 405), /^body\.updatedInput: the deck never sends/)
   assert.match(replyMismatch('/v1/permission', {}, { updatedPermissions: setMode }, b), /^body\.updatedPermissions: the deck never sends/)
   assert.match(replyMismatch('/v1/permission', {}, { systemMessage: 'Approved' }, b), /^body\.systemMessage: Claude Code acts on it/)
   assert.match(replyMismatch('/v1/permission', undefined, echo, b), /updatedPermissions: the deck never sends/)
   const partialDeny = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', interrupt: true } } }
   assert.match(replyMismatch('/v1/permission', { hookSpecificOutput: { decision: { behavior: 'deny' } } }, partialDeny, b), /^body\.hookSpecificOutput\.decision\.message: missing \(expected "Denied from the Stream Deck\."\)/)
 
-  // PROTOCOL.md's answers pass, and so does a top-level field Claude Code doesn't know.
+  // PROTOCOL.md's answers pass, and an error answer to a request that isn't one, which Claude Code doesn't parse.
   for (const answer of [ALLOW, DENY, {}]) assert.equal(permissionAnswerMismatch(answer), null)
-  assert.equal(replyMismatch('/v1/permission', ALLOW, { ...ALLOW, note: 'a field added later' }, b), null)
-  assert.equal(replyMismatch('/v1/permission', { error: '*' }, { error: '/v1/permission takes POST' }, b), null)
+  assert.equal(replyMismatch('/v1/permission', { error: '*' }, { error: '/v1/permission takes POST' }, b, 405), null)
   assert.equal(replyMismatch('/v1/permission', undefined, DENY, b), null)
   // A line on another route that gives no body checks nothing.
   assert.equal(replyMismatch('/v1/hello', undefined, { v: 1, ok: false, error: 'version' }, b), null)
+})
+
+test('match: an answer to a permission request has nothing beyond its body, at the top either: Transport exempts it from "unknown fields are ignored"', () => {
+  const b = new Bindings()
+  const cases = [
+    // The verifier's: each matches by the general rule, as everything the line expects is in it.
+    [{}, { note: 'x' }, 200, /^body\.note: not in any of PROTOCOL\.md's answers, got "x" \(an answer is Allow, Deny or \{\} exactly\)$/],
+    [ALLOW, { ...ALLOW, note: 'x' }, 200, /^body\.note: not in any of PROTOCOL\.md's answers/],
+    [DENY, { ...DENY, extra: { nested: 1 } }, 200, /^body\.extra: not in any of PROTOCOL\.md's answers, got \{"nested":1\}/],
+    [undefined, { ...ALLOW, note: 'x' }, 200, /^body\.note: not in any/],
+    // Any 2xx is parsed, and its body is one of the three: one that isn't JSON or isn't an object is neither.
+    [undefined, undefined, 200, /^body: expected Allow, Deny or \{\}, got nothing$/],
+    [undefined, [], 204, /^body: expected Allow, Deny or \{\}, got \[\]$/],
+    // An error answer is Transport's, exactly.
+    [{ error: '*' }, { error: 'x', note: 'y' }, 405, /^body\.note: not in an error answer, got "y" \(an error answer is \{"error": "<reason>"\} exactly\)$/],
+    [undefined, {}, 401, /^body: expected an error answer, \{"error": "<reason>"\}, got \{\}$/],
+    [undefined, ALLOW, 500, /^body\.hookSpecificOutput: not in an error answer/],
+  ]
+  for (const [expected, actual, status, why] of cases) {
+    if (expected !== undefined && actual !== undefined) assert.equal(mismatch(expected, actual), null, 'the general rule lets it through')
+    assert.match(replyMismatch('/v1/permission', expected, actual, b, status) ?? 'no mismatch', why)
+  }
+  assert.match(permissionAnswerMismatch({ note: 'x' }), /^body\.note: not in any of PROTOCOL\.md's answers/)
+  // Elsewhere the general rule stands: a field added later is fine.
+  assert.equal(replyMismatch('/v1/hello', { v: 1, ok: true }, { v: 1, ok: true, note: 'x' }, b), null)
 })
 
 test('match: expect lines, field by field', () => {

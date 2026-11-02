@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, test } from "node:test";
 
-import { allowedHosts, BRIDGE_HOST, BRIDGE_PORT } from "../src/bridge/config.js";
+import { allowedHosts, BRIDGE_HOST, BRIDGE_PORT, MAX_BODY_BYTES } from "../src/bridge/config.js";
 import { type BridgeRoutes, BridgeServer } from "../src/bridge/server.js";
 import { SessionModel } from "../src/model/sessions.js";
-import { SCRUB_RUN, scrub } from "../src/util/log.js";
+import { fingerprint } from "../src/protocol/fingerprint.js";
+import { SCRUB_RUN, Scrubber } from "../src/util/log.js";
 import { type Outcome, send, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -247,17 +248,84 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.equal(status(await send(port, { token, path: "/v1/events", body }).outcome), 204);
 	});
 
-	test("scrub takes out the token, and any run of SCRUB_RUN or more of its characters", () => {
+	test("a Scrubber takes out the token, and any run of SCRUB_RUN or more of its characters", () => {
+		const scrub = (text: string, secret: string): string => new Scrubber(secret).scrub(text);
 		assert.equal(scrub(`/x/${TOKEN}/y`, TOKEN), "/x/<token>/y");
 		assert.equal(scrub(`z${TOKEN.slice(0, SCRUB_RUN)}`, TOKEN), "z<token>", "a cut that ends in its start");
 		assert.equal(scrub(`${TOKEN.slice(-SCRUB_RUN)}z`, TOKEN), "<token>z", "a summary that keeps only its end");
 		assert.equal(scrub(`q${TOKEN.slice(10, 40)}q${TOKEN}q`, TOKEN), "q<token>q<token>q");
+		assert.equal(scrub(`${TOKEN.slice(0, 20)}${TOKEN.slice(30, 50)}`, TOKEN), "<token>", "touching runs become one");
 		assert.equal(scrub(`z${TOKEN.slice(0, SCRUB_RUN - 1)}z`, TOKEN), `z${TOKEN.slice(0, SCRUB_RUN - 1)}z`, "fewer characters stay");
 		assert.equal(scrub("fixture-token, then fixture-to…", "fixture-token"), "<token>, then <token>…");
 		const odd = "a]b^c-d\\e[f";
 		assert.equal(scrub(`<${odd}> <${odd.slice(1, 9)}>`, odd), "<<token>> <<token>>", "characters a regular expression treats specially");
 		assert.equal(scrub("tok, tok", "tok"), "<token>, <token>", "a secret shorter than SCRUB_RUN goes only whole");
 		assert.equal(scrub(TOKEN, ""), TOKEN);
+		// The run rule holds anywhere in a string far longer than a backtracking regular expression could take.
+		const token = "0123456789abcdef".repeat(4);
+		const half = "fedcba9876543210".repeat(187_500);
+		const long = new Scrubber(token).scrub(`${half}${token.slice(3, 3 + SCRUB_RUN)}${half}${token.slice(5, 4 + SCRUB_RUN)}`);
+		assert.equal(long.length, 2 * half.length + "<token>".length + SCRUB_RUN - 1);
+		assert.ok(long === `${half}<token>${half}${token.slice(5, 4 + SCRUB_RUN)}`, "8 characters in a row go, 7 stay");
+	});
+
+	test("a body with one 6M-character hex string is held, with the token's runs taken out of it", async () => {
+		// Every character is one of the token's, and none of its windows of SCRUB_RUN are in the token but the one
+		// put in the middle, which must still go.
+		const token = "0123456789abcdef".repeat(4);
+		const half = "fedcba9876543210".repeat(187_500);
+		const input = { file_path: "/x/big.txt", content: `${half}${token.slice(3, 3 + SCRUB_RUN)}${half}` };
+		const { model, port } = await start({ token });
+		const { outcome } = send(port, { token, body: JSON.stringify({ session_id: "sess-1", tool_name: "Write", tool_input: input }), headers: { "x-deck-host": HOST } });
+		await waitFor(() => model.held.size === 1, "the request to be held", 10_000);
+		assert.equal(model.held.oldest?.fp, fingerprint("Write", { ...input, content: `${half}<token>${half}` }));
+		model.held.press(1, "allow");
+		const reply = await outcome;
+		assert.ok("status" in reply, JSON.stringify(reply));
+		assert.equal(reply.body, ALLOW_JSON);
+	});
+
+	test("a body of 1.6M short strings doesn't hold up the bridge: the token's scrubber is built once, not per string", async () => {
+		const { port } = await start();
+		const body = JSON.stringify({ ...MOD, seq: 1, events: [], pad: Array.from({ length: 1_600_000 }, (_, i) => `s${i % 10}`) });
+		assert.ok(Buffer.byteLength(body) <= MAX_BODY_BYTES);
+		const started = performance.now();
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/events", body }).outcome), 204);
+		// Built per string, the scrubber took 2.7 s here on this Mac; built once, the whole request takes about 50 ms.
+		const ms = performance.now() - started;
+		assert.ok(ms < 1000, `${Math.round(ms)} ms`);
+	});
+
+	test("20,000 levels of nesting don't crash a route: a PermissionRequest that deep is held without an fp", async () => {
+		const { model, port, log } = await start();
+		const depth = 20_000;
+		const deep = `${"[".repeat(depth)}"${TOKEN}"${"]".repeat(depth)}`;
+		const held = send(port, { token: TOKEN, body: `{"session_id":"sess-1","tool_name":"Custom","tool_input":{"a":${deep}}}`, headers: { "x-deck-host": HOST } });
+		await waitFor(() => model.held.size === 1, "the request to be held");
+		assert.deepEqual(model.held.oldest && { tool: model.held.oldest.tool, fp: model.held.oldest.fp, host: model.held.oldest.host }, { tool: "Custom", fp: null, host: HOST });
+		assert.ok(log.at("info").some((l) => /^info HELD #1 tool "Custom" "Custom" fp none from local_test-server; 1 held$/.test(l)), log.at("info").join("\n"));
+		// The mod's routes take a body that deep too.
+		const events = await send(port, { token: TOKEN, path: "/v1/events", body: `{"sid":"sess-1","host":"${HOST}","inst":"i1","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1}],"x":${deep}}` }).outcome;
+		assert.equal(status(events), 204);
+		model.held.press(1, "deny");
+		assert.equal(status(await held.outcome), 200);
+		assert.equal(log.at("error").length, 0, log.at("error").join("\n"));
+	});
+
+	test("the token is taken out of strings at any depth, and out of names, where a __proto__ stays a plain key", async () => {
+		const { model, port } = await start();
+		const nest = (inner: string): string => {
+			let s = JSON.stringify(inner);
+			for (let i = 0; i < 1000; i++) s = i % 2 === 0 ? `[${s}]` : `{"n":${s}}`;
+			return s;
+		};
+		const { outcome } = send(port, { token: TOKEN, body: `{"tool_name":"Custom","tool_input":{"k${TOKEN.slice(0, SCRUB_RUN)}":1,"__proto__":"p${TOKEN}","z":${nest(`x${TOKEN}`)},"${TOKEN}":2}}` });
+		await waitFor(() => model.held.size === 1, "the request to be held");
+		// As JSON.parse makes it, "__proto__" is an own key here too, so the fingerprint counts it.
+		const expected: unknown = JSON.parse(`{"k<token>":1,"__proto__":"p<token>","z":${nest("x<token>")},"<token>":2}`);
+		assert.equal(model.held.oldest?.fp, fingerprint("Custom", expected));
+		model.held.press(1, "allow");
+		assert.equal(status(await outcome), 200);
 	});
 
 	test("a busy port: listen rejects; start logs, retries after 1 s, and listens once the port is free", async () => {

@@ -84,10 +84,14 @@ export async function signature(file) {
   }
 }
 
+/** A needs-the-user flag in a record: true or, from app 4.4212.0, a sentence, of which any non-empty one counts. */
+const needs = (v) => v === true || (typeof v === 'string' && v !== '')
+
 /**
  * The fields the deck uses from a record, or null when it can't be read. The app's summaries are text about
- * the user's work, so only their needs-the-user flags are kept. `needs_action` is true or, from app 4.4212.0,
- * a sentence: any non-empty one counts.
+ * the user's work, so only whether the last turn needs the user is kept, read as the app reads it (PROTOCOL.md,
+ * status rule 6): a `turnWrapUp` with a string `description` decides alone, by its `needsUser`, and the
+ * summary's `needs_action` counts only without one.
  */
 export async function readRecord(file) {
   let obj
@@ -98,7 +102,7 @@ export async function readRecord(file) {
   }
   if (!isObject(obj)) return null
   const out = pick(obj, ['model', 'effort', 'permissionMode', 'lastFocusedAt'])
-  const action = obj.postTurnSummary?.needs_action
-  out.needsUser = obj.turnWrapUp?.needsUser === true || action === true || (typeof action === 'string' && action !== '')
+  const wrapUp = obj.turnWrapUp
+  out.needsUser = isObject(wrapUp) && typeof wrapUp.description === 'string' ? needs(wrapUp.needsUser) : needs(obj.postTurnSummary?.needs_action)
   return out
 }

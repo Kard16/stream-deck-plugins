@@ -60,11 +60,13 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 		renameSync(`${file}.tmp`, file);
 	};
 
-	test("reads the fields the deck uses; needs_action and needsUser are strings here, and any non-empty one needs the user", async () => {
+	test("reads the fields the deck uses; a turn needs the user as the app reads it, with strings where it writes sentences", async () => {
 		write(org, A, record(A));
-		write(org, B, record(B, { title: "Other", postTurnSummary: { needs_action: "squash-merge PR #99 (go)" }, turnWrapUp: { description: "x" } }));
-		// The wrap-up asks the user something and the summary doesn't: the app shows that turn as blocked.
-		write(org, C, record(C, { turnWrapUp: { description: "Opened PR #12.", needsUser: "Merge PR #12?" } }));
+		// The shape of two records on this Mac: the summary says blocked, with a sentence in needs_action, but the
+		// wrap-up under it doesn't ask the user anything, so the app shows the turn as ready for review.
+		write(org, B, record(B, { title: "Other", postTurnSummary: { status_category: "blocked", needs_action: "squash-merge PR #99 (go)" }, turnWrapUp: { description: "x" } }));
+		// The wrap-up asks the user something: the app shows that turn as blocked.
+		write(org, C, record(C, { postTurnSummary: { status_category: "blocked", needs_action: "Merge PR #12?" }, turnWrapUp: { description: "Opened PR #12.", needsUser: "Merge PR #12?" } }));
 		const records = await new RecordsReader(root).scan([A, B, C]);
 		assert.deepEqual(records.get(A), {
 			host: A,
@@ -75,16 +77,23 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 			lastFocusedAt: 1_793_573_111_660,
 			needsUser: false,
 		});
-		assert.equal(records.get(B)?.needsUser, true);
+		assert.equal(records.get(B)?.needsUser, false);
 		assert.equal(records.get(C)?.needsUser, true);
-		// `turnWrapUp.needsUser` and `postTurnSummary.needs_action` each need the user when true or a non-empty string.
-		assert.equal(parseRecord(A, JSON.stringify({ turnWrapUp: { needsUser: true } }))?.needsUser, true);
-		assert.equal(parseRecord(A, JSON.stringify({ turnWrapUp: { needsUser: "yes" } }))?.needsUser, true);
-		assert.equal(parseRecord(A, JSON.stringify({ turnWrapUp: { needsUser: "" } }))?.needsUser, false);
-		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: true } }))?.needsUser, true);
-		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: " " } }))?.needsUser, true);
-		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: "" } }))?.needsUser, false);
-		assert.equal(parseRecord(A, JSON.stringify({ postTurnSummary: { needs_action: false } }))?.needsUser, false);
+		const needsUser = (fields: Record<string, unknown>): boolean | undefined => parseRecord(A, JSON.stringify(fields))?.needsUser;
+		// With a wrap-up that has a string description, only its needsUser counts, when true or a non-empty string.
+		assert.equal(needsUser({ turnWrapUp: { description: "d", needsUser: "yes" } }), true);
+		assert.equal(needsUser({ turnWrapUp: { description: "", needsUser: true }, postTurnSummary: { needs_action: "" } }), true);
+		assert.equal(needsUser({ turnWrapUp: { description: "d", needsUser: "" }, postTurnSummary: { needs_action: "x" } }), false);
+		assert.equal(needsUser({ turnWrapUp: { description: "d" }, postTurnSummary: { needs_action: true } }), false);
+		// Without one, needs_action counts, the same way.
+		assert.equal(needsUser({ postTurnSummary: { needs_action: true } }), true);
+		assert.equal(needsUser({ postTurnSummary: { needs_action: " " } }), true);
+		assert.equal(needsUser({ postTurnSummary: { needs_action: "" } }), false);
+		assert.equal(needsUser({ postTurnSummary: { needs_action: false } }), false);
+		// A wrap-up without a string description isn't one: its needsUser doesn't count, and needs_action does.
+		assert.equal(needsUser({ turnWrapUp: { needsUser: "yes" } }), false);
+		assert.equal(needsUser({ turnWrapUp: { description: 1, needsUser: "yes" }, postTurnSummary: { needs_action: "x" } }), true);
+		assert.equal(needsUser({ turnWrapUp: "d", postTurnSummary: { needs_action: "x" } }), true);
 	});
 
 	test("only the listed hosts are read, each once until its file changes", async () => {

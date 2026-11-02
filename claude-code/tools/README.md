@@ -56,11 +56,13 @@ The main thread runs this, with a throwaway session it started from the `deck-sa
    Take the ids from `state`. With an id, `approve` and `deny` press as a key that showed that request (S6): when another held request is older, the press alerts and answers nothing, so a press can't land on a request that arrived since you looked. `answer` takes `tool` requests only: an ask request (AskUserQuestion, ExitPlanMode) is refused, since the deck never answers one, and a press on one jumps to its session instead.
 
    A held request stays held until a command answers it or a release rule ends it: the fake bridge has no timeout of its own. `prompt` and `mode` alert for a session the registry doesn't list or whose mod hasn't spoken to the bridge, so they reach only sessions with the plugin: throwaway sessions until Phase 5. Only send them to a session the main thread started.
+
+   `prompt` is a Saved Prompt key whose text is the one you give, as PROTOCOL.md's "Commands" has the key: while the last prompt that text queued is still queued, delivered or waiting, another `prompt` with the same text alerts and queues nothing, whatever the session. One that no poll takes within 60 s fails with "not delivered", and a final result, or a reset, frees the key.
 5. **Read the log** in the run folder, alongside the session's transcript:
 
    ```sh
    cd claude-code/tools/run/<the run>
-   jq -c 'select(.kind == "fp-check") | {request, tool, match, bridgeFp, modFp, bridgeSummary, modSummary}' events.jsonl
+   jq -c 'select(.kind == "fp-check") | {request, tool, match, unpaired, why, bridgeFp, modFp, bridgeSummary, modSummary, calls}' events.jsonl
    jq -c 'select(.kind == "held" or .kind == "release" or .kind == "answered") | {kind, id, tool, summary, rule, why, decision, by}' events.jsonl
    jq -c 'select(.kind == "command" or .kind == "result-ignored")' events.jsonl
    jq -c 'select(.kind == "hello" or .kind == "mod-restart")' events.jsonl
@@ -68,10 +70,15 @@ The main thread runs this, with a throwaway session it started from the `deck-sa
    jq -c 'select(.kind == "route-error" or .kind == "control-error" or .unlogged)' events.jsonl
    ```
 
-   `fp-check` is PROTOCOL.md's check that both sides' fingerprints agree: for each held request, the mod's `tool.start` in the same session with the same fp, or else its latest unfinished one for the same tool, with both fps and both summaries. Every line of the log has the token, and any run of 8 or more of its characters, scrubbed out. A request a route threw on gets 500 and a `route-error` line, and the bridge carries on; a line whose body can't be written, nested too deep, keeps its other fields and says why in `unlogged`.
+   `fp-check` is PROTOCOL.md's check that both sides' fingerprints agree, one line for each held request, with both fps and both summaries:
+   - `match: true`: the mod's `tool.start` in the same session with the request's tool and fp, logged as soon as both have come, in either order.
+   - `match: false`: none had its fp, and the session's turn left one way to pair it: one call of its tool that paired with nothing, and no other request of that tool waiting. The fps truly differ.
+   - `unpaired: true`, with `match: null` and the `calls` it could have been: none had its fp, and it can't tell which call was its own, or no call of its tool came.
+
+   A request with no `tool.start` of its fp waits for one, since parallel calls of a tool can send theirs in any order, so `match: false` and `unpaired` lines come only when the session's main loop ends its turn, by when every `tool.start` of the turn has come, or its mod restarts, its session ends, or the bridge resets (`why`). Every line of the log has the token, and any run of 8 or more of its characters, scrubbed out. A request a route threw on gets 500 and a `route-error` line, and the bridge carries on; a line whose body can't be written, nested too deep, keeps its other fields and says why in `unlogged`.
 6. **Stop it** with Ctrl-C. Held requests get `{}`, no decision, so the app's dialogs decide, and open polls get no commands.
 
-What to look for: a hello with `v: 1`; events with rising `seq`; `match: true` in every `fp-check`; held requests released by rule 1 when answered in the app; a prompt going `waiting` then `done`; a mode raise allowed with no card in the app; and nothing at all from sessions without the plugin.
+What to look for: a hello with `v: 1`; events with rising `seq`; `match: true` in every `fp-check`, and for an `unpaired` one, whether one of its `calls` has its summary but another fp; held requests released by rule 1 when answered in the app; a prompt going `waiting` then `done`; a mode raise allowed with no card in the app; and nothing at all from sessions without the plugin.
 
 ## Ladder step 5: the real deck plugin against fake-claude
 
@@ -107,11 +114,11 @@ mise exec -- node claude-code/tools/fake-bridge.mjs --port 0 --token-file $D/tok
 mise exec -- node claude-code/tools/fake-claude.mjs --against-fake --url http://127.0.0.1:<port> --token-file $D/token
 ```
 
-Presses go to the fake bridge's control routes, and the fixtures' registry and records files are written into its folders and removed afterwards. fake-claude refuses to write into anything under `~/.claude/` or `~/Library/Application Support/Claude/`, so this can't run against a fake bridge reading the real folders. It protects both homes, `$HOME`'s and the account's own (which a `$HOME` pointed elsewhere doesn't move), and compares every folder it writes into by its real path as the system gives it, links followed and, on the Mac's case-insensitive volume, each name in its case on disk. It also refuses a registry or records folder that holds JSON files it didn't write. One failure ends that fixture, with the line and the reason. `--verbose` prints every line as it plays.
+Presses go to the fake bridge's control routes, and the fixtures' registry and records files are written into its folders and removed afterwards. fake-claude refuses to write into anything under `~/.claude/` or `~/Library/Application Support/Claude/`, so this can't run against a fake bridge reading the real folders. It protects both homes, `$HOME`'s and the account's own (which a `$HOME` pointed elsewhere doesn't move), and compares every folder it writes into by its real path as the system gives it, links followed and, on the Mac's case-insensitive volume, each name in its case on disk. The Mac firmlinks `/Users` and `/private` into the Data volume, so a folder named through `/System/Volumes/Data` has a second real path, which realpath keeps: paths are compared with that prefix taken off. It also refuses a registry or records folder that holds JSON files it didn't write. One failure ends that fixture, with the line and the reason. `--verbose` prints every line as it plays.
 
 ## The fake bridge's control routes
 
-On the same server, checked like every route: the Host first, then the token.
+On the same server, checked like every route: the Host first, then the token. Their answers are scrubbed of the token and of any run of 8 or more of its characters, like the log: the registry's and records' fields come from files the token can be in, a session's title say.
 
 | Route | Does |
 |---|---|
@@ -119,19 +126,21 @@ On the same server, checked like every route: the Host first, then the token.
 | `GET /control/taken` | How many protocol requests it has taken since the last reset. fake-claude waits on it so a held request has landed before the next line. |
 | `POST /control/approve`, `/control/deny` | A key press on the oldest held request. `{"shown": "p3"}` presses as a key that showed p3: anything else held alerts. |
 | `POST /control/answer` | `{"id", "decision": "allow" \| "deny" \| "none"}` for one held `tool` request. An ask request gets 400: the deck never answers one. |
-| `POST /control/prompt`, `/control/mode` | `{"host", "text"}` or `{"host", "mode"}`: queues a command, or alerts. |
+| `POST /control/prompt`, `/control/mode` | `{"host", "text"}` or `{"host", "mode"}`: queues a command, or alerts. A prompt is the Saved Prompt key with that text, which alerts while its last prompt is still queued, delivered or waiting. |
 | `POST /control/rescan` | Reads the registry and records now. |
 | `POST /control/reset` | Forgets everything: held requests get `{}`, open polls no commands. Command ids keep counting. |
 
 ## Where PROTOCOL.md leaves room
 
 The fake bridge takes these readings. Each is meant to surprise the real deck least.
-- **Release rule 2's "held from before that change"** is judged by what the bridge saw, as PROTOCOL.md lets a fake bridge: the request was held when a registry reading showed `waiting`. The fixtures' times are made up (T0 is 2026-11-02 06:13:20 UTC), and fake-claude doesn't give the bridge their clock, so comparing an arrival with `statusUpdatedAt` would pass or fail by the date. Rule 3 compares them as written; no fixture holds a request while its session reads idle. Without `statusUpdatedAt`, rule 3 releases the session's requests when a reading sees it turn idle, a session's first reading included.
-- **An answer to a permission request must be one of PROTOCOL.md's three, whatever its reply line expects,** and an expected `{}` is no decision: no `hookSpecificOutput`. fake-claude fails an answer with `updatedPermissions` or `updatedInput` anywhere in it, with any of Claude Code's own top-level fields (`continue`, `stopReason`, `decision`, `reason`, `systemMessage`, `suppressOutput`), or with a `hookSpecificOutput` that isn't exactly Allow's or Deny's. It lets any other top-level field through, as one Claude Code doesn't know, which "Transport" lets either side add.
-- **The clock of a waiting prompt** is its session's time without an open poll, from when its last poll was answered, timed out or closed. A poll answered at once, because commands were queued or `wait` was 0, shows the mod is there, so the 60 s start again from its answer.
-- **An inst seen before** for a session is still taken (its events apply, its polls are answered), and the session keeps the newest inst. A new inst fails the delivered and waiting commands with "the mod restarted".
+- **Release rules 2 and 3 are judged by what the bridge saw,** as PROTOCOL.md lets a fake bridge, and `statusUpdatedAt` is never compared. Rule 2's "held from before that change": the request was held when a registry reading showed `waiting`. Rule 3: a reading shows the session `idle`, and the reading before showed it otherwise, so the bridge saw the change after every request it holds then arrived; a session's first reading, its first after a reset or after it left the registry included, is no change. The fixtures' times are made up (T0 is 2026-11-02 06:13:20 UTC), and fake-claude doesn't give the bridge their clock, so comparing an arrival with `statusUpdatedAt` would pass or fail by the date.
+- **An answer to a permission request must be one PROTOCOL.md allows, whatever its reply line expects,** since "Transport" exempts it from "unknown fields are ignored", and an expected `{}` is no decision. A 2xx answer, the one Claude Code parses, must be Allow, Deny or `{}` exactly: fake-claude fails one with any field of its own, at the top or inside `hookSpecificOutput`, and names `updatedPermissions`, `updatedInput` and Claude Code's own top-level fields (`continue`, `stopReason`, `decision`, `reason`, `systemMessage`, `suppressOutput`) when it's one of them. Any other answer is an error, which Claude Code doesn't parse, and must be "Transport"'s `{"error": "<reason>"}` exactly: auth's `GET /v1/permission` expects a 405 with one.
+- **The clock of a waiting prompt** is its session's time without an open poll, from when its last poll was answered, timed out or closed. A poll answered at once, because commands were queued or `wait` was 0, shows the mod is there, so the 60 s start again from its answer. A queued command has 60 s from when it was queued for a poll to take it, and a delivered one 60 s from its delivery for a result.
+- **An inst seen before** for a session is still taken (its events apply, its polls are answered), and the session keeps the newest inst. A new inst fails the delivered and waiting commands with "the mod restarted", and answers the open poll, the old instance's, with no commands.
+- **A Saved Prompt key is known by its text,** since the fake bridge has no keys: `/control/prompt` with a text whose last prompt is still queued, delivered or waiting alerts and queues nothing, whatever session it names. Otherwise each press is a key of its own.
+- **A mod's fields that PROTOCOL.md gives as strings are kept only as strings:** hello's `cwd`, `model`, `mode`, `effort`, `plugin` and `cc`, and a result's `error` and `detail`, are null otherwise; an event's `agent` that isn't a non-empty string counts as missing, as the deck reads it; and `seq`s are kept by an `inst` that's a string. Anything else could be nested too deep to write out, and stop every later state from answering.
 - **Rule 4's "forgets what the bridge knew of it"** drops all that came from the session's mod: its hello, settings, context, tools, insts and seqs. A later request from the mod starts afresh.
 - **`/control/answer` answers `tool` requests only,** since the deck never answers an ask request.
 - **A wait outside 0–20 s** is clamped, and a POST body that's JSON but not an object gets 400.
-- **A request a route throws on** gets 500 `{"error"}`, which the hook takes as no decision, so the app's dialog decides. A tool_input nested too deep for `canonical()` does it.
-- **The token is scrubbed from a body before it's read,** as the deck does, and so is any run of 8 or more of its characters: the mod cuts a summary to 39 characters, so its `tool.start` can end in the token's first few. A request whose input holds the token gets another fp than the mod's, and is released by the other rules.
+- **A request a route throws on** gets 500 `{"error"}`, which the hook takes as no decision, so the app's dialog decides. A tool_input nested too deep for `canonical()` does it. So does an answer that can't be written out: a control answer echoing a value nested too deep gets a plain 500 in its place.
+- **The token is scrubbed from a body before it's read,** as the deck does, and so is any run of 8 or more of its characters: the mod cuts a summary to 39 characters, so its `tool.start` can end in the token's first few. A request whose input holds the token gets another fp than the mod's, and is released by the other rules. The control routes' answers are scrubbed too, for what came from the folders.

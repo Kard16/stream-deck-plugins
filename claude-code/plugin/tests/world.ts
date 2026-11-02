@@ -60,7 +60,8 @@ export function world(on: On, o: WorldOptions = {}) {
     /** The reason a refused connection gives. */
     refusal: 'connect ECONNREFUSED 127.0.0.1:47600',
   }
-  const session = { sid: SID, model: MODEL, version: '2.1.309' }
+  /** What `$.session.*` reads. A model of undefined can't be read: `$.session.model()` rejects. */
+  const session = { sid: SID, model: MODEL as string | undefined, version: '2.1.309' }
   /** Answers each `$.tool.call`, standing for the tool itself. */
   const engine = {
     tool: (_e: Record<string, unknown>): unknown => ({ result: 'ran' }),
@@ -69,7 +70,7 @@ export function world(on: On, o: WorldOptions = {}) {
   const clock = mock.clock(on)
   mock.env(on, o.env ?? { DECK_TOKEN: TOKEN, CLAUDE_CODE_HOST_SESSION_ID: HOST })
   on('session.id', () => ({ value: session.sid }))
-  on('session.model', () => ({ value: session.model }))
+  on('session.model', () => (session.model === undefined ? { deny: "the model can't be read" } : { value: session.model }))
   on('session.cwd', () => ({ value: '/sandbox' }))
   on('session.version', () => ({ value: { version: session.version } }))
   on('ui.log', (_$, e) => {

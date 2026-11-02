@@ -216,11 +216,77 @@ describe("command queue and long poll", () => {
 		const flying = queue.queue("local_a", { t: "prompt", text: "one" });
 		queue.poll("local_a", "ia", 20, new FakePoll());
 		const queued = queue.queue("local_a", { t: "prompt", text: "two" });
-		queue.forgetInFlight("local_a", "the mod restarted");
+		queue.restarted("local_a", "ib", "the mod restarted");
 		assert.deepEqual([flying.state, flying.error], ["failed", "the mod restarted"]);
 		assert.equal(queued.state, "queued");
 		queue.failHost("local_a", "the session ended");
 		assert.deepEqual([queued.state, queued.error], ["failed", "the session ended"]);
+	});
+
+	test("a mod restart answers the old instance's open poll with none, so a command queued after waits for the new one", () => {
+		const { queue } = setup();
+		const old = new FakePoll();
+		queue.poll("local_a", "ia", 20, old);
+		const other = new FakePoll();
+		queue.poll("local_b", "ib", 20, other);
+		queue.restarted("local_a", "ia-2", "the mod restarted");
+		assert.deepEqual(old.answers, [{ cmds: [] }]);
+		assert.equal(queue.polling("local_a"), false);
+		assert.deepEqual(other.answers, [], "another session's poll stays open");
+		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
+		assert.equal(cmd.state, "queued");
+		const fresh = new FakePoll();
+		queue.poll("local_a", "ia-2", 20, fresh);
+		assert.deepEqual(fresh.answers, [{ cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] }]);
+		assert.deepEqual([cmd.state, cmd.inst], ["delivered", "ia-2"]);
+	});
+
+	test("a queued command that no poll takes within 60 s fails with 'not delivered'", () => {
+		const { queue, clock } = setup();
+		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.equal(cmd.state, "queued");
+		clock.advance(1);
+		assert.deepEqual([cmd.state, cmd.error], ["failed", "not delivered"]);
+		const late = new FakePoll();
+		queue.poll("local_a", "ia", 20, late);
+		clock.advance(20_000);
+		assert.deepEqual(late.answers, [{ cmds: [] }], "a later poll doesn't get it");
+		assert.equal(clock.pendingTimers, 0);
+	});
+
+	test("a command taken just in time gets its 60 s for a result from delivery, not from when it was queued", () => {
+		const { queue, clock } = setup();
+		const cmd = queue.queue("local_a", { t: "mode", mode: "plan" });
+		clock.advance(IN_FLIGHT_MS - 1);
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		assert.equal(cmd.state, "delivered");
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.equal(cmd.state, "delivered");
+		clock.advance(1);
+		assert.deepEqual([cmd.state, cmd.error], ["failed", "no result"]);
+		assert.equal(clock.pendingTimers, 0);
+	});
+
+	test("a poll answered at once counts as the mod being alive: a waiting prompt outlives 60 s of such polls", () => {
+		const { queue, clock } = setup();
+		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		assert.equal(queue.result("local_a", "ia", cmd.id, "waiting", null, null), true);
+		// The mod's polls come every 50 s and are answered at once (wait 0), so no poll is ever open, yet the
+		// session never goes 60 s without one.
+		for (let i = 0; i < 6; i++) {
+			clock.advance(50_000);
+			const now = new FakePoll();
+			queue.poll("local_a", "ia", 0, now);
+			assert.deepEqual(now.answers, [{ cmds: [] }]);
+		}
+		assert.equal(cmd.state, "waiting");
+		// Then they stop: 60 s after the last, the prompt fails.
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.equal(cmd.state, "waiting");
+		clock.advance(1);
+		assert.deepEqual([cmd.state, cmd.error], ["failed", "no result"]);
 	});
 
 	test("a waiting prompt still ends when the mod restarts or the session ends", () => {
@@ -228,7 +294,7 @@ describe("command queue and long poll", () => {
 		const restarted = queue.queue("local_a", { t: "prompt", text: "one" });
 		queue.poll("local_a", "ia", 20, new FakePoll());
 		queue.result("local_a", "ia", restarted.id, "waiting", null, null);
-		queue.forgetInFlight("local_a", "the mod restarted");
+		queue.restarted("local_a", "ia-2", "the mod restarted");
 		assert.deepEqual([restarted.state, restarted.error], ["failed", "the mod restarted"]);
 		const ended = queue.queue("local_a", { t: "prompt", text: "two" });
 		queue.poll("local_a", "ia-2", 20, new FakePoll());

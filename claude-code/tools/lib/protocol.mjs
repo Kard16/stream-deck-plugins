@@ -33,7 +33,7 @@ export const MAX_WAIT_S = 20
 /**
  * A delivered command with no result this long after delivery counts as failed, "no result". A prompt's
  * `waiting` stops that clock; a waiting prompt fails the same way once its session has gone this long without
- * an open poll.
+ * an open poll. A queued command that no poll takes this long after it was queued fails too, "not delivered".
  */
 export const IN_FLIGHT_MS = 60_000
 

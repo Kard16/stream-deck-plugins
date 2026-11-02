@@ -312,8 +312,18 @@ export async function startFakeBridge(options = {}) {
 
     const send = (status, json, headers = {}) => {
       if (answered || res.writableEnded || res.destroyed) return false
+      let text
+      try {
+        text = json === undefined ? '' : JSON.stringify(json)
+      } catch (err) {
+        // Written out before the request counts as answered: a body that can't be, one nested too deep, gets a
+        // plain 500 in its place, which can't fail, rather than no answer at all.
+        return send(500, { error: `the fake bridge can't write its answer: ${errorText(err)}` })
+      }
+      // A control answer reaches a person's terminal, so it's scrubbed like the log: the registry's and records'
+      // fields come from files the token can be in, a session's title say, and nothing scrubbed them on the way in.
+      if (isControl) text = scrub(text)
       answered = true
-      const text = json === undefined ? '' : JSON.stringify(json)
       res.writeHead(status, text ? { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) } : headers)
       res.end(text)
       write({ kind: 'answer', n, t: Date.now(), status, ms: round1(performance.now() - t0), ...(json === undefined ? {} : { body: json }) })

@@ -142,7 +142,8 @@ test('cli: fake-claude --interactive reads the person\'s answers from stdin', as
 test('cli: the control commands', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
-  fs.writeFileSync(path.join(env.registryDir, '7.json'), JSON.stringify({ pid: 7, sessionId: 's7', hostSessionId: 'local_seven', name: 'Seven', status: 'busy', statusUpdatedAt: 1 }))
+  // A session titled with a run of the token, as a session that set it might be.
+  fs.writeFileSync(path.join(env.registryDir, '7.json'), JSON.stringify({ pid: 7, sessionId: 's7', hostSessionId: 'local_seven', name: `Seven ${env.token.slice(2, 16)}`, status: 'busy', statusUpdatedAt: 1 }))
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir], home)
   const ctl = (...args) => run(BRIDGE, [...args, '--url', url, '--token-file', env.tokenFile], { env: home })
 
@@ -151,7 +152,8 @@ test('cli: the control commands', async (t) => {
   const state = JSON.parse(r.out)
   assert.deepEqual(state.deck.sessions, ['local_seven'])
   assert.equal(state.dirs.registry, env.registryDir)
-  assert.equal(r.out.includes(env.token), false)
+  assert.equal(r.out.includes(env.token.slice(2, 16)), false, 'no run of the token on stdout')
+  assert.equal(state.registry.local_seven.name, 'Seven <token>')
 
   r = await ctl('approve')
   assert.equal(r.code, 1, 'nothing held: the press alerts')
@@ -231,6 +233,17 @@ test('cli: fake-claude won\'t write fixture files into the app\'s folders', asyn
     assert.match(r.out, /won't write fixture files into .*\.CLAUDE\/SESSIONS/)
   } else {
     t.diagnostic('this volume is case-sensitive: the case check was skipped')
+  }
+  // The same folder through the Data volume, which the Mac firmlinks /private and /Users into: realpath keeps the
+  // name it's given, so the guard compares without the /System/Volumes/Data prefix.
+  const firm = path.join('/System/Volumes/Data', fs.realpathSync.native(sessions))
+  if (fs.existsSync(firm)) {
+    const data = await serve(env, ['--token-file', env.tokenFile, '--run-dir', path.join(env.root, 'run-data'), '--registry-dir', firm, '--records-dir', path.join(env.root, 'records'), '--quiet'], home)
+    r = await run(CLAUDE, ['--against-fake', '--url', data.url, '--token-file', env.tokenFile, 'hello'], { env: home })
+    assert.equal(r.code, 1, r.out)
+    assert.match(r.out, /won't write fixture files into \/System\/Volumes\/Data\/.*\.claude\/sessions, inside /)
+  } else {
+    t.diagnostic(`no ${firm}: the Data volume check was skipped`)
   }
   // A link in a fake records folder that leads into the app's: each folder written into is checked too.
   const fakeRecords = path.join(env.root, 'fake-records')
