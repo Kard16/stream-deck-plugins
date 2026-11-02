@@ -528,6 +528,11 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - The deck can't see the app's background tasks, which hide the app's needs-input indicator.
     - The app's summary loader `OM` drops malformed summaries the deck still reads.
     - The tools have small test gaps.
+    - The fake bridge still takes a result from an older `inst`, where the amended text and the real deck ignore it.
+- 2026-11-01, **the `deny` fixture and PROTOCOL.md's wording caught up with round 4.**
+  - The fixture's refusal is now an errored result, and its `tool.end` has no `denied`.
+  - Matching covers 2xx and error answers separately, the records list names the two fields rule 6 reads, and rule 6 lists its known differences from the app.
+  - Plugin 75/75 (its `deny` fixture passes), deck 181/181, tools 109/109, and all 14 fixtures end to end through the tools' CLIs.
 
 ## Progress
 

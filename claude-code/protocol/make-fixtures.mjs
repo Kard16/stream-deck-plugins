@@ -264,20 +264,20 @@ const fixtures = {}
   const a = session(A)
   const bash = { command: 'rm -rf build', description: 'Remove the build folder' }
   fixtures.deny = [
-    note('The Bash call needs permission, and a press on Deny refuses it. The turn stops; the engine still reports reason answer, as S2 saw.'),
+    note('The Bash call needs permission, and a press on Deny refuses it. The turn stops; the engine still reports reason answer, as S2 saw. The refusal reaches the mod as an errored result (ladder step 4), so its tool.end has ok false and no denied.'),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Clean up'),
     a.ev({ t: 'turn.start', turn: 't1' }),
     a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
-    a.tool('Bash', 'u3', bash, { deny: "The user doesn't want to proceed with this tool use." }),
+    a.tool('Bash', 'u3', bash, { isError: true, text: "The user doesn't want to proceed with this tool use. The tool use was rejected." }),
     a.ev(toolStart('Bash', 'u3', bash)),
     a.permission('p1', 'Bash', bash),
     a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
     { expect: { held: [held(A, 'Bash', bash)], status: { [A.host]: 'approval' } } },
     { press: { deny: {} } },
     reply('p1', DENY),
-    a.ev(toolEnd('Bash', 'u3', bash, { ok: false, denied: '*' })),
+    a.ev(toolEnd('Bash', 'u3', bash, { ok: false })),
     a.turnEnd('t1'),
     a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
     a.registry({ status: 'idle', statusUpdatedAt: T0 + 4000 }),
