@@ -168,6 +168,8 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 1. `approval`: the bridge holds a `tool` request for the session.
 2. `needs-you`: the bridge holds an `ask` request for it; or the registry says `waiting` and nothing is held for it (a session without the plugin, or a request lost when the deck restarted).
 3. `working`: the registry says `busy`. With the plugin, the summary of the main loop's latest unfinished `tool.start` says on what.
+   - **A `busy` that began before the main loop's last turn ended with reason `aborted` doesn't count,** and rules 4–8 take the session as idle. Claude Code keeps an interrupted session `busy` for up to 8 s after Esc, while the plugin's `turn.end` arrives within milliseconds (Phase 4).
+   - **The `busy` began before** when its `statusUpdatedAt` is at or before the moment the deck got that `turn.end`. Without that field, it began before when the deck's first reading of it came at or before then. Its first reading is the first that showed the session `busy` since one showed it otherwise. A session's very first reading counts.
 4. `failed`: idle, and its last main-loop turn ended with `failed`. A subagent's `failed` doesn't count.
 5. `interrupted`: idle, and its last main-loop `turn.end` had reason `aborted`.
 6. `needs-you`: idle, and the app's own needs-input indicator would show for the record. That's app 4.4212.0's `_D`, with its `Dw` and the record loader's `jM`:
@@ -267,7 +269,9 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 - It waits for each answer before going on, except for `/v1/permission` and `/v1/next`, which may be held: a later `reply` line checks those, waiting up to 2 s. Answers to hello, events and results must be 200 or 204 unless a `reply` line says otherwise.
 - It applies `press` lines through the actions' own handlers, and `registry` lines to the fake folder, then lets the watcher see the change. Before a `press` or `registry` line that follows a held request (`/v1/permission` or `/v1/next`), it makes sure the bridge has taken that request.
 - It retries an `expect` for up to 1 s before failing, since requests and registry changes land asynchronously.
-- It gives the deck a clock that follows the fixture's times, which are absolute around T0 = 1793600000000 (2026-11-02T06:13:20Z), since rules 2 and 3 compare arrival times with `statusUpdatedAt`. A fake bridge may judge rules 2 and 3 by what it saw instead.
+- It gives the deck a wall clock that follows the registry's times in the fixture. These are absolute around T0 = 1793600000000 (2026-11-02T06:13:20Z). The clock starts at the setup's `statusUpdatedAt` and moves up to each registry line's.
+  - Release rules 2 and 3 and status rule 3 compare arrival times on that clock with `statusUpdatedAt`. An event's `at` is the mod's clock and plays no part.
+  - A fake bridge may judge all three by what it saw instead.
 - It turns off the deck's 1 s wait before a press counts, since a fixture's press is a deliberate press on what the key shows.
 - A runner that plays fixtures to a deck it didn't reset binds each fixture `inst` to a fresh one per play, or the deck drops the replay's events as retries.
 
@@ -317,3 +321,9 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 **2026-11-01, Phase 4** (no wire change):
 1. The quick retry after a rejected fetch is now a quiet hello, then the failed request. In Phase 4, `streamdeck restart` brought the deck back 85 ms after it stopped, so T2's and T3's retried polls reached the new deck with no hello and no version check. (Routes, Failure and recovery)
 2. On the deck, a question or plan reads "Answer in app", and a press that opens its session shows the OK. The user found a press on a question looked dead and chose this over answering from the deck. (Held requests)
+
+**2026-11-02, Phase 4** (no wire change):
+1. A `busy` that began before the main loop's interrupted turn ended no longer hides the interruption. The session shows `interrupted` as soon as the deck gets the `turn.end`.
+   - In Phase 4, Claude Code kept T3 `busy` for 8.2 s after an Esc, while the plugin's `turn.end` reached the deck 3 ms after it.
+   - The `prompt-refused` fixture now keeps the registry `busy` past the `turn.end`.
+   - (The deck's session model, Fixtures)

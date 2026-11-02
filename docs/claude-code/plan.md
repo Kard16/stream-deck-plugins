@@ -582,6 +582,41 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     3. The user answers step 8.
     4. Step 11, with the Claude app restart last.
     5. Then decide how the deck handles a mode change from Auto, which the classifier refuses.
+- 2026-11-02, **the Esc fix, built while the user was away, at their word.**
+  - **The protocol** (main thread):
+    - Status rule 3: a `busy` that began before the main loop's `aborted` `turn.end` doesn't count. "Began before" goes by `statusUpdatedAt`, else by the deck's first reading of that `busy`; a session's very first reading counts.
+    - The Fixtures section now says the runner's wall clock follows the registry's times, and an event's `at` plays no part.
+    - `prompt-refused` keeps the registry `busy` past the `turn.end`. Before the fix, the deck and the tools both failed it at line 13 ("expected interrupted, got working").
+  - **A workflow built it:** one agent each for the deck and the tools, each reviewed adversarially.
+    - Both reviews passed, with minor findings and nits only, so no fix-up pass ran.
+    - The deck's reviewer ran 19 mutations, and the suite caught 17. The two survivors are defensive paths: a `failed` after the `aborted` end, and the order of first readings during a release.
+  - **The main thread then applied:**
+    - The protocol wording above.
+    - A try/catch around the deck's new status log, so it can't throw into a hold, a release or a route.
+    - In the tools: checks that a held question and a registry `waiting` still show needs-you under the exception.
+    - In the fake: a `statusUpdatedAt` that goes missing is no change, as on the real deck.
+    - Rule names made consistent in the tools' README and doc comment, and `statusSeen` added to `/control/state`.
+    - The three new tools checks each fail under a mutation of the code they guard.
+  - **The deck now logs each session's status change at debug:** `STATUS <key> <from> → <to>`, and `STATUS <key> → <status>` on first sight. Phase 4 can time statuses from the log.
+  - **Checks, re-run by the main thread:**
+    - Plugin: `tsc` clean, validate passes, 77/77, fixtures in sync.
+    - Deck: typecheck clean, 186/186, the same with the clock two days ahead and a week back, build and validate pass.
+    - Tools: 112/112.
+  - **Live, without the deck attached:**
+    - `streamdeck restart` at 15:02:25Z. T2 and T3 said hello 21–22 ms after the new deck listened.
+    - T3 got a 1-to-3000 count, then `stop_session` interrupted it at 15:03:03.420Z, by its transcript.
+    - The deck got the `turn.end` 7 ms later and logged `working → interrupted` in the same millisecond.
+    - The registry went idle at 15:03:05.196Z, 1.8 s after the stop. The old code would have waited for that.
+  - **After that stop, T3 drops the mod's prompts until someone types in it (S2).** So step 6's retest should pick T2. Step 9's retest on T3 expects the refusal anyway.
+  - **Left open:**
+    - Whether `waiting` lags the same way after an Esc at a permission prompt. The retest's STATUS lines will show it.
+    - A late `turn.end` for an older turn id still replaces a newer unfinished turn. It can't happen on the mod's one ordered line.
+    - The deck still shows idle for up to 1 s after a turn starts, until its next registry reading shows `busy`.
+  - **Next, when the user is back:**
+    1. The user types the Saved Prompt's text, then redoes step 6 with T2 picked, and step 9 on T3.
+    2. The user answers step 8.
+    3. Step 11, with the Claude app restart last.
+    4. Then decide how the deck handles a mode change from Auto, which the classifier refuses.
 
 ## Progress
 
@@ -598,7 +633,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Mode from Auto: refused by the classifier, so it needs a design choice.
   - Step 6: waits on the key's text.
   - Step 8: waits on the user's answer.
-  - Step 9: works, but "interrupted" shows late; the fix is designed, not built.
+  - Step 9: the Esc fix is in. Live, "interrupted" showed 7 ms after a stop; the user's retest is pending.
   - Step 10: dropped.
   - Step 11: later.
 - [ ] Phase 5: daily use, when the user says so

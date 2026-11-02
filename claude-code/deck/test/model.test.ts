@@ -8,6 +8,7 @@ import { fingerprint } from "../src/protocol/fingerprint.js";
 import type { AppRecord } from "../src/records/records.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { FakeClock } from "./helpers/fake-clock.js";
+import { RecordingLog } from "./helpers/recording-log.js";
 
 /** An HTTP answer the test can read and close. */
 class FakeReply implements PollReply {
@@ -41,7 +42,8 @@ function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
 function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)]) {
 	let wall = 10_000;
 	const clock = new FakeClock();
-	const model = new SessionModel({ clock, wallNow: () => wall });
+	const log = new RecordingLog();
+	const model = new SessionModel({ clock, log, wallNow: () => wall });
 	model.setRegistry(registry);
 	model.setBridgeState("listening");
 	const at = (t: number): void => {
@@ -57,25 +59,57 @@ function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)]) {
 		model.permission({ session_id: host === A ? "sid-1" : "sid-2", tool_name: tool, tool_input: input, permission_mode: "default", effort: { level: "low" }, ...extra }, host, reply);
 		return reply;
 	};
-	return { model, clock, at, events, permission, view: (host: string) => model.session(host) };
+	return { model, clock, log, at, events, permission, view: (host: string) => model.session(host) };
 }
 
 describe("session status (PROTOCOL.md's order)", () => {
-	const base = { heldTool: 0, heldAsk: 0, registry: "idle", turn: null, recordCategory: null };
+	const base = { heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: 1000, firstReadingAt: 1000, turn: null, recordCategory: null };
+	/** The main loop's last turn, whose `turn.end` the deck got at 5000. */
+	const ended = (reason: string, failed = false) => ({ ended: true, reason, failed, endedAt: 5000 });
+	const unfinished = { ended: false, reason: null, failed: false, endedAt: null };
 	test("the first that applies wins", () => {
 		assert.equal(sessionStatus({ ...base, heldTool: 1, heldAsk: 1, registry: "waiting" }), "approval");
 		assert.equal(sessionStatus({ ...base, heldAsk: 1, registry: "busy" }), "needs-you");
 		assert.equal(sessionStatus({ ...base, registry: "waiting" }), "needs-you");
-		assert.equal(sessionStatus({ ...base, registry: "busy", turn: { ended: true, reason: "aborted", failed: true } }), "working");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "aborted", failed: true }, recordCategory: "blocked" }), "failed");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "aborted", failed: false }, recordCategory: "blocked" }), "interrupted");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordCategory: "blocked" }), "needs-you");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordCategory: "need_input" }), "needs-you");
+		// A busy that began after the turn ended: the next turn's.
+		assert.equal(sessionStatus({ ...base, registry: "busy", statusUpdatedAt: 6000, turn: ended("aborted", true) }), "working");
+		assert.equal(sessionStatus({ ...base, turn: ended("aborted", true), recordCategory: "blocked" }), "failed");
+		assert.equal(sessionStatus({ ...base, turn: ended("aborted"), recordCategory: "blocked" }), "interrupted");
+		assert.equal(sessionStatus({ ...base, turn: ended("answer"), recordCategory: "blocked" }), "needs-you");
+		assert.equal(sessionStatus({ ...base, turn: ended("answer"), recordCategory: "need_input" }), "needs-you");
 		assert.equal(sessionStatus({ ...base, registry: "busy", recordCategory: "blocked" }), "working");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordCategory: "review_ready" }), "done");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false } }), "done");
-		assert.equal(sessionStatus({ ...base, turn: { ended: false, reason: null, failed: false } }), "idle");
+		assert.equal(sessionStatus({ ...base, turn: ended("answer"), recordCategory: "review_ready" }), "done");
+		assert.equal(sessionStatus({ ...base, turn: ended("answer") }), "done");
+		assert.equal(sessionStatus({ ...base, turn: unfinished }), "idle");
 		assert.equal(sessionStatus({ ...base, registry: null }), "idle");
+	});
+
+	test("rule 3: a busy that began before the main loop's turn ended with aborted doesn't count, and rules 4–8 take the session as idle", () => {
+		const busy = { ...base, registry: "busy", statusUpdatedAt: 4000, firstReadingAt: 4000 };
+		assert.equal(sessionStatus({ ...busy, turn: ended("aborted") }), "interrupted");
+		assert.equal(sessionStatus({ ...busy, statusUpdatedAt: 5000, turn: ended("aborted") }), "interrupted", "at the same moment counts as before");
+		assert.equal(sessionStatus({ ...busy, statusUpdatedAt: 5001, turn: ended("aborted") }), "working", "a busy that began after the turn.end");
+		assert.equal(sessionStatus({ ...busy, turn: ended("aborted", true), recordCategory: "blocked" }), "failed", "failed still comes first");
+		assert.equal(sessionStatus({ ...busy, turn: ended("aborted"), recordCategory: "blocked" }), "interrupted", "then interrupted, before the app's indicator");
+		assert.equal(sessionStatus({ ...busy, turn: ended("answer") }), "working", "a turn that ended otherwise");
+		assert.equal(sessionStatus({ ...busy, turn: ended("error", true) }), "working", "a failed turn that wasn't aborted");
+		assert.equal(sessionStatus({ ...busy, turn: unfinished }), "working", "no turn.end since the turn began");
+		assert.equal(sessionStatus({ ...busy, turn: null }), "working", "no turn seen");
+		// Rules 1 and 2 are unchanged.
+		assert.equal(sessionStatus({ ...busy, heldTool: 1, turn: ended("aborted") }), "approval");
+		assert.equal(sessionStatus({ ...busy, heldAsk: 1, turn: ended("aborted") }), "needs-you");
+		assert.equal(sessionStatus({ ...busy, registry: "waiting", turn: ended("aborted") }), "needs-you", "waiting is unaffected");
+	});
+
+	test("rule 3 without statusUpdatedAt: the deck's first reading of the busy stands in for it", () => {
+		const busy = { ...base, registry: "busy", statusUpdatedAt: null, turn: ended("aborted") };
+		assert.equal(sessionStatus({ ...busy, firstReadingAt: 4000 }), "interrupted");
+		assert.equal(sessionStatus({ ...busy, firstReadingAt: 5000 }), "interrupted", "at the same moment counts as before");
+		assert.equal(sessionStatus({ ...busy, firstReadingAt: 5001 }), "working", "first read after the turn.end");
+		assert.equal(sessionStatus({ ...busy, firstReadingAt: null }), "working", "nothing to go by");
+		// With the field there, it decides, whenever the deck first read the busy.
+		assert.equal(sessionStatus({ ...busy, statusUpdatedAt: 4000, firstReadingAt: 6000 }), "interrupted");
+		assert.equal(sessionStatus({ ...busy, statusUpdatedAt: 6000, firstReadingAt: 4000 }), "working");
 	});
 });
 
@@ -154,6 +188,74 @@ describe("session model", () => {
 		events(A, { t: "failed", agent: false, error: "overloaded" }, { t: "turn.end", turn: "t1", agent: [], reason: "answer" });
 		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 })]);
 		assert.deepEqual([view(A)?.status, view(A)?.doing], ["failed", null]);
+	});
+
+	test("status rule 3: Esc shows interrupted from the turn.end while the registry keeps the busy that began before it", () => {
+		const { model, at, events, view } = setup([reg(1, A, { status: "idle", statusUpdatedAt: 9000 })]);
+		at(11_000);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: 11_000 })]);
+		events(A, { t: "turn.start", turn: "t1" });
+		assert.equal(view(A)?.status, "working");
+		at(12_000);
+		events(A, { t: "turn.start", turn: "s1", agent: "a1b2" }, { t: "turn.end", turn: "s1", agent: "a1b2", reason: "aborted" });
+		assert.equal(view(A)?.status, "working", "a subagent's turn.end never counts");
+		at(13_000);
+		events(A, { t: "turn.end", turn: "t1", reason: "aborted" });
+		assert.equal(view(A)?.status, "interrupted", "the registry still says busy, from 11000");
+		at(19_000);
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 19_000 })]);
+		assert.equal(view(A)?.status, "interrupted");
+		// The next prompt: the registry's busy can come before the mod's turn.start.
+		at(25_000);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: 25_000 })]);
+		assert.equal(view(A)?.status, "working", "a busy that began after the turn.end");
+		events(A, { t: "turn.start", turn: "t2" });
+		at(26_000);
+		events(A, { t: "turn.end", turn: "t2", reason: "aborted" });
+		assert.equal(view(A)?.status, "interrupted");
+		// A prompt typed before the registry goes idle: its turn.start clears the last turn's end.
+		at(27_000);
+		events(A, { t: "turn.start", turn: "t3" });
+		assert.equal(view(A)?.status, "working");
+	});
+
+	test("status rule 3 without statusUpdatedAt: the deck's first reading of the busy, which a reading of another status resets", () => {
+		const { model, at, events, view } = setup([]);
+		at(5000);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: null })]);
+		events(A, { t: "turn.start", turn: "t1" });
+		at(7000);
+		events(A, { t: "turn.end", turn: "t1", reason: "aborted" });
+		assert.equal(view(A)?.status, "interrupted", "the session's first reading, at 5000, counts");
+		at(8000);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: null, name: "Renamed" })]);
+		assert.equal(view(A)?.status, "interrupted", "another reading of the same busy");
+		at(9000);
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: null })]);
+		assert.equal(view(A)?.status, "interrupted");
+		at(10_000);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: null })]);
+		assert.equal(view(A)?.status, "working", "busy again since a reading showed it idle, first read after the turn.end");
+		// A session the deck first reads after its turn.end.
+		at(11_000);
+		events(B, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "aborted" });
+		at(12_000);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: null }), reg(2, B, { status: "busy", statusUpdatedAt: null })]);
+		assert.equal(view(B)?.status, "working");
+	});
+
+	test("each listed session's status is logged at debug when it changes, and only then", () => {
+		const { model, at, events, log } = setup([reg(1, A, { status: "busy", statusUpdatedAt: 9000 }), reg(2, B)]);
+		const lines = (): string[] => log.lines.filter((l) => l.message.startsWith("STATUS ")).map((l) => `${l.level} ${l.message}`);
+		assert.deepEqual(lines(), ["debug STATUS local_a → working", "debug STATUS local_b → idle"], "on first sight");
+		events(A, { t: "turn.start", turn: "t1" });
+		at(11_000);
+		events(A, { t: "turn.end", turn: "t1", reason: "aborted" });
+		assert.deepEqual(lines().slice(2), ["debug STATUS local_a working → interrupted"], "as the turn.end comes, with the registry still busy");
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 12_000 }), reg(2, B)]);
+		model.setBridgeState("stopped");
+		model.setRegistry([reg(2, B, { status: "busy", statusUpdatedAt: 13_000 })]);
+		assert.deepEqual(lines().slice(3), ["debug STATUS local_b idle → working"]);
 	});
 
 	test("a request is a tool, an ask, or the deck's own mode change", () => {

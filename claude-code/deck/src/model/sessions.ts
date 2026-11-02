@@ -52,7 +52,8 @@ export type SessionView = {
 
 export type QueueResult = { ok: true; cmd: Command } | { ok: false; why: string };
 
-type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean };
+/** A turn of the main loop. `endedAt` is when the deck got its `turn.end`, by the wall clock; null until then. */
+type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean; endedAt: number | null };
 type RunningTool = { use: string | null; tool: string; summary: string; fp: string | null };
 
 /** What the bridge has heard about one session, from its mod and from its PermissionRequests. */
@@ -114,6 +115,14 @@ export class SessionModel implements BridgeRoutes {
 	readonly #bridge = new Map<string, BridgeSession>();
 	#registry = new Map<string, RegistrySession>();
 	#ordered: RegistrySession[] = [];
+	/**
+	 * By key, the wall-clock ms of the deck's first reading of each listed session's registry status: the first that
+	 * showed it since one showed another, or the session's first. Status rule 3 takes it when `statusUpdatedAt` is
+	 * missing.
+	 */
+	readonly #firstReadings = new Map<string, number>();
+	/** Each listed session's status when the model last changed, by key, for the log. */
+	#statuses = new Map<string, SessionStatus>();
 	#records = new Map<string, AppRecord>();
 	#picked: string | null = null;
 	/** The picked session's title as last listed, for when it has ended. */
@@ -154,7 +163,8 @@ export class SessionModel implements BridgeRoutes {
 	/**
 	 * A new list from the registry. Release rules 2–4 run on what changed: a session leaving `waiting` lets its
 	 * only held request go if it came before the change; `idle` with a later `statusUpdatedAt` lets go every
-	 * request that came before; a session whose file disappeared has ended.
+	 * request that came before; a session whose file disappeared has ended. A session whose status changed, or
+	 * that's new, has its first reading of that status now.
 	 */
 	setRegistry(sessions: readonly RegistrySession[]): void {
 		const now = this.#wallNow();
@@ -168,6 +178,9 @@ export class SessionModel implements BridgeRoutes {
 		const before = this.#registry;
 		this.#registry = next;
 		this.#ordered = [...next.values()].sort(compareSessions);
+		// Each status's first reading (status rule 3), noted before a release below repaints the deck.
+		for (const [key, s] of next) if (before.get(key)?.status !== s.status) this.#firstReadings.set(key, now);
+		for (const key of this.#firstReadings.keys()) if (!next.has(key)) this.#firstReadings.delete(key);
 
 		for (const [key, s] of next) {
 			const host = asHost(s.hostSessionId);
@@ -423,20 +436,20 @@ export class SessionModel implements BridgeRoutes {
 		switch (e.t) {
 			case "turn.start":
 				if (e.agent !== null) return;
-				b.turn = { id: e.turn, ended: false, reason: null, failed: false };
+				b.turn = { id: e.turn, ended: false, reason: null, failed: false, endedAt: null };
 				b.tools = [];
 				return;
 			case "turn.end": {
 				if (e.agent !== null) return;
 				// A `failed` for this same turn stays: the status says failed, whatever the reason.
 				const same = b.turn !== null && (e.turn === null || b.turn.id === null || b.turn.id === e.turn);
-				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false) };
+				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false), endedAt: this.#wallNow() };
 				b.tools = [];
 				return;
 			}
 			case "failed":
 				if (e.agent !== null) return;
-				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true };
+				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, endedAt: b.turn?.endedAt ?? null };
 				b.tools = [];
 				this.#log.info(`FAILED turn in ${b.host}${e.error ? `: ${quote(e.error, 120)}` : ""}`);
 				return;
@@ -553,6 +566,8 @@ export class SessionModel implements BridgeRoutes {
 				heldTool: held.filter((h) => h.kind === "tool").length,
 				heldAsk: held.filter((h) => h.kind === "ask").length,
 				registry: s.status,
+				statusUpdatedAt: s.statusUpdatedAt,
+				firstReadingAt: this.#firstReadings.get(keyOf(s)) ?? null,
 				turn: b?.turn ?? null,
 				recordCategory: rec?.turnCategory ?? null,
 			}),
@@ -578,7 +593,24 @@ export class SessionModel implements BridgeRoutes {
 		return folder !== "" ? folder : `Session ${s.key}`;
 	}
 
+	/** Each listed session's status when it changes, at debug, so a hardware test can time it from the log. */
+	#logStatuses(): void {
+		const statuses = new Map<string, SessionStatus>();
+		for (const { key, status } of this.sessions()) {
+			const was = this.#statuses.get(key);
+			if (status !== was) this.#log.debug(`STATUS ${key} ${was === undefined ? "" : `${was} `}→ ${status}`);
+			statuses.set(key, status);
+		}
+		this.#statuses = statuses;
+	}
+
 	#emit(): void {
+		// Only a log line: a throw here mustn't escape into a hold, a release or a route.
+		try {
+			this.#logStatuses();
+		} catch (err) {
+			this.#log.error(`logging statuses threw: ${describeError(err)}`);
+		}
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener();

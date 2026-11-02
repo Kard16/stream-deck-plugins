@@ -615,6 +615,90 @@ test('deck: a main-loop failed marks only its own turn: a turn.end for another t
   assert.equal(status(), 'failed')
 })
 
+test('deck: status rule 3, by what the bridge saw: a busy read before the main loop\'s turn ended aborted doesn\'t count, and the rules after it take the session as idle', () => {
+  // Claude Code kept an interrupted session busy for up to 8 s after Esc, while the turn.end came at once (Phase 4).
+  const { deck, clock, reg, hello, ev, perm, view } = setup()
+  const status = () => view().status[A.host]
+  const later = clock.now() + 60_000
+  reg([A, 'busy', later])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' })
+  assert.equal(status(), 'working')
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'aborted' })
+  assert.equal(status(), 'interrupted', 'its first reading came before the turn.end, whatever its statusUpdatedAt says')
+  reg([A, 'busy', later])
+  reg([A, 'busy', later, { name: 'Renamed' }])
+  assert.equal(status(), 'interrupted', 'the same busy, read again and renamed')
+  reg([A, 'busy', null])
+  assert.equal(status(), 'interrupted', 'and with its statusUpdatedAt gone, which is no news')
+  const p = perm(A, 'Write', W1)
+  assert.equal(status(), 'approval', 'a held request still comes first')
+  deck.clientClosed(p.id)
+  const q = perm(A, 'AskUserQuestion', ASK)
+  assert.equal(status(), 'needs-you', 'so does a held question')
+  deck.clientClosed(q.id)
+  reg([A, 'waiting'])
+  assert.equal(status(), 'needs-you', 'and a registry waiting, with nothing held')
+  reg([A, 'idle'])
+  assert.equal(status(), 'interrupted', 'idle at last')
+
+  // Rule 4 still comes before rule 5.
+  ev(A, { t: 'turn.start', turn: 't2' })
+  reg([A, 'busy'])
+  assert.equal(status(), 'working')
+  ev(A, { t: 'failed', error: 'API error' }, { t: 'turn.end', turn: 't2', reason: 'aborted' })
+  assert.equal(status(), 'failed')
+})
+
+test('deck: status rule 3: a busy the bridge read after the main loop\'s aborted turn.end counts: a new status, a rewritten statusUpdatedAt or a first reading', () => {
+  const { clock, reg, hello, ev, view } = setup()
+  const status = (S) => view().status[S.host]
+  reg([A, 'idle'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'aborted' })
+  assert.equal(status(A), 'interrupted')
+  clock.advance(1000)
+  reg([A, 'busy'])
+  assert.equal(status(A), 'working', 'busy since the turn.end, though no turn.start came')
+
+  ev(A, { t: 'turn.start', turn: 't2' }, { t: 'turn.end', turn: 't2', reason: 'aborted' })
+  assert.equal(status(A), 'interrupted')
+  clock.advance(1000)
+  reg([A, 'busy'])
+  assert.equal(status(A), 'working', 'a rewritten statusUpdatedAt is a new busy')
+
+  // Without statusUpdatedAt, the busy is the reading that first showed it.
+  ev(A, { t: 'turn.start', turn: 't3' })
+  reg([A, 'busy', null])
+  ev(A, { t: 'turn.end', turn: 't3', reason: 'aborted' })
+  reg([A, 'busy', null])
+  assert.equal(status(A), 'interrupted')
+  reg([A, 'idle', null])
+  reg([A, 'busy', null])
+  assert.equal(status(A), 'working')
+
+  hello(B)
+  ev(B, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'aborted' })
+  assert.equal(status(B), 'interrupted', 'not listed yet')
+  reg([A, 'busy', null], [B, 'busy'])
+  assert.equal(status(B), 'working', 'its first reading came after the turn.end')
+})
+
+test('deck: status rule 3 takes only the main loop\'s turn.end with reason aborted, and a new turn ends it', () => {
+  const { reg, hello, ev, view } = setup()
+  const status = () => view().status[A.host]
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.equal(status(), 'working', 'a turn that ended otherwise')
+  ev(A, { t: 'turn.start', turn: 't2' }, { t: 'turn.end', turn: 's1', agent: 'ag1', reason: 'aborted' })
+  assert.equal(status(), 'working', 'a subagent\'s turn.end isn\'t the main loop\'s')
+  ev(A, { t: 'turn.end', turn: 't2', reason: 'aborted' })
+  assert.equal(status(), 'interrupted')
+  ev(A, { t: 'turn.start', turn: 't3' })
+  assert.equal(status(), 'working', 'a new turn, under the same busy')
+})
+
 test('deck: settings are the latest from hello, settings events and requests, else the record', () => {
   const { deck, reg, hello, ev, perm, view } = setup()
   reg([A, 'busy'])

@@ -33,7 +33,7 @@ import { RecordingLog } from "./helpers/recording-log.js";
  * - At the end, a held request or poll that no `reply` line checked must still be open.
  *
  * The deck's wall clock follows the fixture: it starts at the setup's `statusUpdatedAt` and moves to each
- * registry change's, a millisecond per reading, so release rules 2 and 3 compare times as the fixture means.
+ * registry change's, a millisecond per reading, so release rules 2 and 3 and status rule 3 compare times as the fixture means.
  */
 
 const DEADLINE_REPLY_MS = 2000;

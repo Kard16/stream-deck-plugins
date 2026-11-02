@@ -146,7 +146,7 @@ describe("status rule 6, the app's own needs-input indicator (its _D, Dw and jM)
 	/** The record's turn category, and the status it gives an idle session the bridge knows nothing of. */
 	const read = (fields: Record<string, unknown>): { category: string | null; status: string } => {
 		const category = parseRecord(A, JSON.stringify(fields))?.turnCategory ?? null;
-		return { category, status: sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", turn: null, recordCategory: category }) };
+		return { category, status: sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category }) };
 	};
 	const forLast = { postTurnSummaryFor: LAST, lastAssistantUuid: LAST };
 	const blocked = { status_category: "blocked", needs_action: "Merge PR #12?" };

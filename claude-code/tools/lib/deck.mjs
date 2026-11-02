@@ -44,6 +44,9 @@ const RECENT_KEPT = 50
  */
 const hostValue = (v) => (typeof v === 'string' && HOST_PATTERN.test(v) ? v : null)
 
+/** A registry entry's `statusUpdatedAt`, or null for none: only a number counts, as the deck reads it. */
+const statusAt = (f) => (Number.isFinite(f.statusUpdatedAt) ? f.statusUpdatedAt : null)
+
 function newSession(host) {
   return {
     host,
@@ -66,8 +69,11 @@ function newSession(host) {
      * tool was waiting, which may have been theirs.
      */
     fpCalls: [],
-    /** The main loop's current or last turn: its id, did the deck see it end, how, and did it fail. */
-    turn: { id: null, sawEnd: false, lastEnd: null, failed: false },
+    /**
+     * The main loop's current or last turn: its id, did the deck see it end, how, did it fail, and when the deck
+     * got its turn.end, as a #seenTick (status rule 3).
+     */
+    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, endSeen: null },
     context: null,
     /** The latest model, effort and mode from the plugin: hello, settings events, PermissionRequests. */
     settings: { model: null, effort: null, mode: null },
@@ -98,6 +104,11 @@ export class FakeDeck {
   /** host → registry fields: the sessions the deck lists. */
   #registry = new Map()
   #registryBySid = new Map()
+  /**
+   * host → when the deck read the session's current status, as a #seenTick: the reading where its `status` or
+   * `statusUpdatedAt` last changed, or its first (status rule 3).
+   */
+  #statusSeen = new Map()
   /** host → the record's fields. */
   #records = new Map()
   /** Held permission requests, oldest first. */
@@ -108,6 +119,8 @@ export class FakeDeck {
   #fpWaiting = []
   /** Orders the fp check's arrivals, requests and tool.starts and ends alike, whatever the clock says. */
   #fpTick = 0
+  /** Orders registry readings and main-loop turn.ends as the deck got them, whatever the clock says (status rule 3). */
+  #seenTick = 0
   /** id → command, in the order they were queued. */
   #commands = new Map()
   /** A Saved Prompt key's text → the id of the last prompt it queued. */
@@ -260,7 +273,7 @@ export class FakeDeck {
     switch (e.t) {
       case 'turn.start':
         if (main) {
-          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false }
+          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, endSeen: null }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -271,7 +284,7 @@ export class FakeDeck {
           // reads done. One it can't tell apart, with no turn id on one side or the other, keeps it.
           const id = str(e.turn)
           const same = id === null || s.turn.id === null || id === s.turn.id
-          s.turn = { id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed }
+          s.turn = { id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, endSeen: ++this.#seenTick }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -764,14 +777,18 @@ export class FakeDeck {
   }
 
   /**
-   * A new reading of the registry: the kept fields of every file. Applies release rules 2 to 4.
+   * A new reading of the registry: the kept fields of every file. Applies release rules 2 to 4, and notes when
+   * each session's current status was read, for status rule 3.
    *
-   * Rules 2 and 3 are judged by what the bridge itself saw, as PROTOCOL.md lets a fake bridge. Rule 2's "held
-   * from before that change": the request was held when a reading showed the session `waiting`. Rule 3: a
-   * reading shows the session `idle` and the one before showed it otherwise, so the change came after every
-   * request held now arrived; a session's first reading is no change. Comparing arrivals with
-   * `statusUpdatedAt` instead would mix the bridge's clock with the registry's, which differ in the fixtures
-   * (their times are made up).
+   * Release rules 2 and 3 are judged by what the bridge itself saw, as PROTOCOL.md lets a fake bridge. Release
+   * rule 2's "held from before that change": the request was held when a reading showed the session `waiting`.
+   * Release rule 3: a reading shows the session `idle` and the one before showed it otherwise, so the change came
+   * after every request held now arrived; a session's first reading is no change. Status rule 3 is judged by what
+   * the bridge saw too: a `busy` began before the main loop's last turn.end when the reading where the session's
+   * `status` or `statusUpdatedAt` last changed, or its first, came before the bridge got that turn.end (#status).
+   * So a rewritten `statusUpdatedAt` is a new `busy`, as it would be by the times, and a new `name` or a missing
+   * `statusUpdatedAt` isn't. Comparing arrivals with `statusUpdatedAt` instead would mix the bridge's clock with
+   * the registry's, which differ in the fixtures (their times are made up).
    */
   applyRegistry(entries) {
     const next = new Map()
@@ -785,6 +802,16 @@ export class FakeDeck {
     const prev = this.#registry
     this.#registry = next
     this.#registryBySid = bySid
+    // Status rule 3: each session's current status was read now, unless the last reading showed the same status
+    // and statusUpdatedAt. One that went missing is no change, as the real deck then takes the busy's first reading.
+    const tick = ++this.#seenTick
+    const seen = new Map()
+    for (const [host, f] of next) {
+      const p = prev.get(host)
+      const same = p !== undefined && p.status === f.status && (statusAt(f) === null || statusAt(p) === statusAt(f))
+      seen.set(host, same ? this.#statusSeen.get(host) : tick)
+    }
+    this.#statusSeen = seen
     // A request held without a host: the registry, or a sid and host pair seen since it came, may place it now.
     for (const h of this.#held) if (h.host === null && h.sid) h.host = this.#hostFor(h.sid, null)
 
@@ -845,9 +872,12 @@ export class FakeDeck {
     if (held.some((h) => h.kind === 'ask')) return 'needs-you'
     const reg = this.#registry.get(host)?.status
     if (reg === 'waiting') return 'needs-you'
-    if (reg === 'busy') return 'working'
-    if (reg === 'idle' || reg === undefined) {
-      const s = this.#sessions.get(host)
+    const s = this.#sessions.get(host)
+    // Rule 3's busy doesn't count when the deck read it before it got the main loop's last turn.end, and that turn
+    // ended `aborted` (applyRegistry): the rules after it take the session as idle.
+    const stale = reg === 'busy' && s?.turn.lastEnd === 'aborted' && this.#statusSeen.get(host) < s.turn.endSeen
+    if (reg === 'busy' && !stale) return 'working'
+    if (reg === 'idle' || reg === undefined || stale) {
       if (s?.turn.failed) return 'failed'
       if (s?.turn.lastEnd === 'aborted') return 'interrupted'
       // Rule 6: the app's own needs-input indicator would show for the record (registry.mjs, needsInput).
@@ -927,7 +957,7 @@ export class FakeDeck {
       sessions[host] = {
         sid: s.sid, inst: s.inst, plugin: s.plugin, hello: s.hello, lastSeq: Object.fromEntries(s.seq),
         tools: [...s.tools].map(([use, t]) => ({ use, tool: t.tool, summary: t.summary, fp: t.fp, agent: t.agent })),
-        turn: s.turn, context: s.context, settings: s.settings, onScreen: s.onScreen, attachAt: s.attachAt, ended: s.ended,
+        turn: s.turn, statusSeen: this.#statusSeen.get(host) ?? null, context: s.context, settings: s.settings, onScreen: s.onScreen, attachAt: s.attachAt, ended: s.ended,
         poll: s.poll ? { id: s.poll.id, inst: s.poll.inst, openMs: now - s.poll.since } : null,
         lastSeenMs: s.lastSeen === null ? null : now - s.lastSeen,
       }
@@ -963,6 +993,7 @@ export class FakeDeck {
     this.#promptKeys.clear()
     this.#registry = new Map()
     this.#registryBySid = new Map()
+    this.#statusSeen = new Map()
     this.#records.clear()
     this.#recent = []
     this.#lastPress = null

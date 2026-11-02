@@ -398,15 +398,17 @@ const fixtures = {}
   const text = 'Carry on.'
   const why = 'the session was stopped and nobody has sent input since'
   fixtures['prompt-refused'] = [
-    note('After the user pressed Esc, the engine drops prompts from the mod until the user types in the session (S2). The Saved Prompt key shows refused.'),
+    note('After the user pressed Esc, the engine drops prompts from the mod until the user types in the session (S2). The Saved Prompt key shows refused. Claude Code keeps the session busy for seconds after the Esc (Phase 4), so the deck shows interrupted from the turn.end, before the registry goes idle.'),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Write a long story'),
     a.ev({ t: 'turn.start', turn: 't1' }),
     a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
+    { expect: { status: { [A.host]: 'working' } } },
     a.turnEnd('t1', 'aborted'),
     a.ev({ t: 'turn.end', turn: 't1', reason: 'aborted' }),
-    a.registry({ status: 'idle', statusUpdatedAt: T0 + 2000 }),
+    { expect: { status: { [A.host]: 'interrupted' } } },
+    a.registry({ status: 'idle', statusUpdatedAt: T0 + 9000 }),
     { expect: { status: { [A.host]: 'interrupted' } } },
     { press: { prompt: { session: A.host, text } } },
     reply('n1', { cmds: [{ id: 'c1', t: 'prompt', text }] }),
