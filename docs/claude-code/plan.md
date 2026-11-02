@@ -217,7 +217,7 @@ Then the main thread integrates: the real plugin in a throwaway session against 
 
 Walk through a checklist with the user, with two or three throwaway sessions:
 - Every action and gesture.
-- Approvals while Lightroom is in front.
+- Approvals while Lightroom is in front. Dropped on 2026-11-02: the user won't approve Claude's requests while editing.
 - Recovery after a Stream Deck app restart, a Claude app restart, and sleep and wake.
 
 ### Phase 5: daily use (only when the user says so)
@@ -553,6 +553,35 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - The fixture's refusal is now an errored result, and its `tool.end` has no `denied`.
   - Matching covers 2xx and error answers separately, the records list names the two fields rule 6 reads, and rule 6 lists its known differences from the app.
   - Plugin 75/75 (its `deny` fixture passes), deck 181/181, tools 109/109, and all 14 fixtures end to end through the tools' CLIs.
+- 2026-11-02, **Phase 4, part 3: retests, then a stop at the user's request.** The user unplugged the deck for about 10 hours. Times below are local (CST); the deck's log is in UTC, six hours ahead.
+  - **Step 6 failed on setup again.**
+    - Both presses reached the deck with no saved text: 08:04:56 with T2 picked on the Sessions dial, and 08:05:21 with T3 on screen. Each logged "no text set".
+    - The Stream Deck log shows the Saved Prompt key's settings page wasn't opened after 21:35 last night, and then for only a second. So the text was never saved.
+    - The page itself works. It was run in a browser against a throwaway stand-in for the app's socket on 127.0.0.1, using `ws` from the deck's `node_modules`. Typing saved `{"text": …, "label": …}` 400 ms after the last keystroke, and again when focus left the box.
+    - The retest needs the text typed in the key's Prompt box, under Title. The key then shows the text instead of "Set text".
+  - **Step 9: the deck showed "interrupted" 3.8 s and 9.1 s after each Esc.** The user saw 5–10 s.
+    - The mod's `turn.end` (`aborted`) reached the deck 13 ms and 3 ms after each Esc, going by T3's transcript.
+    - Claude Code kept T3 `busy` in the registry well past each Esc. For the second, `statusUpdatedAt` says idle came 8.2 s after it.
+    - The deck shows `working` while the registry says `busy`. After a normal Stop, the registry goes idle in about 130 ms (Phase 1), so only an interrupt lags.
+    - **Fix, not built:** show `interrupted` when the main loop's last `turn.end` has reason `aborted` and arrived after the registry's `statusUpdatedAt`, even if the registry still says `busy`.
+      - It touches: PROTOCOL.md's status list (item 5), `sessionStatus` and its inputs, the fake deck's status in the tools, and a fixture step that keeps the registry `busy` after the abort.
+      - Untested: whether a `waiting` session lags the same way after an Esc.
+    - Step 9's prompt half (refused after Esc, then sent once the user types) waits on step 6's text.
+  - **Step 10 dropped:** the user won't approve Claude's requests while editing in Lightroom.
+  - **Step 11 later**, at the user's choice.
+    - The night didn't test sleep: both sessions polled every 20 s throughout.
+    - Stream Deck's wake event at 08:03:45 found nothing to recover.
+  - **Step 8:** still waiting on the user's word on whether the Session key visibly switched the app.
+  - **Cleanup:**
+    - A fake bridge from last night's end-to-end run (pid 91084, orphaned to launchd, listening on 127.0.0.1) was still up. Stopped.
+    - T2 and T3 stay idle for the retests. T3 is still in Auto.
+    - The deck plugin stays running at debug level.
+  - **Next, when the user is back:**
+    1. Build the Esc fix, if the user wants it before the retest.
+    2. The user types the Saved Prompt's text, then redoes steps 6 and 9.
+    3. The user answers step 8.
+    4. Step 11, with the Claude app restart last.
+    5. Then decide how the deck handles a mode change from Auto, which the classifier refuses.
 
 ## Progress
 
@@ -561,8 +590,16 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Phase 1: spike results shown to the user, and their go, 2026-11-01
 - [x] Phase 2: contract frozen, 2026-11-01
 - [x] Track A: Claude Code plugin · [x] Track B: deck plugin · [x] Track C: tools, 2026-11-01
-- [x] Protocol amendments and the reviewers' minors: three sets, rounds 2–3 committed; round 4 (the third set) running
+- [x] Protocol amendments and the reviewers' minors: three sets, rounds 2–4 committed, and Phase 4's quick hello (579f240)
 - [x] Ladder steps 4–5, 2026-11-01 (what needs a person or the app's dialogs moves to Phase 4)
-- [ ] Phase 4: on hardware with the user
+- [ ] Phase 4: on hardware with the user. Paused 2026-11-02 at the user's request; "Next" in the Log's last entry says where to resume.
+  - Pass: steps 1–4.
+  - Steps 5 and 7, going by the log: the pick and the jumps took about 60 ms, and each mode change took about 30 ms. The user reported no problem with either.
+  - Mode from Auto: refused by the classifier, so it needs a design choice.
+  - Step 6: waits on the key's text.
+  - Step 8: waits on the user's answer.
+  - Step 9: works, but "interrupted" shows late; the fix is designed, not built.
+  - Step 10: dropped.
+  - Step 11: later.
 - [ ] Phase 5: daily use, when the user says so
 - [ ] Phase 6: hardening
