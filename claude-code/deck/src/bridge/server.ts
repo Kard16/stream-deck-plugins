@@ -1,4 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 
 import { isObj, type Obj, ROUTES } from "../protocol/wire.js";
 import { describeError, type Log, nullLog, quote, redacting, Scrubber } from "../util/log.js";
@@ -39,6 +40,9 @@ export type BridgeOptions = {
 
 /** Listen retries back off from 1 s to 30 s: the port may be busy, and macOS 26 can refuse loopback for a while after boot. */
 const RETRY_MS = [1000, 2000, 5000, 10_000, 30_000];
+
+/** The status Node answers each of its own errors with (its `socketOnError`); any other is 400. */
+const CLIENT_ERRORS: Record<string, number> = { HPE_HEADER_OVERFLOW: 431, HPE_CHUNK_EXTENSIONS_OVERFLOW: 413, ERR_HTTP_REQUEST_TIMEOUT: 408 };
 
 const METHODS: Record<string, "GET" | "POST"> = {
 	[ROUTES.permission]: "POST",
@@ -164,7 +168,7 @@ export class BridgeServer {
 	}
 
 	#makeServer(): http.Server {
-		return http.createServer(
+		const server = http.createServer(
 			{
 				// Bodies arrive at once from a local client. These bound only receiving a request; a request that has
 				// arrived and is held isn't subject to them (test/server.test.ts checks that).
@@ -174,6 +178,24 @@ export class BridgeServer {
 			},
 			(req, res) => this.#handle(req, res),
 		);
+		server.on("clientError", (err: NodeJS.ErrnoException, socket: Socket) => this.#clientError(err, socket));
+		return server;
+	}
+
+	/**
+	 * A request Node takes no further: one it can't parse, with headers over its limit, or too slow to arrive. Node's
+	 * own answer has no body; this one carries `{"error"}` like every other. As Node's does, it goes only where it
+	 * can't cut into another answer, here a connection with nothing written to it yet, and the connection is dropped.
+	 * A client that has gone (ECONNRESET) gets nothing.
+	 */
+	#clientError(err: NodeJS.ErrnoException, socket: Socket): void {
+		if (err.code !== "ECONNRESET" && socket.writable && socket.bytesWritten === 0) {
+			const status = CLIENT_ERRORS[err.code ?? ""] ?? 400;
+			this.#opts.log.info(`REQ ${status}: Node couldn't take the request (${err.code ?? "no code"})`);
+			const text = JSON.stringify({ error: http.STATUS_CODES[status] ?? "error" });
+			socket.write(`HTTP/1.1 ${status} ${http.STATUS_CODES[status] ?? ""}\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(text)}\r\nconnection: close\r\n\r\n${text}`);
+		}
+		socket.destroy();
 	}
 
 	/**

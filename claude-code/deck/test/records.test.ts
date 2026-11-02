@@ -4,12 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
 
+import { sessionStatus } from "../src/model/status.js";
 import { nodeRecordsFs, parseRecord, RecordsReader, type RecordsFs, RecordsWatcher } from "../src/records/records.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const A = "local_5e3575bb-5693-4e5e-8e5e-47ddebcaa318";
 const B = "local_b";
 const C = "local_c";
+/** The uuid of a record's last assistant message. */
+const LAST = "9b1f0000-0000-4000-8000-0000000000aa";
 
 /** A record's fields as the app writes them on this Mac (app 4.4212.0), values made up. */
 function record(host: string, fields: Record<string, unknown> = {}): Record<string, unknown> {
@@ -24,6 +27,8 @@ function record(host: string, fields: Record<string, unknown> = {}): Record<stri
 		title: "Deck spike S0",
 		permissionMode: "acceptEdits",
 		completedTurns: 23,
+		lastAssistantUuid: LAST,
+		postTurnSummaryFor: LAST,
 		postTurnSummary: { status_category: "completed", status_detail: "replied ok", needs_action: "", summarizes_uuid: "x" },
 		...fields,
 	};
@@ -60,7 +65,7 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 		renameSync(`${file}.tmp`, file);
 	};
 
-	test("reads the fields the deck uses; a turn needs the user as the app reads it, with strings where it writes sentences", async () => {
+	test("reads the fields the deck uses, and the last turn's category as the app's needs-input indicator reads it", async () => {
 		write(org, A, record(A));
 		// The shape of two records on this Mac: the summary says blocked, with a sentence in needs_action, but the
 		// wrap-up under it doesn't ask the user anything, so the app shows the turn as ready for review.
@@ -75,25 +80,10 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 			effort: "low",
 			permissionMode: "acceptEdits",
 			lastFocusedAt: 1_793_573_111_660,
-			needsUser: false,
+			turnCategory: "completed",
 		});
-		assert.equal(records.get(B)?.needsUser, false);
-		assert.equal(records.get(C)?.needsUser, true);
-		const needsUser = (fields: Record<string, unknown>): boolean | undefined => parseRecord(A, JSON.stringify(fields))?.needsUser;
-		// With a wrap-up that has a string description, only its needsUser counts, when true or a non-empty string.
-		assert.equal(needsUser({ turnWrapUp: { description: "d", needsUser: "yes" } }), true);
-		assert.equal(needsUser({ turnWrapUp: { description: "", needsUser: true }, postTurnSummary: { needs_action: "" } }), true);
-		assert.equal(needsUser({ turnWrapUp: { description: "d", needsUser: "" }, postTurnSummary: { needs_action: "x" } }), false);
-		assert.equal(needsUser({ turnWrapUp: { description: "d" }, postTurnSummary: { needs_action: true } }), false);
-		// Without one, needs_action counts, the same way.
-		assert.equal(needsUser({ postTurnSummary: { needs_action: true } }), true);
-		assert.equal(needsUser({ postTurnSummary: { needs_action: " " } }), true);
-		assert.equal(needsUser({ postTurnSummary: { needs_action: "" } }), false);
-		assert.equal(needsUser({ postTurnSummary: { needs_action: false } }), false);
-		// A wrap-up without a string description isn't one: its needsUser doesn't count, and needs_action does.
-		assert.equal(needsUser({ turnWrapUp: { needsUser: "yes" } }), false);
-		assert.equal(needsUser({ turnWrapUp: { description: 1, needsUser: "yes" }, postTurnSummary: { needs_action: "x" } }), true);
-		assert.equal(needsUser({ turnWrapUp: "d", postTurnSummary: { needs_action: "x" } }), true);
+		assert.equal(records.get(B)?.turnCategory, "review_ready");
+		assert.equal(records.get(C)?.turnCategory, "blocked");
 	});
 
 	test("only the listed hosts are read, each once until its file changes", async () => {
@@ -149,5 +139,63 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 		write(org, A, record(A, { permissionMode: "auto" }));
 		await watcher.scanNow();
 		assert.deepEqual(seen, [[`${A}:acceptEdits`], [`${A}:auto`]]);
+	});
+});
+
+describe("status rule 6, the app's own needs-input indicator (its _D, Dw and jM), from a record's shape", () => {
+	/** The record's turn category, and the status it gives an idle session the bridge knows nothing of. */
+	const read = (fields: Record<string, unknown>): { category: string | null; status: string } => {
+		const category = parseRecord(A, JSON.stringify(fields))?.turnCategory ?? null;
+		return { category, status: sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", turn: null, recordCategory: category }) };
+	};
+	const forLast = { postTurnSummaryFor: LAST, lastAssistantUuid: LAST };
+	const blocked = { status_category: "blocked", needs_action: "Merge PR #12?" };
+
+	test("a summary not written for the last assistant message doesn't count", () => {
+		assert.deepEqual(read({ postTurnSummary: blocked, ...forLast }), { category: "blocked", status: "needs-you" });
+		// The session went on after the summary was written: a newer assistant message.
+		assert.deepEqual(read({ postTurnSummary: blocked, postTurnSummaryFor: "8c2e0000-0000-4000-8000-0000000000bb", lastAssistantUuid: LAST }), { category: null, status: "idle" });
+		assert.deepEqual(read({ postTurnSummary: blocked, postTurnSummaryFor: LAST }), { category: null, status: "idle" });
+		assert.deepEqual(read({ postTurnSummary: blocked }), { category: null, status: "idle" });
+		// The app's loader keeps only string ids.
+		assert.deepEqual(read({ postTurnSummary: blocked, postTurnSummaryFor: 7, lastAssistantUuid: 7 }), { category: null, status: "idle" });
+	});
+
+	test("a wrap-up whose needsUser isn't a string is ignored, as is one without a string description", () => {
+		const completed = { status_category: "completed", needs_action: "" };
+		// The app's loader drops it, so the summary for the last assistant message decides, or nothing does.
+		assert.deepEqual(read({ turnWrapUp: { description: "Opened PR #12.", needsUser: true }, postTurnSummary: completed, ...forLast }), { category: "completed", status: "idle" });
+		assert.deepEqual(read({ turnWrapUp: { description: "Opened PR #12.", needsUser: null }, postTurnSummary: completed, ...forLast }), { category: "completed", status: "idle" });
+		assert.deepEqual(read({ turnWrapUp: { description: "Opened PR #12.", needsUser: ["Merge?"] }, postTurnSummary: blocked }), { category: null, status: "idle" });
+		for (const wrapUp of [{ needsUser: "Merge?" }, { description: 1, needsUser: "Merge?" }, "Opened PR #12.", ["Opened PR #12."], null]) {
+			assert.deepEqual(read({ turnWrapUp: wrapUp, postTurnSummary: completed, ...forLast }), { category: "completed", status: "idle" }, JSON.stringify(wrapUp));
+		}
+	});
+
+	test("a failed summary stays failed, whatever its wrap-up says", () => {
+		const failed = { status_category: "failed", needs_action: "Retry the push?" };
+		assert.deepEqual(read({ turnWrapUp: { description: "The push failed.", needsUser: "Retry the push?" }, postTurnSummary: failed }), { category: "failed", status: "idle" });
+		assert.deepEqual(read({ turnWrapUp: { description: "The push failed." }, postTurnSummary: failed }), { category: "failed", status: "idle" });
+		assert.deepEqual(read({ postTurnSummary: failed, ...forLast }), { category: "failed", status: "idle" });
+	});
+
+	test("a wrap-up without needsUser turns blocked or need_input into review_ready, so not needs-you", () => {
+		assert.deepEqual(read({ turnWrapUp: { description: "Opened PR #12." }, postTurnSummary: blocked, ...forLast }), { category: "review_ready", status: "idle" });
+		assert.deepEqual(read({ turnWrapUp: { description: "" }, postTurnSummary: { status_category: "need_input", needs_action: "Pick one." } }), { category: "review_ready", status: "idle" });
+		// Other categories stay as they are.
+		assert.deepEqual(read({ turnWrapUp: { description: "Done." }, postTurnSummary: { status_category: "completed", needs_action: "" } }), { category: "completed", status: "idle" });
+	});
+
+	test("a wrap-up with needsUser is blocked, even an empty one, and counts without a summary for the last message", () => {
+		const completed = { status_category: "completed", needs_action: "" };
+		assert.deepEqual(read({ turnWrapUp: { description: "Opened PR #12.", needsUser: "Merge it?" } }), { category: "blocked", status: "needs-you" });
+		assert.deepEqual(read({ turnWrapUp: { description: "", needsUser: "" }, postTurnSummary: completed, postTurnSummaryFor: "8c2e0000-0000-4000-8000-0000000000bb", lastAssistantUuid: LAST }), { category: "blocked", status: "needs-you" });
+	});
+
+	test("need_input counts, as blocked does; other categories don't", () => {
+		assert.deepEqual(read({ postTurnSummary: { status_category: "need_input", needs_action: "" }, ...forLast }), { category: "need_input", status: "needs-you" });
+		assert.deepEqual(read({ postTurnSummary: { status_category: "review_ready", needs_action: "Review it." }, ...forLast }), { category: "review_ready", status: "idle" });
+		assert.deepEqual(read({ postTurnSummary: { status_category: "completed", needs_action: "Merge it?" }, ...forLast }), { category: "completed", status: "idle" });
+		assert.deepEqual(read({ postTurnSummary: { needs_action: "Merge it?" }, ...forLast }), { category: null, status: "idle" });
 	});
 });

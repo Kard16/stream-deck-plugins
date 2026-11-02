@@ -79,18 +79,21 @@ const DECISIONS: readonly unknown[] = [ALLOW_DECISION, DENY_DECISION, NO_DECISIO
 
 /**
  * What a `reply` line finds wrong with an answer, or an empty list; `want` is undefined when the line gives no
- * body. A 200 from `/v1/permission` is held to more than PROTOCOL.md's general matching, whatever the line
+ * body. A 2xx from `/v1/permission` is held to more than PROTOCOL.md's general matching, whatever the line
  * expects: it must be exactly Allow, Deny or `{}`, and an expected `{}` means no decision, so no
  * `hookSpecificOutput`. By the general rule alone, `{}` matches any answer, an Allow included, and extra fields
- * such as `updatedPermissions` pass.
+ * such as `updatedPermissions` pass. Any other status, from any route, must carry `{"error": "<reason>"}`
+ * (Transport).
  */
 export function replyMismatches(route: string, status: number, want: unknown, got: unknown): string[] {
 	const problems: string[] = [];
-	if (route === ROUTES.permission && status === 200) {
+	const ok = status >= 200 && status < 300;
+	if (route === ROUTES.permission && ok) {
 		if (!DECISIONS.some((d) => isDeepStrictEqual(d, got))) problems.push(`$: expected exactly Allow, Deny or {}, got ${JSON.stringify(got)}`);
 		const none = typeof want === "object" && want !== null && Object.keys(want).length === 0;
 		if (none && typeof got === "object" && got !== null && "hookSpecificOutput" in got) problems.push(`$: expected no decision ({}), got ${JSON.stringify(got)}`);
 	}
+	if (!ok && !(typeof got === "object" && got !== null && typeof (got as Obj).error === "string")) problems.push(`$: expected {"error": "<reason>"} with ${status}, got ${JSON.stringify(got)}`);
 	if (want !== undefined) problems.push(...mismatches(want, got));
 	return problems;
 }

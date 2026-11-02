@@ -512,6 +512,22 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **The deck's log:** each play's fresh `inst` read as a restart, and the old poll was answered. Auth refusals came in the contract's order. Held requests #1 and #2 were released by rule 1 (fps `71376090`, `85db07b2`), and #3 when its client closed. Nothing was left held.
   - **Not covered:** the fixtures with presses, and every "CHECK on the deck" line, go to Phase 4.
   - **Left over:** T1 and S0 still carry the spike token, so their mods get 401 from the deck and keep backing off. That's harmless, and a line in its log every 30 s each.
+- 2026-11-01, **the user put the deck's token in the `deck-sandbox` preset, and S0 and T1 were archived with their OK.** On the deck, the Session key shows title and status, and the Sessions strip shows title, status, model and effort.
+- 2026-11-01, **round 4: the code meets the third set of amendments** (workflow `wf_589940e3-051`, no refix needed).
+  - **Plugin:**
+    - A rejected fetch is retried once after 100 ms with no hello.
+    - `canonical()` no longer recurses, so a 20,000-deep input now gets its fp; before, no `tool.start` was sent at all.
+    - Main-loop checks treat a non-string `agent` as the main loop.
+    - New tests pin what ends an outage and that only a hello's answer can stop the mod.
+  - **Deck:** an older `inst`'s poll is answered at once. Rule 6 is the app's `_D`; on this Mac's 24 records, the same 2 count as needs-you under the old and new reading. A deeply nested hello `v` gets the version error, and Node's own error answers carry `{"error"}`.
+  - **Tools:** the same `inst` and rule-6 changes, rule 4 per turn, log lines that can't throw, and an fp check that no longer gives up early.
+  - **Re-run by the main thread:** plugin 75/75 with `tsc`, validate and the fixtures check; deck 181/181 with typecheck, build and validate; tools 109/109. The deck's and the tools' tests pass with the clock two days ahead too.
+  - **Left for Phase 6:**
+    - A deck restart can let a replaced mod instance's late request become the "newest" `inst`, starving the live one's polls. A fix: only a hello makes an `inst` current.
+    - `canonical()` runs out of memory on a cyclic object, which can't come from JSON tool input.
+    - The deck can't see the app's background tasks, which hide the app's needs-input indicator.
+    - The app's summary loader `OM` drops malformed summaries the deck still reads.
+    - The tools have small test gaps.
 
 ## Progress
 
@@ -520,8 +536,8 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Phase 1: spike results shown to the user, and their go, 2026-11-01
 - [x] Phase 2: contract frozen, 2026-11-01
 - [x] Track A: Claude Code plugin · [x] Track B: deck plugin · [x] Track C: tools, 2026-11-01
-- [ ] Protocol amendments and the reviewers' minors
-- [ ] Ladder steps 4–5
+- [x] Protocol amendments and the reviewers' minors: three sets, rounds 2–3 committed; round 4 (the third set) running
+- [x] Ladder steps 4–5, 2026-11-01 (what needs a person or the app's dialogs moves to Phase 4)
 - [ ] Phase 4: on hardware with the user
 - [ ] Phase 5: daily use, when the user says so
 - [ ] Phase 6: hardening

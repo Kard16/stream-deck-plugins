@@ -1,6 +1,7 @@
 // The deck's events (PROTOCOL.md, "Events"), made from what the engine hands the mod's hooks. Pure: register.ts
 // calls these and gives the results to the bridge. Every event carries `t` and `at` (the mod's clock), and a
-// subagent's carry `agent`, the engine's agentId; the main loop's carry none.
+// subagent's carry `agent`, the engine's agentId; the main loop's carry none. An agent id that isn't a non-empty
+// string counts as none, here and wherever the mod tells the main loop from a subagent's.
 
 import type {
   SessionAttachInput,
@@ -26,6 +27,9 @@ const loop = (agentId: unknown): { agent?: string } => {
   const agent = text(agentId)
   return agent === undefined ? {} : { agent }
 }
+
+/** Whether an engine's agent id is the main loop's: its events carry no `agent` (PROTOCOL.md, "Events"). */
+export const mainLoop = (agentId: unknown): boolean => text(agentId) === undefined
 
 /** A tool call as both of its events name it. */
 export type ToolCallSeen = { tool: string; use: string; agent?: string; fp: string; summary: string }
@@ -108,7 +112,7 @@ export function failed(e: { error?: unknown; agent_id?: unknown }): DeckEvent {
  * loop's count: a subagent may run with a mode and effort of its own.
  */
 export function settingsOf(e: { permission_mode?: unknown; effort?: { level?: unknown }; agent_id?: unknown }): Settings {
-  if (e.agent_id !== undefined) return {}
+  if (!mainLoop(e.agent_id)) return {}
   const mode = text(e.permission_mode)
   const effort = text(e.effort?.level)
   return { ...(mode === undefined ? {} : { mode }), ...(effort === undefined ? {} : { effort }) }

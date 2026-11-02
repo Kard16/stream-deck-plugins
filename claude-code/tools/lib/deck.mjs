@@ -18,6 +18,22 @@ const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
  * too deep would stop every later state from being written out.
  */
 const asString = (v) => (typeof v === 'string' ? v : null)
+
+/**
+ * A value from a mod's body for a line people read: JSON, cut short. Nothing about it can throw: one nested too
+ * deep to write out is named instead, since a line that threw would fail the request it's about, and the mod
+ * would resend it, or lose the rest of its events.
+ */
+function display(v) {
+  let text
+  try {
+    text = JSON.stringify(v) ?? String(v)
+  } catch {
+    return 'a value nested too deep to show'
+  }
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text
+}
+
 const IN_FLIGHT = new Set(['delivered', 'waiting'])
 const FINAL = new Set(FINAL_STATES)
 const RECENT_KEPT = 50
@@ -31,7 +47,9 @@ const hostValue = (v) => (typeof v === 'string' && HOST_PATTERN.test(v) ? v : nu
 function newSession(host) {
   return {
     host,
+    /** The latest Claude Code session id, and every one its mod and its PermissionRequests have come with: it can change. */
     sid: null,
+    sids: new Set(),
     inst: null,
     /** Every inst seen for the session: one seen before doesn't count as a restart again. */
     insts: new Set(),
@@ -43,10 +61,13 @@ function newSession(host) {
     /** Unfinished tool calls by `use`, with the order they started in. */
     tools: new Map(),
     toolOrder: 0,
-    /** The tool.starts since the session's last turn end, for pairing with held requests by fp. */
-    fpStarts: [],
-    /** The main loop's current or last turn: did the deck see it end, how, and did it fail. */
-    turn: { sawEnd: false, lastEnd: null, failed: false },
+    /**
+     * Calls whose tool.start no held request has paired with by fp: under way, or ended while a request of their
+     * tool was waiting, which may have been theirs.
+     */
+    fpCalls: [],
+    /** The main loop's current or last turn: its id, did the deck see it end, how, and did it fail. */
+    turn: { id: null, sawEnd: false, lastEnd: null, failed: false },
     context: null,
     /** The latest model, effort and mode from the plugin: hello, settings events, PermissionRequests. */
     settings: { model: null, effort: null, mode: null },
@@ -83,8 +104,10 @@ export class FakeDeck {
   #held = []
   /** Requests that ended, newest last, so `answer` can say how one ended. */
   #recent = []
-  /** Held requests, ended or not, that no tool.start has paired with by fp yet. */
+  /** Held requests that no tool.start has paired with by fp yet, oldest first. */
   #fpWaiting = []
+  /** Orders the fp check's arrivals, requests and tool.starts and ends alike, whatever the clock says. */
+  #fpTick = 0
   /** id → command, in the order they were queued. */
   #commands = new Map()
   /** A Saved Prompt key's text → the id of the last prompt it queued. */
@@ -120,7 +143,10 @@ export class FakeDeck {
     return s
   }
 
-  /** The host a request is for: its own `host`, else its `sid` looked up in the registry, then in the mods'. */
+  /**
+   * The host a request is for: its own `host`, else its `sid` looked up in the registry, then among every sid and
+   * host pair the bridge has seen from mods and hooks (PROTOCOL.md, Identity).
+   */
   #hostFor(sid, host) {
     const h = hostValue(host)
     if (h) return h
@@ -128,8 +154,15 @@ export class FakeDeck {
     if (!s) return null
     const fromRegistry = this.#registryBySid.get(s)
     if (fromRegistry) return fromRegistry
-    for (const x of this.#sessions.values()) if (x.sid === s) return x.host
+    for (const x of this.#sessions.values()) if (x.sids.has(s)) return x.host
     return null
+  }
+
+  /** A sid the session's mod or hook came with: the latest, and one more pair for the host fallback. */
+  #sawSid(s, sid) {
+    if (!str(sid)) return
+    s.sid = sid
+    s.sids.add(sid)
   }
 
   /**
@@ -142,7 +175,7 @@ export class FakeDeck {
     const s = this.#session(h)
     s.plugin = true
     s.lastSeen = this.#now()
-    if (str(sid)) s.sid = sid
+    this.#sawSid(s, sid)
     if (str(inst) && !s.insts.has(inst)) {
       if (s.inst !== null) this.#modRestarted(s, inst)
       s.insts.add(inst)
@@ -160,7 +193,8 @@ export class FakeDeck {
   /**
    * PROTOCOL.md, Identity: a new inst forgets the session's current tool, fails its delivered and waiting
    * commands, and answers the old instance's open poll with no commands, so what's queued from then on waits for
-   * the new one.
+   * the new one. The session's requests still wait for their tool.starts, which the old instance's line may yet
+   * bring, or may have lost.
    */
   #modRestarted(s, inst) {
     s.tools.clear()
@@ -170,7 +204,7 @@ export class FakeDeck {
     this.#endPoll(s, [])
     this.#armPollGap(s)
     this.#log({ kind: 'mod-restart', host: s.host, from: s.inst, to: inst, say: `${s.host}: the mod restarted (inst ${s.inst} → ${inst})` })
-    this.#fpGiveUp(s, 'the mod restarted')
+    for (const h of this.#fpWaiting) if (this.#isOf(h, s.host, s.sid)) h.fpRestarted = true
   }
 
   #heldOf(host, sid = this.#registry.get(host)?.sessionId) {
@@ -187,7 +221,7 @@ export class FakeDeck {
   hello(body) {
     const b = isObject(body) ? body : {}
     if (b.v !== VERSION) {
-      this.#log({ kind: 'hello', ok: false, v: b.v ?? null, say: `hello from ${hostValue(b.host) ?? '?'} on version ${JSON.stringify(b.v)}: refused` })
+      this.#log({ kind: 'hello', ok: false, v: b.v ?? null, say: `hello from ${hostValue(b.host) ?? '?'} on version ${display(b.v)}: refused` })
       return { v: VERSION, ok: false, error: 'version' }
     }
     const s = this.#touchMod(b.sid, b.host, b.inst)
@@ -219,40 +253,48 @@ export class FakeDeck {
   }
 
   #event(s, e) {
-    // The engine's agentId, on a subagent's events. One that isn't a string counts as missing, as the deck reads it.
+    // The engine's agentId, on a subagent's events. One that isn't a non-empty string counts as none: the main
+    // loop's (PROTOCOL.md, "Events").
     const agent = str(e.agent)
     const main = agent === null
     switch (e.t) {
       case 'turn.start':
         if (main) {
-          s.turn = { sawEnd: false, lastEnd: null, failed: false }
+          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false }
           this.#clearMainTools(s)
         }
+        this.#fpCallsEnded(s, (c) => c.agent === agent)
         break
       case 'turn.end':
         if (main) {
-          s.turn.sawEnd = true
-          s.turn.lastEnd = str(e.reason)
+          // Status rule 4, as the deck reads it: a failed marks only its own turn, so a turn.end for another turn
+          // reads done. One it can't tell apart, with no turn id on one side or the other, keeps it.
+          const id = str(e.turn)
+          const same = id === null || s.turn.id === null || id === s.turn.id
+          s.turn = { id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed }
           this.#clearMainTools(s)
-          this.#fpGiveUp(s, 'the turn ended')
         }
+        this.#fpCallsEnded(s, (c) => c.agent === agent)
         break
       case 'failed':
         if (main) {
           s.turn.sawEnd = true
           s.turn.failed = true
           this.#clearMainTools(s)
-          this.#fpGiveUp(s, 'the turn ended')
         }
+        this.#fpCallsEnded(s, (c) => c.agent === agent)
         break
       case 'tool.start':
         if (str(e.use)) {
           s.tools.set(e.use, { tool: str(e.tool), summary: str(e.summary) ?? str(e.tool), fp: str(e.fp), agent, order: ++s.toolOrder })
         }
-        this.#fpFromTool(s, e)
+        this.#fpFromTool(s, e, agent)
         break
       case 'tool.end':
-        if (str(e.use)) s.tools.delete(e.use)
+        if (str(e.use)) {
+          s.tools.delete(e.use)
+          this.#fpCallsEnded(s, (c) => c.use === e.use)
+        }
         if (str(e.fp)) this.#releaseByFp(s, e.fp)
         break
       case 'measure':
@@ -273,7 +315,7 @@ export class FakeDeck {
         s.ended = str(e.reason) ?? 'end'
         break
       default:
-        this.#log({ kind: 'event-unknown', host: s.host, t: e.t ?? null, say: `${s.host}: event of unknown type ${JSON.stringify(e.t)} ignored` })
+        this.#log({ kind: 'event-unknown', host: s.host, t: e.t ?? null, say: `${s.host}: event of unknown type ${display(e.t)} ignored` })
         return
     }
     this.#log({ kind: 'event', host: s.host, event: e })
@@ -292,61 +334,97 @@ export class FakeDeck {
   // ---- fingerprints --------------------------------------------------------------------------------------
   //
   // Ladder step 4 compares both sides' fingerprints (PROTOCOL.md, "Fingerprints and summaries"): a held request
-  // and the mod's tool.start for the same call should carry the same fp and summary. A request pairs with a
-  // tool.start of its session's with its tool and fp, whichever of the two comes second. One that finds none
-  // waits: its own tool.start may still be on the mod's line, behind a parallel call of the same tool. It's
-  // given up only when the session's turn ends, since every tool.start of the turn has come by then (or its mod
-  // restarts, its session ends, the bridge resets). Then it's a mismatch when it can pair only one way, with the
-  // turn's one call of its tool that paired with nothing, and no other request waiting for one; else unpaired.
+  // and the mod's tool.start for the same call should carry the same fp and summary. A request pairs with a call
+  // of its session's under way with its tool and fp, whichever of the two comes second. One that finds none waits
+  // for as long as it's held: its own tool.start may still be on the mod's line, behind a parallel call of the
+  // same tool, on an older inst's line after a restart, or from a background subagent whose call outlasts the
+  // main loop's turn. Once it ends with none, it's a mismatch only when it can pair only one way: with the one
+  // call of its tool that was under way while it was held and paired with nothing, when no other request of its
+  // tool waited beside it, the mod didn't restart meanwhile, and no tool.end with its fp released it (its own
+  // tool.start never came). Otherwise it can't tell which call was its own: unpaired.
 
-  /** A held request: pairs with a tool.start of the session's that has its tool and fp, or waits. */
+  /** A held request: pairs with a call of its session's under way with its tool and fp, or waits. */
   #fpFromHeld(h, s) {
-    const t = s?.fpStarts.find((x) => !x.paired && x.tool === h.tool && x.fp === h.fp)
-    if (t) this.#fpCheck(h, t)
-    else this.#fpWaiting.push(h)
-  }
-
-  /** A tool.start: pairs with the session's oldest waiting request that has its tool and fp. */
-  #fpFromTool(s, e) {
-    const t = { tool: str(e.tool), fp: str(e.fp), summary: str(e.summary), paired: false }
-    s.fpStarts.push(t)
-    const h = this.#fpWaiting.find((x) => this.#isOf(x, s.host, s.sid) && x.tool === t.tool && x.fp === t.fp)
-    if (!h) return
-    this.#fpWaiting.splice(this.#fpWaiting.indexOf(h), 1)
-    this.#fpCheck(h, t)
-  }
-
-  /** The session's waiting requests, once no more of their tool.starts can come: a mismatch, or unpaired. */
-  #fpGiveUp(s, why) {
-    const waiting = this.#fpWaiting.filter((h) => this.#isOf(h, s.host, s.sid))
-    this.#fpWaiting = this.#fpWaiting.filter((h) => !waiting.includes(h))
-    const calls = s.fpStarts.filter((t) => !t.paired)
-    s.fpStarts = []
-    // A session without the plugin has no tool.starts to compare.
-    if (!s.plugin) return
-    for (const h of waiting) {
-      const its = calls.filter((t) => t.tool === h.tool)
-      const requests = waiting.filter((x) => x.tool === h.tool).length
-      this.#fpCheck(h, its.length === 1 && requests === 1 ? its[0] : null, { why, calls: its, requests })
+    h.fpFrom = ++this.#fpTick
+    const c = s?.fpCalls.find((x) => x.end === null && x.tool === h.tool && x.fp === h.fp)
+    if (!c) {
+      this.#fpWaiting.push(h)
+      return
     }
+    s.fpCalls.splice(s.fpCalls.indexOf(c), 1)
+    this.#fpLog(h, c)
   }
 
-  /** Logs the comparison: with `t` the tool.start paired with `h`, or with none when it can't tell which it was. */
-  #fpCheck(h, t, { why = null, calls = [], requests = 0 } = {}) {
+  /** A tool.start: pairs with the session's oldest waiting request that has its tool and fp, or waits as a call. */
+  #fpFromTool(s, e, agent) {
+    const c = { tool: str(e.tool), fp: str(e.fp), summary: str(e.summary), use: str(e.use), agent, start: ++this.#fpTick, end: null }
+    const h = this.#fpWaiting.find((x) => this.#isOf(x, s.host, s.sid) && x.tool === c.tool && x.fp === c.fp)
+    if (!h) {
+      s.fpCalls.push(c)
+      return
+    }
+    this.#fpWaiting.splice(this.#fpWaiting.indexOf(h), 1)
+    this.#fpLog(h, c)
+  }
+
+  /** The session's calls under way that `ended(call)` picks have ended: by their tool.end, or with their loop's turn. */
+  #fpCallsEnded(s, ended) {
+    const tick = ++this.#fpTick
+    for (const c of s.fpCalls) if (c.end === null && ended(c)) c.end = tick
+    this.#fpPrune(s)
+  }
+
+  /** Forgets the session's calls that ended before every waiting request of their tool arrived: none was theirs. */
+  #fpPrune(s) {
+    const waiting = this.#fpWaiting.filter((h) => this.#isOf(h, s.host, s.sid))
+    s.fpCalls = s.fpCalls.filter((c) => c.end === null || waiting.some((h) => h.tool === c.tool && h.fpFrom < c.end))
+  }
+
+  /**
+   * A held request ended (`why` says how, and `rule` is its release rule, if any). If no tool.start has paired
+   * with it, none can now: it's a mismatch when it can pair only one way, else unpaired.
+   */
+  #fpEnded(h, why, rule) {
+    const i = this.#fpWaiting.indexOf(h)
+    if (i < 0) return
+    this.#fpWaiting.splice(i, 1)
+    const s = [...this.#sessions.values()].find((x) => this.#isOf(h, x.host, x.sid))
+    // A session without the plugin has no tool.starts to compare.
+    if (!s?.plugin) return
+    const calls = s.fpCalls.filter((c) => c.tool === h.tool && (c.end === null || c.end > h.fpFrom))
+    const others = this.#fpWaiting.filter((x) => this.#isOf(x, s.host, s.sid) && x.tool === h.tool)
+    // Whichever call was this one's, the others of its tool can no longer be sure it wasn't theirs.
+    for (const x of others) x.fpCrowded = true
+    const doubt =
+      rule === 1 ? 'a tool.end with its fp released it, so its own tool.start never came'
+      : h.fpRestarted ? 'the mod restarted while it was held, so its own tool.start may never come'
+      : others.length || h.fpCrowded ? 'another request of its tool waited beside it unpaired'
+      : calls.length === 0 ? 'no unpaired call of its tool was under way while it was held'
+      : calls.length > 1 ? `${calls.length} unpaired calls of its tool were under way while it was held`
+      : null
+    if (doubt) {
+      this.#fpLog(h, null, { why, doubt, calls })
+    } else {
+      s.fpCalls.splice(s.fpCalls.indexOf(calls[0]), 1)
+      this.#fpLog(h, calls[0], { why })
+    }
+    this.#fpPrune(s)
+  }
+
+  /** Logs the comparison: with `c` the call paired with `h`, or with none when it can't tell which was its own. */
+  #fpLog(h, c, { why = null, doubt = null, calls = [] } = {}) {
     const base = { kind: 'fp-check', request: h.id, host: h.host, tool: h.tool, bridgeFp: h.fp, bridgeSummary: h.summary, ...(why ? { why } : {}) }
-    if (!t) {
-      const left = calls.length ? `${calls.length} call(s) of it unpaired for ${requests} request(s), so it can't tell which was its own` : 'no other call of it came either'
+    if (!c) {
       this.#log({
-        ...base, match: null, unpaired: true, modFp: null, modSummary: null, calls: calls.map(({ fp, summary }) => ({ fp, summary })),
-        say: `${h.id} fp unpaired (${h.tool}) when ${why}: no tool.start had its fp; ${left}`,
+        ...base, match: null, unpaired: true, doubt, modFp: null, modSummary: null, calls: calls.map(({ fp, summary }) => ({ fp, summary })),
+        say: `${h.id} fp unpaired (${h.tool}) as it ended (${why}): no tool.start had its fp, and ${doubt}`,
       })
       return
     }
-    t.paired = true
-    const match = h.fp === t.fp
+    const match = h.fp === c.fp
     this.#log({
-      ...base, match, modFp: t.fp, modSummary: t.summary,
-      say: `${h.id} fp ${match ? 'matches' : `differs: bridge ${h.fp}, mod ${t.fp}`} (${h.tool})`,
+      ...base, match, modFp: c.fp, modSummary: c.summary,
+      say: `${h.id} fp ${match ? 'matches' : `differs: bridge ${h.fp}, mod ${c.fp}`} (${h.tool})`,
     })
   }
 
@@ -365,7 +443,7 @@ export class FakeDeck {
     const host = this.#hostFor(sid, hostHeader)
     const s = host ? this.#session(host) : null
     if (s) {
-      if (sid) s.sid = sid
+      this.#sawSid(s, sid)
       if (str(b.permission_mode)) s.settings.mode = b.permission_mode
       if (isObject(b.effort) && str(b.effort.level)) s.settings.effort = b.effort.level
     }
@@ -405,32 +483,35 @@ export class FakeDeck {
   clientClosed(id) {
     const h = this.#held.find((x) => x.id === id)
     if (!h) return false
-    this.#end(h, 'client-closed')
-    this.#log({ kind: 'release', id, rule: 5, why: 'the client closed the connection', say: `${id} released: the client closed it (rule 5)` })
+    const why = 'the client closed the connection'
+    this.#log({ kind: 'release', id, rule: 5, why, say: `${id} released: the client closed it (rule 5)` })
+    this.#end(h, 'client-closed', why)
     return true
   }
 
-  #end(h, end, extra = {}) {
+  /** A held request ended: `end` says how, and `why` in words. It's no longer held, and its fp check ends with it. */
+  #end(h, end, why, extra = {}) {
     const i = this.#held.indexOf(h)
     if (i >= 0) this.#held.splice(i, 1)
     this.#recent.push({ id: h.id, host: h.host, tool: h.tool, kind: h.kind, summary: h.summary, end, ...extra, heldMs: this.#now() - h.arrived })
     if (this.#recent.length > RECENT_KEPT) this.#recent.shift()
+    this.#fpEnded(h, why, extra.rule)
   }
 
   /** Answers a held request with no decision, by release rule `rule`. */
   #release(h, rule, why) {
     const sent = h.responder.open
     if (sent) h.responder.send(200, answerFor('none'))
-    this.#end(h, sent ? 'released' : 'gone', { rule })
     this.#log({ kind: 'release', id: h.id, rule, why, sent, say: `${h.id} released with {}: ${why} (rule ${rule})` })
+    this.#end(h, sent ? 'released' : 'gone', why, { rule })
   }
 
   /** Answers a held request: allow, deny or none. False when its client had already gone. */
   #answerHeld(h, decision, by) {
     const sent = h.responder.open
     if (sent) h.responder.send(200, answerFor(decision))
-    this.#end(h, sent ? 'answered' : 'gone', { decision, by })
     this.#log({ kind: 'answered', id: h.id, decision, by, sent, say: `${h.id} ${sent ? decision : `gone before its ${decision}`} (${by})` })
+    this.#end(h, sent ? 'answered' : 'gone', `answered ${decision} by ${by === 'press' ? 'a press' : 'the control route'}`, { decision, by })
     return sent
   }
 
@@ -444,12 +525,20 @@ export class FakeDeck {
   poll({ sid, host, inst, wait, responder }) {
     const s = this.#touchMod(sid, host, inst)
     if (!s) return null
+    const id = ++this.#pollSeq
+    if (str(inst) !== s.inst) {
+      // PROTOCOL.md, Identity: a poll from an inst other than the session's newest, one already replaced, is
+      // answered at once with no commands. It never takes the newest one's place or a command, nor does it show
+      // that the session's mod is there for a waiting prompt's clock.
+      responder.send(200, { cmds: [] })
+      this.#log({ kind: 'poll-stale', host: s.host, poll: id, inst: str(inst), newest: s.inst })
+      return id
+    }
     if (s.poll) {
       const old = s.poll.id
       this.#endPoll(s, [])
       this.#log({ kind: 'poll-superseded', host: s.host, poll: old })
     }
-    const id = ++this.#pollSeq
     const queued = [...this.#commands.values()].filter((c) => c.host === s.host && c.state === 'queued')
     if (queued.length || wait === 0) {
       // Answered at once: the mod is there, but the session has no open poll again.
@@ -543,7 +632,8 @@ export class FakeDeck {
     const s = this.#touchMod(b.sid, b.host, b.inst)
     if (!s) this.#unplaced('result')
     const c = typeof b.id === 'string' ? this.#commands.get(b.id) : undefined
-    const ignore = (why) => this.#log({ kind: 'result-ignored', id: b.id ?? null, state: b.state ?? null, why, say: `result for ${b.id ?? '?'} ignored: ${why}` })
+    const id = typeof b.id === 'string' ? b.id : b.id === undefined ? '?' : display(b.id)
+    const ignore = (why) => this.#log({ kind: 'result-ignored', id: b.id ?? null, state: b.state ?? null, why, say: `result for ${id} ignored: ${why}` })
     if (!c) return ignore('unknown command')
     if (FINAL.has(c.state)) return ignore(`already ${c.state}`)
     if (c.state === 'queued') return ignore('not delivered yet')
@@ -558,7 +648,7 @@ export class FakeDeck {
       this.#armPollGap(s)
       return
     }
-    if (!FINAL.has(b.state)) return ignore(`unknown state ${JSON.stringify(b.state)}`)
+    if (!FINAL.has(b.state)) return ignore(`unknown state ${display(b.state)}`)
     this.#finish(c, b.state, { error: asString(b.error), detail: asString(b.detail) })
     this.#armPollGap(s)
   }
@@ -583,7 +673,7 @@ export class FakeDeck {
     if (!h) return this.#pressed({ key, alert: true, error: 'nothing is held' })
     if (shown !== undefined && shown !== h.id) return this.#pressed({ key, alert: true, error: `the key showed ${shown ?? 'nothing'}; the oldest is ${h.id}` })
     if (!h.responder.open) {
-      this.#end(h, 'gone')
+      this.#end(h, 'gone', 'its client had gone')
       return this.#pressed({ key, alert: true, error: `${h.id} had gone` })
     }
     if (h.kind === 'ask') return this.#pressed({ key, request: h.id, jumped: h.host })
@@ -695,7 +785,8 @@ export class FakeDeck {
     const prev = this.#registry
     this.#registry = next
     this.#registryBySid = bySid
-    for (const h of this.#held) if (h.host === null && h.sid && bySid.has(h.sid)) h.host = bySid.get(h.sid)
+    // A request held without a host: the registry, or a sid and host pair seen since it came, may place it now.
+    for (const h of this.#held) if (h.host === null && h.sid) h.host = this.#hostFor(h.sid, null)
 
     for (const [host, f] of next) {
       const p = prev.get(host)
@@ -736,7 +827,6 @@ export class FakeDeck {
     if (!s) return
     this.#endPoll(s, [])
     this.#clearTimer(s.gapTimer)
-    this.#fpGiveUp(s, 'the session ended')
     this.#sessions.delete(host)
   }
 
@@ -760,6 +850,7 @@ export class FakeDeck {
       const s = this.#sessions.get(host)
       if (s?.turn.failed) return 'failed'
       if (s?.turn.lastEnd === 'aborted') return 'interrupted'
+      // Rule 6: the app's own needs-input indicator would show for the record (registry.mjs, needsInput).
       if (this.#records.get(host)?.needsUser) return 'needs-you'
       if (s?.turn.sawEnd) return 'done'
     }
@@ -859,7 +950,6 @@ export class FakeDeck {
     const what = `the bridge was ${why === 'reset' ? 'reset' : 'shut down'}`
     for (const h of [...this.#held]) this.#release(h, why, what)
     for (const s of this.#sessions.values()) {
-      this.#fpGiveUp(s, what)
       this.#clearTimer(s.gapTimer)
       if (!s.poll) continue
       this.#clearTimer(s.poll.timer)

@@ -25,6 +25,8 @@ export type Sent = {
 
 type HttpValue = { status: number; ok: boolean; headers: Record<string, string>; text: string }
 type Answer = { value: HttpValue } | { deny: string }
+/** An answer the bridge is set to give: its status, and a body to go with it. */
+export type Reply = { status: number; body?: unknown }
 
 /** How the fake bridge behaves: answering, refusing connections (down), or taking requests it leaves unanswered (hang). */
 export type Mode = 'up' | 'down' | 'hang'
@@ -37,6 +39,8 @@ export type WorldOptions = {
   submit?: (text: string) => string | undefined
   /** Answers `$.mcp.call` (`{ value }` or `{ deny }`); by default the mode changes. */
   mcp?: (e: { server: string; tool: string; args: Record<string, unknown> }) => unknown
+  /** Refuses every tool call at the permission check beneath the mod, with this reason, as a session's dialog does. */
+  refuse?: string
 }
 
 const answer = (status: number, body?: unknown): Answer => ({
@@ -49,12 +53,16 @@ export function world(on: On, o: WorldOptions = {}) {
   const held: { req: Sent; reply: (a: Answer) => void }[] = []
   /** Requests the bridge took and left unanswered: all of them in mode `hang`, or a route's set to `'hang'`. */
   const hung: { req: Sent; reply: (a: Answer) => void }[] = []
+  /** Requests to fail with no answer at all, by route, each counting one down. */
+  const abandoned = new Map<string, number>()
   const bridge = {
     mode: o.mode ?? ('up' as Mode),
     hello: { status: 200, body: { v: 1, ok: true } as unknown },
-    /** The status events and results are answered with, or `'hang'` to take them and never answer. */
-    events: 204 as number | 'hang',
-    result: 204 as number | 'hang',
+    /** How events and results are answered: a status, a status with a body, or `'hang'` to take them and never answer. */
+    events: 204 as number | Reply | 'hang',
+    result: 204 as number | Reply | 'hang',
+    /** How every poll is answered, at once; undefined holds each until a command comes or its wait ends. */
+    poll: undefined as Reply | undefined,
     /** Seconds the bridge holds a poll with nothing to send: the poll's own `wait` when undefined. */
     pollHold: undefined as number | undefined,
     /** The reason a refused connection gives. */
@@ -99,6 +107,12 @@ export function world(on: On, o: WorldOptions = {}) {
     })
   }
 
+  /** An event's or result's answer, as the bridge is set to give it. */
+  function respond(req: Sent, how: number | Reply | 'hang'): Answer | Promise<Answer> {
+    if (how === 'hang') return hang(req)
+    return typeof how === 'number' ? answer(how) : answer(how.status, how.body)
+  }
+
   on('http.fetch', (_$, e) => {
     const init = e.init ?? {}
     const url = new URL(e.url)
@@ -118,16 +132,22 @@ export function world(on: On, o: WorldOptions = {}) {
     }
     sent.push(req)
     if (`${url.protocol}//${url.host}` !== BRIDGE) return { deny: `not the bridge: ${e.url}` }
+    const left = abandoned.get(req.route) ?? 0
+    if (left > 0) {
+      abandoned.set(req.route, left - 1)
+      return { deny: 'The operation was aborted.' }
+    }
     if (bridge.mode === 'down') return { deny: bridge.refusal }
     if (bridge.mode === 'hang') return hang(req)
     switch (req.route) {
       case '/v1/hello':
         return answer(bridge.hello.status, bridge.hello.body)
       case '/v1/events':
-        return bridge.events === 'hang' ? hang(req) : answer(bridge.events)
+        return respond(req, bridge.events)
       case '/v1/result':
-        return bridge.result === 'hang' ? hang(req) : answer(bridge.result)
+        return respond(req, bridge.result)
       case '/v1/next':
+        if (bridge.poll !== undefined) return answer(bridge.poll.status, bridge.poll.body)
         return new Promise<Answer>(reply => {
           const entry = { req, reply }
           held.push(entry)
@@ -148,6 +168,10 @@ export function world(on: On, o: WorldOptions = {}) {
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('tool.call', (_$, e) => engine.tool(e as unknown as Record<string, unknown>) as { result: string })
+  // The kit raises classic.PreToolUse beneath the mod's tool.call hook, which then sees the errored result a
+  // session's hooks see for a refused call.
+  const refusal = o.refuse
+  if (refusal !== undefined) on('classic.PreToolUse', () => ({ deny: refusal }))
   on('classic.UserPromptSubmit', () => ({}))
   on('classic.PostToolUse', () => ({}))
   on('classic.PostToolUseFailure', () => ({}))
@@ -188,6 +212,13 @@ export function world(on: On, o: WorldOptions = {}) {
     /** The deck restarts: every held poll's connection drops. */
     drop: (): void => {
       for (const entry of held.splice(0)) entry.reply({ deny: 'socket hang up' })
+    },
+    /**
+     * The next `n` requests to `route` fail with no answer at all, as the engine abandons a mod's fetches when a turn
+     * is interrupted, a deck Deny included (ladder step 4).
+     */
+    abandon: (route: string, n = 1): void => {
+      abandoned.set(route, (abandoned.get(route) ?? 0) + n)
     },
     /** The bridge wakes up late: answers every request it left hanging, oldest first. */
     answerHung: (status: number, body?: unknown): void => {

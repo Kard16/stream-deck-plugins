@@ -119,7 +119,7 @@ export const register: Register = on => {
     attempt(() => {
       const b = link($)
       b.emit(ev.turnStart(e))
-      if (e.agentId === undefined) b.sidMayHaveChanged()
+      if (ev.mainLoop(e.agentId)) b.sidMayHaveChanged()
     })
     return next(e)
   })
@@ -129,7 +129,7 @@ export const register: Register = on => {
       const b = link($)
       b.emit(ev.turnEnd(e))
       // The model: `$.session.model()` after each of the main loop's turns (PROTOCOL.md, "Events").
-      if (e.agentId === undefined) b.checkModel()
+      if (ev.mainLoop(e.agentId)) b.checkModel()
     })
     return next(e)
   })

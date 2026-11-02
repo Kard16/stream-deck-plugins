@@ -224,6 +224,27 @@ test('deck: the host comes from X-Deck-Host, else the sid in the registry; one t
   assert.equal(view().held.at(-1).host, B.host, 'filled in once the registry knows the sid')
 })
 
+test('deck: the host fallback takes every sid and host pair seen from mods and hooks, and places a request held without a host by one later', () => {
+  const { deck, reg, hello, perm, view } = setup()
+  reg([A, 'busy'])
+  // Neither session is in the registry. C's sid changes (a /clear, say), and its hook brings the new pair.
+  const C = { sid: 'sid-c1', host: 'local_c', inst: 'ic', pid: 3 }
+  const D = { sid: 'sid-d', host: 'local_d', inst: 'id', pid: 4 }
+  hello(C)
+  perm({ ...C, sid: 'sid-c2' }, 'Write', W1)
+  // A late mod request on the first sid, and a hook's on the second, both without a host: each pair places its own.
+  deck.events({ sid: 'sid-c1', host: '', inst: 'ic', seq: 1, events: [{ t: 'measure', context: { percent: 9, window: 10 }, at: 1 }] })
+  assert.equal(view().context[C.host], 9)
+  perm({ ...C, sid: 'sid-c2' }, 'Bash', { command: 'ls' }, { header: undefined })
+  assert.equal(view().held.at(-1).host, C.host)
+  // A request held without a host: a pair seen after it came places it at the next registry reading.
+  perm(D, 'Write', W1, { header: undefined })
+  assert.equal(view().held.at(-1).host, null)
+  hello(D)
+  reg([A, 'busy'])
+  assert.equal(view().held.at(-1).host, D.host)
+})
+
 test('deck: a mod request it can\'t place is refused, so the bridge answers 400', () => {
   const { deck, reg } = setup()
   reg([A, 'idle'])
@@ -430,6 +451,38 @@ test('deck: a new inst answers the old instance\'s open poll with no commands, s
   assert.deepEqual(poll({ ...A, inst: 'ia2' }).r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'one' }] } }])
 })
 
+test('deck: a poll from an inst that isn\'t the newest is answered at once with no commands, and leaves the newest one\'s poll alone', () => {
+  const { deck, clock, reg, hello, ev, poll, view, log } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  hello({ ...A, inst: 'ia2' })
+  const newest = poll(A, 20, 'ia2')
+  const stale = poll(A, 20, 'ia')
+  assert.deepEqual(stale.r.sent, [{ status: 200, json: { cmds: [] } }], 'answered at once')
+  assert.equal(newest.r.sent.length, 0, 'the newest instance\'s poll stays open')
+  const c1 = deck.prompt({ host: A.host, text: 'one' }).cmd
+  assert.deepEqual(newest.r.sent, [{ status: 200, json: { cmds: [{ id: c1, t: 'prompt', text: 'one' }] } }], 'and gets the command')
+
+  // With a command queued and no poll open, an old inst's poll still gets none of it, whatever its wait.
+  const c2 = deck.prompt({ host: A.host, text: 'two' }).cmd
+  assert.deepEqual(poll(A, 20, 'ia').r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.deepEqual(poll(A, 0, 'ia').r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.deepEqual([view().cmds[c2], deck.state().sessions[A.host].poll], ['queued', null])
+  // Its events are still taken.
+  ev(A, { t: 'measure', context: { percent: 40, tokens: 4, window: 10 } })
+  assert.equal(view().context[A.host], 40)
+
+  // Nor does it keep a waiting prompt alive: only the newest instance's polls show the session's mod is there.
+  assert.deepEqual(poll(A, 20, 'ia2').r.sent[0].json.cmds.map((c) => c.id), [c2])
+  deck.result({ sid: A.sid, host: A.host, inst: 'ia2', id: c2, state: 'waiting' })
+  for (let i = 0; i < 3; i++) {
+    poll(A, 20, 'ia')
+    clock.advance(20_000)
+  }
+  assert.deepEqual([view().cmds[c2], deck.state().commands.find((c) => c.id === c2).error], ['failed', 'no result'])
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 1, 'and none of it is a restart')
+})
+
 test('deck: a queued command that no poll takes within 60 s fails with "not delivered"', () => {
   const { deck, clock, reg, hello, poll, view } = setup()
   reg([A, 'idle'])
@@ -542,6 +595,26 @@ test('deck: statuses come in the order PROTOCOL.md gives', () => {
   assert.equal(status(), 'idle', 'a subagent\'s turn end is not the main loop\'s')
 })
 
+test('deck: a main-loop failed marks only its own turn: a turn.end for another turn reads done, as the deck reads rule 4', () => {
+  const { reg, hello, ev, view } = setup()
+  const status = () => view().status[A.host]
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'failed', error: 'API error' })
+  reg([A, 'idle'])
+  assert.equal(status(), 'failed')
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.equal(status(), 'failed', 'its own turn\'s end keeps it')
+  // The next turn's start went missing: its end is another turn's.
+  ev(A, { t: 'turn.end', turn: 't2', reason: 'answer' })
+  assert.equal(status(), 'done')
+  // With no turn id on one side or the other it can't tell the turns apart, and the failed stays.
+  ev(A, { t: 'turn.start' }, { t: 'failed', error: 'API error' }, { t: 'turn.end', turn: 't3', reason: 'answer' })
+  assert.equal(status(), 'failed')
+  ev(A, { t: 'turn.start', turn: 't4' }, { t: 'failed', error: 'API error' }, { t: 'turn.end', reason: 'answer' })
+  assert.equal(status(), 'failed')
+})
+
 test('deck: settings are the latest from hello, settings events and requests, else the record', () => {
   const { deck, reg, hello, ev, perm, view } = setup()
   reg([A, 'busy'])
@@ -629,49 +702,136 @@ test('deck: two parallel calls of one tool pair each request with the tool.start
   }
 })
 
-test('deck: a request no tool.start pairs with by fp is a mismatch only when its turn leaves one way to pair it, else unpaired', () => {
-  const { log, reg, hello, ev, perm } = setup()
+test('deck: a request no tool.start pairs with by fp is judged as it ends: a mismatch only when it can pair one way, else unpaired', () => {
+  const { deck, log, reg, hello, ev, perm } = setup()
   reg([A, 'busy'])
   hello(A)
   const turnEnd = (turn) => ev(A, { t: 'turn.end', turn, reason: 'answer' })
   const check = (p) => log.find((e) => e.kind === 'fp-check' && e.request === p.id)
+  const end = (p) => deck.answer({ id: p.id, decision: 'none' })
 
   // One call of the tool and one request for it, with fps that differ: it can only be that one, a true difference.
   ev(A, { t: 'tool.start', tool: 'Bash', use: 'u1', summary: 'ls', fp: 'deadbeef' })
   const p1 = perm(A, 'Bash', { command: 'ls' })
-  assert.equal(check(p1), undefined, 'nothing until the turn ends: its own tool.start may still come')
   turnEnd('t1')
-  assert.deepEqual([check(p1).match, check(p1).modFp, check(p1).modSummary, check(p1).unpaired], [false, 'deadbeef', 'ls', undefined])
+  assert.equal(check(p1), undefined, 'nothing while it\'s held, though the main loop\'s turn ended: its own tool.start may still come')
+  end(p1)
+  assert.deepEqual([check(p1).match, check(p1).modFp, check(p1).modSummary, check(p1).unpaired, check(p1).why], [false, 'deadbeef', 'ls', undefined, 'answered none by the control route'])
 
   // Two parallel calls whose fps both differ from their requests': it can't tell which is which.
   ev(A, fetchStart('u2', DOCS, 'deadbee1'), fetchStart('u3', NEWS, 'deadbee2'))
   const p2 = perm(A, 'WebFetch', DOCS)
   const p3 = perm(A, 'WebFetch', NEWS)
-  turnEnd('t2')
+  end(p2)
+  end(p3)
   for (const p of [p2, p3]) {
-    assert.deepEqual([check(p).match, check(p).unpaired, check(p).modFp, check(p).why], [null, true, null, 'the turn ended'])
+    assert.deepEqual([check(p).match, check(p).unpaired, check(p).modFp, check(p).doubt], [null, true, null, 'another request of its tool waited beside it unpaired'])
     assert.deepEqual(check(p).calls, [{ fp: 'deadbee1', summary: 'docs.example.com' }, { fp: 'deadbee2', summary: 'news.example.com' }])
   }
+  turnEnd('t2')
 
   // One request, and two calls of its tool that paired with nothing: one may have needed no permission.
   ev(A, fetchStart('u4', DOCS, 'deadbee3'), fetchStart('u5', NEWS, 'deadbee4'))
   const p4 = perm(A, 'WebFetch', DOCS)
+  end(p4)
+  assert.deepEqual([check(p4).unpaired, check(p4).calls.length, check(p4).doubt], [true, 2, '2 unpaired calls of its tool were under way while it was held'])
   turnEnd('t3')
-  assert.deepEqual([check(p4).unpaired, check(p4).calls.length], [true, 2])
 
   // No call of its tool at all, only one of another's.
   ev(A, fetchStart('u6', DOCS))
   const p5 = perm(A, 'Write', W1)
-  turnEnd('t4')
+  end(p5)
   assert.deepEqual([check(p5).unpaired, check(p5).calls], [true, []])
+  turnEnd('t4')
 
-  // A subagent's turn end isn't the session's: the request goes on waiting for its tool.start.
+  // A call that ended before the request arrived wasn't its own; one that ended while it was held, answered in the
+  // app say, may have been.
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u7', summary: 'pwd', fp: 'deadbee5' }, { t: 'tool.end', tool: 'Bash', use: 'u7', fp: 'deadbee5', ok: true })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u8', summary: 'make', fp: 'deadbee6' })
   const p6 = perm(A, 'Bash', { command: 'make' })
-  ev(A, { t: 'turn.end', turn: 't5', agent: 'ag1', reason: 'answer' })
-  assert.equal(check(p6), undefined)
-  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u7', agent: 'ag1', summary: 'make', fp: fingerprint('Bash', { command: 'make' }) })
-  assert.deepEqual([check(p6).match, check(p6).modSummary], [true, 'make'])
-  assert.equal(log.filter((e) => e.kind === 'fp-check').length, 6, 'one line for each request')
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u8', fp: 'deadbee6', ok: true })
+  end(p6)
+  assert.deepEqual([check(p6).match, check(p6).modFp, check(p6).modSummary], [false, 'deadbee6', 'make'])
+  turnEnd('t5')
+
+  // A request of its tool that ended unpaired while it waited may have been the one call's: neither can tell.
+  ev(A, fetchStart('u9', DOCS, 'deadbee7'))
+  const p7 = perm(A, 'WebFetch', DOCS)
+  ev(A, { t: 'tool.end', tool: 'WebFetch', use: 'u9', fp: 'deadbee7', ok: true })
+  const p8 = perm(A, 'WebFetch', NEWS)
+  ev(A, fetchStart('u10', NEWS, 'deadbee8'))
+  end(p7)
+  end(p8)
+  assert.deepEqual([p7, p8].map((p) => [check(p).unpaired, check(p).calls.length, check(p).doubt]), [
+    [true, 2, 'another request of its tool waited beside it unpaired'],
+    [true, 1, 'another request of its tool waited beside it unpaired'],
+  ])
+  turnEnd('t6')
+
+  // Nor was a call that ended before it came its own, though that call ended while another request of its tool waited.
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u11', summary: 'pwd', fp: 'deadbee9' })
+  const p9 = perm(A, 'Bash', { command: 'ls' })
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u11', fp: 'deadbee9', ok: true })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u12', summary: 'ls', fp: fingerprint('Bash', { command: 'ls' }) })
+  const p10 = perm(A, 'Bash', { command: 'make' })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u13', summary: 'make', fp: 'deadbeea' })
+  end(p10)
+  assert.deepEqual([check(p9).match, check(p10).match, check(p10).modFp], [true, false, 'deadbeea'])
+  assert.equal(log.filter((e) => e.kind === 'fp-check').length, 10, 'one line for each request')
+})
+
+test('deck: a request waits for its own tool.start across a mod restart, since an older inst\'s events still count', () => {
+  // Round 3's probe (probe-fp.mjs): an auto-allowed call of Bash, a request for another whose tool.start is still
+  // on the old instance's line, a hello from a new inst, then the old line's late tool.start.
+  const { deck, log, reg, hello, ev, perm } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u1', summary: 'ls', fp: fingerprint('Bash', { command: 'ls' }) })
+  const p1 = perm(A, 'Bash', { command: 'make' })
+  hello({ ...A, inst: 'ia2' })
+  assert.deepEqual(fpChecks(log), [], 'not given up at the restart')
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u2', summary: 'make', fp: fingerprint('Bash', { command: 'make' }) })
+  assert.deepEqual(fpChecks(log), [[p1.id, 'match', 'make']])
+
+  // Had its tool.start been lost with the old instance, it ends unpaired, not a mismatch with the one other call.
+  const p2 = perm(A, 'Bash', { command: 'make install' })
+  hello({ ...A, inst: 'ia3' })
+  deck.answer({ id: p2.id, decision: 'allow' })
+  const c = log.find((e) => e.kind === 'fp-check' && e.request === p2.id)
+  assert.deepEqual([c.unpaired, c.match, c.calls], [true, null, [{ fp: fingerprint('Bash', { command: 'ls' }), summary: 'ls' }]])
+  assert.equal(c.doubt, 'the mod restarted while it was held, so its own tool.start may never come')
+})
+
+test('deck: a request waits for its own tool.start past the main loop\'s turn end, since a background subagent\'s call can outlast it', () => {
+  // Round 3's probe (probe-fp.mjs): a background subagent's call of Bash starts before the main loop's turn ends
+  // and asks for permission after, then the subagent makes an auto-allowed call of Bash.
+  const { log, reg, hello, ev, perm } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u1', agent: 'bg', summary: 'make', fp: fingerprint('Bash', { command: 'make' }) })
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  const p1 = perm(A, 'Bash', { command: 'make' })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u2', agent: 'bg', summary: 'ls', fp: fingerprint('Bash', { command: 'ls' }) })
+  ev(A, { t: 'turn.end', turn: 't2', reason: 'answer' })
+  assert.deepEqual(fpChecks(log), [[p1.id, 'match', 'make']])
+
+  // The other way round: its request before the main loop's turn end, its tool.start after.
+  const p2 = perm(A, 'Bash', { command: 'npm test' })
+  ev(A, { t: 'turn.end', turn: 't3', reason: 'answer' }, { t: 'turn.end', turn: 's1', agent: 'other', reason: 'answer' })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u3', agent: 'bg', summary: 'npm test', fp: fingerprint('Bash', { command: 'npm test' }) })
+  assert.deepEqual(fpChecks(log), [[p1.id, 'match', 'make'], [p2.id, 'match', 'npm test']])
+})
+
+test('deck: a request released by a tool.end with its fp, whose tool.start never came, is unpaired, not a mismatch with another call', () => {
+  const { log, reg, hello, ev, perm } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u1', agent: 'ag1', summary: 'npm test', fp: fingerprint('Bash', { command: 'npm test' }) })
+  const p1 = perm(A, 'Bash', { command: 'make' })
+  // Its own tool.start was lost, a 4xx dropped it say, and its tool.end releases it (rule 1).
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u2', fp: fingerprint('Bash', { command: 'make' }), ok: true })
+  const c = log.find((e) => e.kind === 'fp-check')
+  assert.deepEqual([c.request, c.unpaired, c.why, c.doubt], [p1.id, true, 'tool.end with the same fp', 'a tool.end with its fp released it, so its own tool.start never came'])
 })
 
 test('deck: both sides\' fingerprints are compared in the log, whichever comes second', () => {
@@ -683,6 +843,8 @@ test('deck: both sides\' fingerprints are compared in the log, whichever comes s
   perm(A, 'Bash', { command: 'ls' })
   ev(A, { t: 'tool.start', tool: 'Bash', use: 'u2', summary: 'ls', fp: 'deadbeef' })
   ev(A, { t: 'failed', error: 'API error' })
+  // Rule 3 ends both requests, and the Bash one with them: the one call of Bash was under way while it was held.
+  reg([A, 'idle'])
   const checks = log.filter((e) => e.kind === 'fp-check').map((e) => [e.tool, e.match, e.modFp])
   assert.deepEqual(checks, [['Write', true, fingerprint('Write', W1)], ['Bash', false, 'deadbeef']])
 })
@@ -705,7 +867,7 @@ test('deck: a subagent\'s failed isn\'t the main loop\'s: its calls and waiting 
   assert.equal(view().status[A.host], 'done')
 })
 
-test('deck: a request still waiting for its tool.start is given up when the mod restarts, the session ends, or the bridge resets', () => {
+test('deck: a request waits for its tool.start until it ends, its session ending or the bridge resetting included', () => {
   const { deck, log, reg, hello, ev, perm } = setup()
   reg([A, 'busy'], [B, 'busy'])
   hello(A)
@@ -713,17 +875,19 @@ test('deck: a request still waiting for its tool.start is given up when the mod 
   const p1 = perm(A, 'Write', W1)
   hello({ ...A, inst: 'ia2' })
   const p2 = perm(A, 'Write', W1)
+  ev({ ...A, inst: 'ia2' }, { t: 'tool.start', tool: 'Write', use: 'u1', summary: 'one.txt', fp: 'deadbeef' })
   const p3 = perm(B, 'Write', W1)
+  assert.deepEqual(fpChecks(log), [], 'still waiting, the mod\'s restart notwithstanding')
   reg([B, 'busy'])
   const p4 = perm(B, 'Bash', { command: 'make' })
-  ev(B, { t: 'tool.start', tool: 'Write', use: 'u1', summary: 'one.txt', fp: 'deadbeef' })
+  ev(B, { t: 'tool.start', tool: 'Write', use: 'u2', summary: 'one.txt', fp: 'deadbee1' })
   deck.reset()
-  const why = Object.fromEntries(log.filter((e) => e.kind === 'fp-check').map((e) => [e.request, [e.unpaired ? 'unpaired' : e.match, e.why]]))
+  const why = Object.fromEntries(log.filter((e) => e.kind === 'fp-check').map((e) => [e.request, [e.unpaired ? 'unpaired' : e.match, e.why, e.doubt]]))
   assert.deepEqual(why, {
-    [p1.id]: ['unpaired', 'the mod restarted'],
-    [p2.id]: ['unpaired', 'the session ended'],
-    [p3.id]: [false, 'the bridge was reset'],
-    [p4.id]: ['unpaired', 'the bridge was reset'],
+    [p1.id]: ['unpaired', "the session's registry file disappeared", 'the mod restarted while it was held, so its own tool.start may never come'],
+    [p2.id]: ['unpaired', "the session's registry file disappeared", 'another request of its tool waited beside it unpaired'],
+    [p3.id]: [false, 'the bridge was reset', undefined],
+    [p4.id]: ['unpaired', 'the bridge was reset', 'no unpaired call of its tool was under way while it was held'],
   })
 })
 

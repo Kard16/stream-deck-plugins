@@ -45,6 +45,9 @@ const LOGGED_BODY_MAX = 64 * 1024
 /** Runs of the token this long or longer are scrubbed too, not only the whole of it. */
 const TOKEN_RUN = 8
 
+/** The status Node answers each of its own errors with; any other is 400. */
+const NODE_ERRORS = Object.freeze({ HPE_HEADER_OVERFLOW: 431, HPE_CHUNK_EXTENSIONS_OVERFLOW: 413, ERR_HTTP_REQUEST_TIMEOUT: 408 })
+
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const pad = (n, w = 2) => String(n).padStart(w, '0')
 const round1 = (x) => Math.round(x * 10) / 10
@@ -516,6 +519,19 @@ export async function startFakeBridge(options = {}) {
   const server = http.createServer({ headersTimeout: 10_000, requestTimeout: 30_000 }, handle)
   // Held requests last up to the hook's 600 s and polls up to 20 s: nothing on the socket times them out.
   server.timeout = 0
+  // A request Node takes no further: one it can't parse, with headers over its limit, or too slow to arrive. Node's
+  // own answer has no body; this one carries {"error"}, like every error answer ("Transport"), with Node's status.
+  // It goes only where it can't cut into another answer, a connection nothing has been written to, and a client
+  // that has gone gets nothing.
+  server.on('clientError', (err, socket) => {
+    if (err.code !== 'ECONNRESET' && socket.writable && socket.bytesWritten === 0) {
+      const status = NODE_ERRORS[err.code] ?? 400
+      const text = JSON.stringify({ error: http.STATUS_CODES[status] })
+      socket.write(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(text)}\r\nconnection: close\r\n\r\n${text}`)
+      write({ kind: 'client-error', t: Date.now(), status, code: err.code ?? null })
+    }
+    socket.destroy()
+  })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(o.port, '127.0.0.1', () => {

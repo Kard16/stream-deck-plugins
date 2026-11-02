@@ -1,6 +1,6 @@
 /**
  * A session's status on the deck (PROTOCOL.md, "The deck's session model"), the first that applies:
- * approval, needs-you, working, failed, interrupted, needs-you (from the app's record), done, idle.
+ * approval, needs-you, working, failed, interrupted, needs-you (the app's own needs-input indicator), done, idle.
  */
 export type SessionStatus = "approval" | "needs-you" | "working" | "failed" | "interrupted" | "done" | "idle";
 
@@ -11,10 +11,13 @@ export type StatusInput = {
 	heldAsk: number;
 	/** The registry's `status`: `idle`, `busy`, `waiting`, or null when the field is missing. */
 	registry: string | null;
-	/** The main loop's last turn, as the mod reported it; null when the deck saw none. */
+	/** The main loop's last turn, as the mod reported it; null when the deck saw none. A subagent's never counts. */
 	turn: { ended: boolean; reason: string | null; failed: boolean } | null;
-	/** The app's record says the last turn needs the user. */
-	recordNeedsUser: boolean;
+	/**
+	 * The category of the last turn as the app's needs-input indicator reads it from the app's record; null when the
+	 * indicator ignores the record, or there's none (turnCategory, src/records/records.ts).
+	 */
+	recordCategory: string | null;
 };
 
 export function sessionStatus(i: StatusInput): SessionStatus {
@@ -26,7 +29,8 @@ export function sessionStatus(i: StatusInput): SessionStatus {
 	if (i.registry === "idle") {
 		if (i.turn?.failed) return "failed";
 		if (i.turn?.ended && i.turn.reason === "aborted") return "interrupted";
-		if (i.recordNeedsUser) return "needs-you";
+		// The app's own needs-input indicator (its `_D`) shows for a turn that's blocked or needs input.
+		if (i.recordCategory === "blocked" || i.recordCategory === "need_input") return "needs-you";
 		if (i.turn?.ended) return "done";
 	}
 	return "idle";

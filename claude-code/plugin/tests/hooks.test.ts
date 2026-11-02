@@ -2,7 +2,7 @@
 // what the fixtures cover: subagents, errors, settings, the other events, and commands that go wrong.
 
 import { expect, test } from 'claude-code/testing'
-import { fingerprint } from '../hooks/fingerprint'
+import { fingerprint, fnv1a32 } from '../hooks/fingerprint'
 import { HOST, MODEL, SID, START, world } from './world'
 
 test('hello goes first, with the ids, cwd, model and versions; then one poll, with wait=20', async ($, on) => {
@@ -83,6 +83,52 @@ test('tool calls report start and end: a subagent\'s carry its id, an error ends
   expect(w.events().map(x => x.seq)).toEqual([1, 2, 3, 4, 5, 6])
 })
 
+test("a call refused at the permission prompt reaches the hook as an errored result: its tool.end says ok false, without denied", async ($, on) => {
+  const refusal = "The user doesn't want to proceed with this tool use."
+  const w = world(on, { refuse: refusal })
+  await $.session.start(START)
+  await w.settle()
+  const write = { file_path: '/sandbox/t1-b.txt', content: 'beta' }
+  expect(await $.tool.call({ tool: 'Write', tool_use_id: 'u1', ...write })).toMatchObject({ isError: true, text: refusal })
+  await w.settle()
+  const any = expect.any(Number)
+  expect(w.events().map(x => x.event)).toEqual([
+    { t: 'tool.start', at: any, tool: 'Write', use: 'u1', summary: 't1-b.txt', fp: fingerprint('Write', write) },
+    { t: 'tool.end', at: any, tool: 'Write', use: 'u1', fp: fingerprint('Write', write), ok: false },
+  ])
+})
+
+test('a tool call nested 20,000 deep passes through untouched; its tool.start and tool.end carry its fingerprint, and the mod goes on', async ($, on) => {
+  const w = world(on)
+  let got: Record<string, unknown> | undefined
+  w.engine.tool = e => {
+    got = e
+    return { result: 'ran' }
+  }
+  await $.session.start(START)
+  await w.settle()
+  // 10,000 objects and 10,000 arrays, each inside the last: deeper than a recursion over it has stack for.
+  let deep: unknown = 'floor'
+  for (let i = 0; i < 10_000; i++) deep = { a: [deep] }
+  const input = { command: 'ls', deep }
+  expect(await $.tool.call({ tool: 'Bash', tool_use_id: 'u1', ...input })).toEqual({ result: 'ran' })
+  // The tool got what the call carried. JSON.stringify reaches this deep, where a matcher's recursion may not.
+  expect(got?.command).toBe('ls')
+  expect(JSON.stringify(got?.deep)).toBe(JSON.stringify(deep))
+  await $.turn.start({ text: 'go on', turnId: 't1' })
+  await w.settle()
+  // The fingerprint of the input's canonical JSON, written out here by hand.
+  const written = `{"command":"ls","deep":${'{"a":['.repeat(10_000)}"floor"${']}'.repeat(10_000)}}`
+  const fp = fnv1a32(`Bash\n${written}`).toString(16).padStart(8, '0')
+  const any = expect.any(Number)
+  expect(w.events().map(x => x.event)).toEqual([
+    { t: 'tool.start', at: any, tool: 'Bash', use: 'u1', summary: 'ls', fp },
+    { t: 'tool.end', at: any, tool: 'Bash', use: 'u1', fp, ok: true },
+    { t: 'turn.start', at: any, turn: 't1' },
+  ])
+  expect(w.logs).toEqual([])
+})
+
 test('a tool call\'s result reaches the session as the engine gave it', async ($, on) => {
   const w = world(on)
   w.engine.tool = () => ({ result: { stdout: 'a\nb', stderr: '', interrupted: false } })
@@ -160,6 +206,40 @@ test('turns, failures, attach, detach, measure and end become events; a measurem
     { t: 'detach', at: any, surface: 'desktop' },
     { t: 'end', at: any, reason: 'prompt_input_exit' },
   ])
+})
+
+test("a subagent's failed turn carries its agent, and its mode and effort aren't the session's", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  await $.classic.StopFailure({ error: 'rate_limit', permission_mode: 'plan', effort: { level: 'max' }, agent_id: 'agent-7' })
+  await w.settle()
+  expect(w.events().map(x => x.event)).toEqual([{ t: 'failed', at: expect.any(Number), error: 'rate_limit', agent: 'agent-7' }])
+})
+
+test("an agent id that isn't a non-empty string is the main loop's: its events carry no agent, its turn start reads the session id and its end the model, and its mode and effort count", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  const resumed = '3fa86955-0000-4000-8000-0000000000bb'
+  w.session.sid = resumed
+  w.session.model = 'claude-opus-5-5'
+  await $.turn.start({ text: 'go', turnId: 't1', agentId: '' })
+  await w.settle()
+  await $.classic.Stop({ stop_hook_active: false, permission_mode: 'plan', effort: { level: 'max' }, agent_id: '' })
+  await $.classic.StopFailure({ error: 'overloaded', agent_id: '' })
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer', agentId: '' })
+  await w.settle()
+  const any = expect.any(Number)
+  expect(w.events().map(x => x.event)).toEqual([
+    { t: 'turn.start', at: any, turn: 't1' },
+    { t: 'settings', at: any, mode: 'plan', effort: 'max' },
+    { t: 'failed', at: any, error: 'overloaded' },
+    { t: 'turn.end', at: any, turn: 't1', reason: 'answer' },
+    { t: 'settings', at: any, model: 'claude-opus-5-5' },
+  ])
+  // Everything after the turn's start carries the session id it read.
+  expect(w.to('/v1/events').slice(1).map(r => r.body.sid)).toEqual([resumed, resumed, resumed, resumed])
 })
 
 test("measure carries the context's percent, tokens and window and the cost's usd, and nothing else the engine puts there", async ($, on) => {

@@ -343,4 +343,17 @@ describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
 		assert.deepEqual(replyMismatches("/v1/next", 200, undefined, { cmds: [] }), []);
 		assert.notDeepEqual(replyMismatches("/v1/hello", 200, { v: 1, ok: true }, { v: 1, ok: false }), []);
 	});
+
+	test("any 2xx from /v1/permission is one of the three bodies, and any other status carries {\"error\"}, whatever the line expects", () => {
+		const widened = { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedInput: {} } } };
+		assert.deepEqual(replyMismatches(PERMISSION, 202, {}, {}), []);
+		assert.notDeepEqual(replyMismatches(PERMISSION, 202, undefined, widened), [], "a 2xx other than 200");
+		assert.notDeepEqual(replyMismatches(PERMISSION, 204, undefined, undefined), [], "no body is no decision only as {}");
+		// Error answers: Node's own carry no body; one with a reason that isn't a string isn't {"error"} either.
+		for (const got of [undefined, {}, { error: 401 }, "Unauthorized"]) {
+			assert.notDeepEqual(replyMismatches(PERMISSION, 401, undefined, got), [], JSON.stringify(got));
+			assert.notDeepEqual(replyMismatches("/v1/events", 400, undefined, got), [], `events: ${JSON.stringify(got)}`);
+		}
+		assert.deepEqual(replyMismatches(PERMISSION, 408, undefined, { error: "Request Timeout" }), []);
+	});
 });

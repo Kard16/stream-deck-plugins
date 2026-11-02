@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 
 export type Reply = { status: number; body: string; headers: http.IncomingHttpHeaders };
 export type Outcome = Reply | { error: string };
@@ -53,6 +54,38 @@ export function request(port: number, method: string, path: string, headers: Rec
 	});
 	req.end(body);
 	return { req, outcome };
+}
+
+/**
+ * `text` written as it is to a new connection, for requests Node's own client won't send. Settles with the answer
+ * read back by the time the bridge closes the connection, or an error when nothing like one came.
+ */
+export function sendRaw(port: number, text: string): Promise<Outcome> {
+	return new Promise((resolve) => {
+		const socket = net.connect(port, "127.0.0.1");
+		let got = "";
+		socket.setEncoding("utf8");
+		socket.on("data", (chunk: string) => (got += chunk));
+		// A reset after the answer leaves what came before it.
+		socket.on("error", () => undefined);
+		// A bridge that never answers fails the test instead of hanging it.
+		socket.setTimeout(5000, () => socket.destroy());
+		socket.on("close", () => {
+			const status = /^HTTP\/1\.1 (\d{3}) /.exec(got);
+			const end = got.indexOf("\r\n\r\n");
+			if (!status || end < 0) {
+				resolve({ error: got === "" ? "closed without an answer" : `not an answer: ${JSON.stringify(got.slice(0, 80))}` });
+				return;
+			}
+			const headers: http.IncomingHttpHeaders = {};
+			for (const line of got.slice(0, end).split("\r\n").slice(1)) {
+				const colon = line.indexOf(":");
+				headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+			}
+			resolve({ status: Number(status[1]), body: got.slice(end + 4), headers });
+		});
+		socket.write(text);
+	});
 }
 
 export function sleep(ms: number): Promise<void> {

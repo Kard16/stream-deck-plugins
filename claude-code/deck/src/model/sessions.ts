@@ -58,7 +58,11 @@ type RunningTool = { use: string | null; tool: string; summary: string; fp: stri
 /** What the bridge has heard about one session, from its mod and from its PermissionRequests. */
 type BridgeSession = {
 	host: string;
-	sid: string | null;
+	/**
+	 * Every Claude Code session id its mod and its PermissionRequests have come with, since one can change during a
+	 * session (PROTOCOL.md, Identity): the host fallback places a request by any of them.
+	 */
+	sids: Set<string>;
 	/**
 	 * The current mod instance, and every one seen for the session: one seen before never counts as a restart
 	 * again. They go with the rest when the session ends.
@@ -221,7 +225,7 @@ export class SessionModel implements BridgeRoutes {
 		const host = asHost(deckHost) ?? this.#hostForSid(p.sid);
 		if (host !== null) {
 			const b = this.#bridgeFor(host);
-			if (p.sid) b.sid = p.sid;
+			if (p.sid) b.sids.add(p.sid);
 			if (p.mode) b.settings.mode = p.mode;
 			if (p.effort) b.settings.effort = p.effort;
 		}
@@ -254,7 +258,7 @@ export class SessionModel implements BridgeRoutes {
 	hello(body: Obj): RouteAnswer {
 		const h = parseHello(body);
 		if (h.v !== PROTOCOL_VERSION) {
-			this.#log.warn(`HELLO from ${h.host ?? "an unknown session"} speaks version ${quote(JSON.stringify(h.v) ?? "none", 20)}; the deck speaks ${PROTOCOL_VERSION}`);
+			this.#log.warn(`HELLO from ${h.host ?? "an unknown session"} speaks version ${showVersion(h.v)}; the deck speaks ${PROTOCOL_VERSION}`);
 			return { status: 200, body: { v: PROTOCOL_VERSION, ok: false, error: "version" } };
 		}
 		const b = this.#modSession(h);
@@ -302,6 +306,13 @@ export class SessionModel implements BridgeRoutes {
 		const b = this.#modSession(q);
 		if (!b) {
 			reply.send(NO_HOST.status, JSON.stringify(NO_HOST.body));
+			return;
+		}
+		// From an instance older than the session's newest: answered at once with none, so it neither displaces the
+		// newest one's poll nor takes its commands, and doesn't count as the newest one polling.
+		if (q.inst !== b.inst) {
+			this.#log.debug(`POLL ${b.host} from older mod instance ${quote(q.inst, 40)}: answered with none`);
+			reply.send(200, JSON.stringify({ cmds: [] }));
 			return;
 		}
 		this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
@@ -476,7 +487,7 @@ export class SessionModel implements BridgeRoutes {
 		const host = ref.host ?? this.#hostForSid(ref.sid);
 		if (host === null) return null;
 		const b = this.#bridgeFor(host);
-		if (ref.sid) b.sid = ref.sid;
+		if (ref.sid) b.sids.add(ref.sid);
 		b.mod = true;
 		if (ref.inst !== null && !b.insts.has(ref.inst)) {
 			if (b.inst !== null) {
@@ -495,7 +506,7 @@ export class SessionModel implements BridgeRoutes {
 		if (!b) {
 			b = {
 				host,
-				sid: null,
+				sids: new Set(),
 				inst: null,
 				insts: new Set(),
 				lastSeq: new Map(),
@@ -512,11 +523,11 @@ export class SessionModel implements BridgeRoutes {
 		return b;
 	}
 
-	/** The registry's host for a Claude Code session id, else the one a mod said hello with. */
+	/** The registry's host for a Claude Code session id, else the one a mod request or PermissionRequest named with it. */
 	#hostForSid(sid: string | null): string | null {
 		if (sid === null) return null;
 		for (const s of this.#ordered) if (s.sessionId === sid) return asHost(s.hostSessionId);
-		for (const b of this.#bridge.values()) if (b.sid === sid) return b.host;
+		for (const b of this.#bridge.values()) if (b.sids.has(sid)) return b.host;
 		return null;
 	}
 
@@ -543,7 +554,7 @@ export class SessionModel implements BridgeRoutes {
 				heldAsk: held.filter((h) => h.kind === "ask").length,
 				registry: s.status,
 				turn: b?.turn ?? null,
-				recordNeedsUser: rec?.needsUser ?? false,
+				recordCategory: rec?.turnCategory ?? null,
 			}),
 			doing: b?.tools.at(-1)?.summary ?? null,
 			context: b?.context ?? null,
@@ -581,6 +592,16 @@ export class SessionModel implements BridgeRoutes {
 /** The deck keys sessions by host; a registry file without one by its pid. */
 export function keyOf(s: RegistrySession): string {
 	return asHost(s.hostSessionId) ?? `pid:${s.key}`;
+}
+
+/**
+ * A hello's `v` for the log: a string, number, boolean or null as JSON, quoted and cut; an object or array only by
+ * its kind, since writing out one nested deeply enough would overflow the stack, and the hello would get 500.
+ */
+function showVersion(v: unknown): string {
+	if (Array.isArray(v)) return "an array";
+	if (typeof v === "object" && v !== null) return "an object";
+	return quote(JSON.stringify(v) ?? "none", 20);
 }
 
 /**

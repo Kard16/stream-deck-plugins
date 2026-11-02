@@ -7,7 +7,7 @@ import { type BridgeRoutes, BridgeServer } from "../src/bridge/server.js";
 import { SessionModel } from "../src/model/sessions.js";
 import { fingerprint } from "../src/protocol/fingerprint.js";
 import { SCRUB_RUN, Scrubber } from "../src/util/log.js";
-import { type Outcome, send, sleep, waitFor, within } from "./helpers/http.js";
+import { type Outcome, send, sendRaw, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
@@ -132,6 +132,18 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.deepEqual(json(other), { v: 1, ok: false, error: "version" });
 	});
 
+	test("a hello whose v is nested 20,000 deep is refused as another version, not with 500", async () => {
+		const { log, port } = await start();
+		const depth = 20_000;
+		for (const v of [`${"[".repeat(depth)}1${"]".repeat(depth)}`, `${'{"v":'.repeat(depth)}1${"}".repeat(depth)}`]) {
+			const answer = await send(port, { token: TOKEN, path: "/v1/hello", body: `{"v":${v},"sid":"sess-1","host":"${HOST}","inst":"i1","model":"m"}` }).outcome;
+			assert.equal(status(answer), 200);
+			assert.deepEqual(json(answer), { v: 1, ok: false, error: "version" });
+		}
+		assert.equal(log.at("error").length, 0, log.at("error").join("\n"));
+		assert.deepEqual(log.at("warn"), [`warn HELLO from ${HOST} speaks version an array; the deck speaks 1`, `warn HELLO from ${HOST} speaks version an object; the deck speaks 1`]);
+	});
+
 	test("events and results answer 204 with no body; a session the bridge can't place gets 400", async () => {
 		const { port } = await start();
 		const events = await send(port, { token: TOKEN, path: "/v1/events", body: JSON.stringify({ ...MOD, seq: 1, events: [{ t: "turn.start", turn: "t1", at: 1 }] }) }).outcome;
@@ -169,6 +181,26 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.equal(model.held.press(2, "allow").ok, true);
 		assert.equal(status(await second.outcome), 200);
 		assert.ok("error" in (await first.outcome), "the closed client got no answer");
+	});
+
+	test("a request Node takes no further still gets {\"error\"}: one it can't parse, headers over its limit, one too slow to arrive", async () => {
+		const { model, log, port } = await start({ http: { headersTimeout: 100, requestTimeout: 200, connectionsCheckingInterval: 20 } });
+		const head = `Host: 127.0.0.1:${port}\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\n`;
+		const garbled = await sendRaw(port, `POST /v1/permission HTTP/1.1\r\n${head}Content-Length: twelve\r\n\r\n`);
+		assert.deepEqual([status(garbled), json(garbled)], [400, { error: "Bad Request" }]);
+		const big = await sendRaw(port, `POST /v1/permission HTTP/1.1\r\n${head}X-Pad: ${"p".repeat(17_000)}\r\nContent-Length: 2\r\n\r\n{}`);
+		assert.deepEqual([status(big), json(big)], [431, { error: "Request Header Fields Too Large" }]);
+		// The route has it, but its body never ends.
+		const slow = await sendRaw(port, `POST /v1/permission HTTP/1.1\r\n${head}Content-Length: 100\r\n\r\n{"tool_name":`);
+		assert.deepEqual([status(slow), json(slow)], [408, { error: "Request Timeout" }]);
+		if ("headers" in slow) assert.deepEqual([slow.headers["content-type"], slow.headers.connection], ["application/json", "close"]);
+		assert.equal(model.held.size, 0);
+		assert.deepEqual(
+			log.at("info").filter((l) => l.startsWith("info REQ 4")),
+			["info REQ 400: Node couldn't take the request (HPE_INVALID_CONTENT_LENGTH)", "info REQ 431: Node couldn't take the request (HPE_HEADER_OVERFLOW)", "info REQ 408: Node couldn't take the request (ERR_HTTP_REQUEST_TIMEOUT)"],
+		);
+		// The bridge carries on.
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, ...MOD, model: "m" }) }).outcome), 200);
 	});
 
 	test("a held request outlives the server's header and request timeouts", async () => {

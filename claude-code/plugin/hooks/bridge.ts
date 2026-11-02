@@ -3,12 +3,14 @@
 //
 // Nothing here holds up a hook: emit() and result() queue and return, and the sends, the poll and the retries run
 // on their own, through the engine's fetch and clock (BridgeHost: register.ts's adapter over `$`, or a test's
-// fake). A failed request (no answer, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts an
-// outage: one log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is
-// answered, the poll starts again and the queued requests go out in order, a failed one again with its own seq.
-// The outage ends only when the request that began it goes through, so a bridge that answers hello and fails that
-// request again doesn't start the waits over. Each hello opens an epoch, and a send or poll left over from an older
-// one changes nothing when it settles.
+// fake). A fetch that rejects, with no answer at all, goes once more 100 ms later and quietly: the engine abandons a
+// mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still there. A failed request
+// (a second rejection, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts an outage: one log line,
+// then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is answered, the poll starts
+// again and the queued requests go out in order, a failed one again with its own seq. The outage ends only when
+// the request that began it goes through, so a bridge that answers hello and fails that request again doesn't start
+// the waits over. Each hello opens an epoch, and a send or poll left over from an older one changes nothing when it
+// settles.
 
 import { changed, type DeckEvent, type Settings } from './events'
 
@@ -26,9 +28,16 @@ export const POLL_WAIT_S = 20
  */
 export const STALL_MS = 35_000
 /**
- * A poll answered empty sooner than this waits out the rest before the next one. The bridge holds a poll until a
- * command comes or the wait ends, so an early empty answer means something is off (two copies of a mod cutting
- * each other's poll short, a confused server), and this keeps it from becoming a busy loop.
+ * A fetch that rejects, with no answer at all, goes once more this long after, with no hello and no log line, and
+ * only the second one's failure counts (PROTOCOL.md, "Failure and recovery"). The engine abandons a mod's fetches
+ * when a turn is interrupted, a deck Deny included, while the bridge is still there (ladder step 4).
+ */
+export const RETRY_MS = 100
+/**
+ * A poll answered sooner than this with no command to run, none or only ones it skips, waits out the rest before
+ * the next one. The bridge holds a poll until a command comes or the wait ends, so an early empty answer means
+ * something is off (two copies of a mod cutting each other's poll short, a confused server), and this keeps it from
+ * becoming a busy loop.
  */
 export const POLL_MIN_MS = 1000
 /** Requests kept while the bridge is away; past this the oldest goes. */
@@ -209,21 +218,43 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   }
 
   /**
-   * A hello, event or result, settling `undefined` once it has gone STALL_MS unanswered. An answer that comes after
-   * that is ignored: the request counts as failed, and goes again after the next hello.
+   * `once()`, and once more RETRY_MS after it rejects, with no hello and no log line, so that only a second rejection
+   * rejects. An answer of any status, or a stall, counts as it comes. The second try starts from the timer, as the
+   * backoff's hellos do, apart from whatever the engine abandoned the first with; when epoch `ep` has ended by then,
+   * nothing goes out and the first rejection stands.
    */
-  async function send(path: string, body: string): Promise<HttpAnswer | undefined> {
-    let stalled: (none: undefined) => void = () => {}
-    const unanswered = new Promise<undefined>(resolve => {
-      stalled = resolve
+  function twice<T>(ep: number, once: () => Promise<T>): Promise<T> {
+    return once().catch(
+      (err: unknown) =>
+        new Promise<T>((resolve, reject) => {
+          const again = (): void => {
+            if (ep === epoch) once().then(resolve, reject)
+            else reject(err)
+          }
+          if (timer(RETRY_MS, again) === undefined) again()
+        }),
+    )
+  }
+
+  /**
+   * A hello, event or result in epoch `ep`, settling `undefined` once it has gone STALL_MS unanswered. An answer
+   * that comes after that is ignored: the request counts as failed, and goes again after the next hello. A send that
+   * rejects goes once more (twice()), with a STALL_MS of its own.
+   */
+  function send(path: string, body: string, ep: number): Promise<HttpAnswer | undefined> {
+    return twice(ep, async () => {
+      let stalled: (none: undefined) => void = () => {}
+      const unanswered = new Promise<undefined>(resolve => {
+        stalled = resolve
+      })
+      const stall = timer(STALL_MS, () => stalled(undefined))
+      try {
+        const sent = host.fetch(`${BRIDGE_URL}${path}`, { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body })
+        return await Promise.race([sent, unanswered])
+      } finally {
+        stall?.cancel()
+      }
     })
-    const stall = timer(STALL_MS, () => stalled(undefined))
-    try {
-      const sent = host.fetch(`${BRIDGE_URL}${path}`, { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body })
-      return await Promise.race([sent, unanswered])
-    } finally {
-      stall?.cancel()
-    }
   }
 
   async function refreshSid(): Promise<void> {
@@ -270,7 +301,7 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     }
     let res: HttpAnswer | undefined
     try {
-      res = await send('/v1/hello', JSON.stringify(body))
+      res = await send('/v1/hello', JSON.stringify(body), ep)
     } catch (err) {
       if (ep === epoch) fail('hello', describe(err, ids.token))
       return
@@ -377,7 +408,7 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
         }
         let res: HttpAnswer | undefined
         try {
-          res = await send(item.path, body)
+          res = await send(item.path, body, ep)
         } catch (err) {
           if (ep === epoch) fail('line', describe(err, ids.token))
           return
@@ -412,10 +443,6 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   /** The long poll: one open at a time, again as soon as one answers (PROTOCOL.md, "Commands"). */
   async function poll(ep: number): Promise<void> {
     while (phase === 'up' && ep === epoch) {
-      let answered = false
-      const stall = timer(STALL_MS, () => {
-        if (!answered && ep === epoch) fail('poll', `a poll had no answer after ${STALL_MS / 1000} s`)
-      })
       let floorReached: () => void = () => {}
       const floor = new Promise<void>(resolve => {
         floorReached = resolve
@@ -423,16 +450,12 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       const soon = timer(POLL_MIN_MS, () => floorReached())
       let res: HttpAnswer
       try {
-        res = await host.fetch(`${BRIDGE_URL}${nextPath()}`, { method: 'GET', headers: auth() })
+        res = await twice(ep, () => pollOnce(ep))
       } catch (err) {
-        answered = true
-        stall?.cancel()
         soon?.cancel()
         if (ep === epoch) fail('poll', describe(err, ids.token))
         return
       }
-      answered = true
-      stall?.cancel()
       // Commands a poll brought run even when its epoch has ended, a stalled one's too: the deck counts them as in
       // flight.
       const delivered = res.ok ? deliver(res.text) : 0
@@ -444,6 +467,23 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       through('poll')
       if (delivered === 0 && soon !== undefined) await floor
       else soon?.cancel()
+    }
+  }
+
+  /**
+   * One poll in epoch `ep`. Once it has gone STALL_MS unanswered the epoch fails, but the poll still settles with
+   * its answer whenever that comes.
+   */
+  async function pollOnce(ep: number): Promise<HttpAnswer> {
+    let answered = false
+    const stall = timer(STALL_MS, () => {
+      if (!answered && ep === epoch) fail('poll', `a poll had no answer after ${STALL_MS / 1000} s`)
+    })
+    try {
+      return await host.fetch(`${BRIDGE_URL}${nextPath()}`, { method: 'GET', headers: auth() })
+    } finally {
+      answered = true
+      stall?.cancel()
     }
   }
 

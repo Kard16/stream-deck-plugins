@@ -1,17 +1,44 @@
 // A tool call's fingerprint and summary (PROTOCOL.md, "Fingerprints and summaries"). The bridge works out the
 // same two from a PermissionRequest's tool_name and tool_input: the fingerprint lets this session's tool.end
 // release the held request it was for, and the summary is what the deck shows. A port of the reference in
-// claude-code/protocol/make-fixtures.mjs; tests/vectors.test.ts holds it to vectors.json.
+// claude-code/protocol/make-fixtures.mjs, whose text canonical() writes without its recursion. tests/vectors.test.ts
+// holds them to vectors.json, and canonical() to the reference's recursion too.
 
-/** JSON with no spaces and keys sorted by UTF-16 code units; undefined values left out of objects. */
+/**
+ * JSON with no spaces and keys sorted by UTF-16 code units; undefined values left out of objects. It keeps a stack
+ * of its own rather than recursing, so no depth of nesting can overflow the engine's: a call nested 20,000 deep has
+ * a fingerprint like any other.
+ */
 export function canonical(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(x => (x === undefined ? 'null' : canonical(x))).join(',')}]`
-  if (v !== null && typeof v === 'object') {
-    const o = v as Record<string, unknown>
-    const keys = Object.keys(o).sort().filter(k => o[k] !== undefined)
-    return `{${keys.map(k => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`
+  let out = ''
+  // What's left to write, the next on top: text as it stands, or a value to write out.
+  const todo: (string | { value: unknown })[] = [{ value: v }]
+  for (let next = todo.pop(); next !== undefined; next = todo.pop()) {
+    if (typeof next === 'string') {
+      out += next
+      continue
+    }
+    const x = next.value
+    if (Array.isArray(x)) {
+      out += '['
+      todo.push(']')
+      for (let i = x.length - 1; i >= 0; i--) {
+        todo.push(x[i] === undefined ? 'null' : { value: x[i] })
+        if (i > 0) todo.push(',')
+      }
+    } else if (x !== null && typeof x === 'object') {
+      const o = x as Record<string, unknown>
+      const keys = Object.keys(o).sort().filter(k => o[k] !== undefined)
+      out += '{'
+      todo.push('}')
+      for (let i = keys.length - 1; i >= 0; i--) {
+        const k = keys[i] as string
+        todo.push({ value: o[k] }, `${JSON.stringify(k)}:`)
+        if (i > 0) todo.push(',')
+      }
+    } else out += JSON.stringify(x)
   }
-  return JSON.stringify(v)
+  return out
 }
 
 /** FNV-1a, 32 bits, over UTF-16 code units. */

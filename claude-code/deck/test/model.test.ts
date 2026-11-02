@@ -35,7 +35,7 @@ function reg(pid: number, host: string | null, fields: Partial<RegistrySession> 
 }
 
 function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
-	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, needsUser: false, ...fields };
+	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, ...fields };
 }
 
 function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)]) {
@@ -61,15 +61,18 @@ function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)]) {
 }
 
 describe("session status (PROTOCOL.md's order)", () => {
-	const base = { heldTool: 0, heldAsk: 0, registry: "idle", turn: null, recordNeedsUser: false };
+	const base = { heldTool: 0, heldAsk: 0, registry: "idle", turn: null, recordCategory: null };
 	test("the first that applies wins", () => {
 		assert.equal(sessionStatus({ ...base, heldTool: 1, heldAsk: 1, registry: "waiting" }), "approval");
 		assert.equal(sessionStatus({ ...base, heldAsk: 1, registry: "busy" }), "needs-you");
 		assert.equal(sessionStatus({ ...base, registry: "waiting" }), "needs-you");
 		assert.equal(sessionStatus({ ...base, registry: "busy", turn: { ended: true, reason: "aborted", failed: true } }), "working");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "aborted", failed: true }, recordNeedsUser: true }), "failed");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "aborted", failed: false }, recordNeedsUser: true }), "interrupted");
-		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordNeedsUser: true }), "needs-you");
+		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "aborted", failed: true }, recordCategory: "blocked" }), "failed");
+		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "aborted", failed: false }, recordCategory: "blocked" }), "interrupted");
+		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordCategory: "blocked" }), "needs-you");
+		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordCategory: "need_input" }), "needs-you");
+		assert.equal(sessionStatus({ ...base, registry: "busy", recordCategory: "blocked" }), "working");
+		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false }, recordCategory: "review_ready" }), "done");
 		assert.equal(sessionStatus({ ...base, turn: { ended: true, reason: "answer", failed: false } }), "done");
 		assert.equal(sessionStatus({ ...base, turn: { ended: false, reason: null, failed: false } }), "idle");
 		assert.equal(sessionStatus({ ...base, registry: null }), "idle");
@@ -127,8 +130,30 @@ describe("session model", () => {
 		assert.equal(view(A)?.status, "failed");
 		events(A, { t: "turn.start", turn: "t3" }, { t: "turn.end", turn: "t3", reason: "answer" });
 		assert.equal(view(A)?.status, "done");
-		model.setRecords(new Map([[A, record(A, { needsUser: true })]]));
-		assert.equal(view(A)?.status, "needs-you", "the app's record says the turn needs the user");
+		model.setRecords(new Map([[A, record(A, { turnCategory: "blocked" })]]));
+		assert.equal(view(A)?.status, "needs-you", "the app's needs-input indicator shows for its record");
+	});
+
+	test("rule 4 counts only the main loop's failed: a subagent's doesn't make the session failed", () => {
+		const { events, view } = setup([reg(1, A, { status: "idle" })]);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "failed", agent: "a1b2", error: "overloaded" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.equal(view(A)?.status, "done", "the main loop's turn went on after its subagent failed");
+		events(A, { t: "turn.start", turn: "t2" }, { t: "failed", error: "overloaded" }, { t: "turn.end", turn: "t2", reason: "answer" });
+		assert.equal(view(A)?.status, "failed");
+		// A subagent's turn that fails later doesn't touch the main loop's last turn either way.
+		events(A, { t: "turn.start", turn: "s1", agent: "a1b2" }, { t: "failed", agent: "a1b2" }, { t: "turn.end", turn: "s1", agent: "a1b2", reason: "answer" });
+		assert.equal(view(A)?.status, "failed");
+	});
+
+	test("an agent that isn't a non-empty string counts as the main loop's", () => {
+		const { model, events, view } = setup([reg(1, A, { status: "busy" })]);
+		events(A, { t: "turn.start", turn: "t1", agent: "" }, { t: "tool.start", tool: "Read", use: "u1", agent: 7, summary: "a.md", fp: "11111111" });
+		assert.equal(view(A)?.doing, "a.md");
+		events(A, { t: "tool.end", tool: "Read", use: "u1", agent: null, fp: "11111111", ok: true }, { t: "tool.start", tool: "Grep", use: "u2", agent: { id: "x" }, summary: "TODO", fp: "22222222" });
+		assert.equal(view(A)?.doing, "TODO");
+		events(A, { t: "failed", agent: false, error: "overloaded" }, { t: "turn.end", turn: "t1", agent: [], reason: "answer" });
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 })]);
+		assert.deepEqual([view(A)?.status, view(A)?.doing], ["failed", null]);
 	});
 
 	test("a request is a tool, an ask, or the deck's own mode change", () => {
@@ -364,6 +389,40 @@ describe("session model", () => {
 		assert.deepEqual([cmd.state, cmd.inst], ["delivered", "ib"]);
 	});
 
+	test("an old instance that keeps polling after a new hello gets none at once: it never takes the new one's commands, nor displaces its poll", () => {
+		const { model } = setup();
+		model.hello({ v: 1, host: A, inst: "ia", model: "m" });
+		model.hello({ v: 1, host: A, inst: "ib", model: "m" });
+		// Both mods poll again as soon as a poll answers, as the plugin does.
+		const polls = { ia: 0, ib: 0 };
+		const poll = (inst: "ia" | "ib"): FakeReply => {
+			polls[inst]++;
+			const reply = new FakeReply();
+			model.next(new URLSearchParams({ host: A, inst, wait: "20" }), reply);
+			return reply;
+		};
+		let ib = poll("ib");
+		let ia = poll("ia");
+		for (let i = 0; i < 5; i++) {
+			if (!ia.open) ia = poll("ia");
+			if (!ib.open) ib = poll("ib");
+		}
+		assert.deepEqual(ia.answers, [{ status: 200, body: { cmds: [] } }], "the old instance's poll is answered at once");
+		assert.deepEqual([polls.ib, ib.answers], [1, []], "the new instance's first poll is still open");
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.deepEqual(ib.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+		assert.deepEqual([cmd.state, cmd.inst], ["delivered", "ib"]);
+		// With no poll of the new instance open, a queued command waits for its next: the old one's doesn't take it.
+		const next = model.commands.queue(A, { t: "prompt", text: "again" });
+		ia = poll("ia");
+		assert.deepEqual([ia.answers, next.state], [[{ status: 200, body: { cmds: [] } }], "queued"]);
+		// Its events and results are still taken.
+		assert.equal(model.events({ host: A, inst: "ia", seq: 1, events: [{ t: "settings", mode: "plan" }] }).status, 204);
+		assert.equal(model.session(A)?.mode, "plan");
+		ib = poll("ib");
+		assert.deepEqual([ib.answers.length, next.state, next.inst], [1, "delivered", "ib"]);
+	});
+
 	test("without a usable host, the registry's sid places a mod request, and then the sid and host pairs the mods sent", () => {
 		const { model } = setup([reg(1, A)]);
 		// A session the registry doesn't list: its mod said hello with both.
@@ -381,6 +440,30 @@ describe("session model", () => {
 		model.permission({ session_id: "sid-1", tool_name: "Bash", tool_input: { command: "pwd" } }, undefined, new FakeReply());
 		assert.equal(model.held.list()[1]?.host, A);
 		assert.equal(model.events({ sid: "sid-unknown", host: "", inst: "iz", seq: 1, events: [] }).status, 400);
+	});
+
+	test("the host fallback also uses the hook's sid and host pairs, and every sid a session came with", () => {
+		const { model } = setup([reg(1, A)]);
+		// A session the registry doesn't list: its PermissionRequest came with both.
+		model.permission({ session_id: "sid-x", tool_name: "Bash", tool_input: { command: "ls" } }, "local_x", new FakeReply());
+		assert.equal(model.held.oldest?.host, "local_x");
+		// Its mod, without its host, is placed by the hook's pair.
+		assert.equal(model.hello({ v: 1, sid: "sid-x", host: "", inst: "ix", model: "m" }).status, 200);
+		assert.equal(model.session(A)?.plugin, false, "not the registry's session");
+		assert.equal(model.events({ sid: "sid-x", host: "", inst: "ix", seq: 1, events: [{ t: "turn.start", turn: "t1" }] }).status, 204);
+		// The session's id changes, as after /clear: its mod comes with the new one and its host.
+		assert.equal(model.events({ sid: "sid-x2", host: "local_x", inst: "ix", seq: 2, events: [{ t: "end", reason: "clear" }] }).status, 204);
+		// A PermissionRequest without a usable host is placed by either id.
+		model.permission({ session_id: "sid-x2", tool_name: "Bash", tool_input: { command: "pwd" } }, "$CLAUDE_CODE_HOST_SESSION_ID", new FakeReply());
+		model.permission({ session_id: "sid-x", tool_name: "Bash", tool_input: { command: "id" } }, undefined, new FakeReply());
+		assert.deepEqual(
+			model.held.list().map((h) => [h.summary, h.host]),
+			[
+				["ls", "local_x"],
+				["pwd", "local_x"],
+				["id", "local_x"],
+			],
+		);
 	});
 
 	test("the target: the session picked on the dial; until then the one last on screen", () => {

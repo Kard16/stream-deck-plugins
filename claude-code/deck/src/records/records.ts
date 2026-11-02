@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { HOST_PATTERN } from "../protocol/wire.js";
+import { HOST_PATTERN, isObj, type Obj } from "../protocol/wire.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 
 /**
@@ -18,8 +18,11 @@ export type AppRecord = {
 	permissionMode: string | null;
 	/** When the session was last on screen in the app, wall-clock ms. */
 	lastFocusedAt: number | null;
-	/** The app says its last turn needs the user: the wrap-up's `needsUser`, or without one the summary's `needs_action`. */
-	needsUser: boolean;
+	/**
+	 * The category of the last turn, as the app's needs-input indicator reads it (see turnCategory): `blocked` and
+	 * `need_input` show it. Null when the indicator ignores the record.
+	 */
+	turnCategory: string | null;
 };
 
 /** The file-system calls the reader makes, so tests can watch them. */
@@ -36,23 +39,31 @@ export const nodeRecordsFs: RecordsFs = {
 };
 
 /**
- * `turnWrapUp.needsUser` and `postTurnSummary.needs_action` each say the turn needs the user when true or a non-empty
- * string. On this Mac (app 4.4212.0) both are strings, and the app drops a wrap-up or summary that holds anything else:
- * `needsUser` is there only when the turn is waiting on the user, and `needs_action` is empty when nothing is needed.
+ * A turn wrap-up as the app's record loader keeps it (its `jM`): an object with a string `description`, empty
+ * included, and a `needsUser` that's missing or a string. The loader drops any other, so it's null here.
  */
-function needsAction(v: unknown): boolean {
-	return v === true || (typeof v === "string" && v !== "");
+function wrapUp(v: unknown): { needsUser: string | null } | null {
+	if (!isObj(v) || typeof v.description !== "string") return null;
+	if (v.needsUser === undefined) return { needsUser: null };
+	return typeof v.needsUser === "string" ? { needsUser: v.needsUser } : null;
 }
 
 /**
- * Whether the record says its last turn needs the user, read as the app reads it (its `Dw`; PROTOCOL.md, status
- * rule 6). A `turnWrapUp` with a string `description` decides alone, by its `needsUser`: the app then ignores the
- * summary's `needs_action`, and shows a summary that says blocked as ready for review. Without one, `needs_action`
- * decides.
+ * The category of the record's last turn as the app's needs-input indicator reads it (app 4.4212.0's `_D`, with its
+ * `Dw`; PROTOCOL.md, status rule 6). The indicator ignores a record with neither a valid wrap-up nor a summary written
+ * for its last assistant message (`postTurnSummaryFor` equal to `lastAssistantUuid`): null. The category is the
+ * summary's `status_category`, which a valid wrap-up changes: a failed summary stays failed; otherwise a wrap-up with
+ * `needsUser`, even an empty one, makes it blocked, and one without turns blocked or need_input into review_ready.
  */
-function turnNeedsUser(wrapUp: Record<string, unknown>, summary: Record<string, unknown>): boolean {
-	if (typeof wrapUp.description === "string") return needsAction(wrapUp.needsUser);
-	return needsAction(summary.needs_action);
+function turnCategory(o: Obj): string | null {
+	const w = wrapUp(o.turnWrapUp);
+	const forLast = typeof o.postTurnSummaryFor === "string" && o.postTurnSummaryFor === o.lastAssistantUuid;
+	if (w === null && !forLast) return null;
+	const summary = isObj(o.postTurnSummary) ? o.postTurnSummary : {};
+	const category = typeof summary.status_category === "string" ? summary.status_category : null;
+	if (w === null || category === "failed") return category;
+	if (w.needsUser !== null) return "blocked";
+	return category === "blocked" || category === "need_input" ? "review_ready" : category;
 }
 
 /** A record from one file's text; null when it isn't a complete JSON object (say, caught mid-write). */
@@ -66,7 +77,6 @@ export function parseRecord(host: string, text: string): AppRecord | null {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
 	const o = raw as Record<string, unknown>;
 	const str = (v: unknown, max = 200): string | null => (typeof v === "string" && v !== "" ? v.slice(0, max) : null);
-	const obj = (v: unknown): Record<string, unknown> => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 	return {
 		host,
 		title: str(o.title),
@@ -74,7 +84,8 @@ export function parseRecord(host: string, text: string): AppRecord | null {
 		effort: str(o.effort, 40),
 		permissionMode: str(o.permissionMode, 40),
 		lastFocusedAt: typeof o.lastFocusedAt === "number" && Number.isFinite(o.lastFocusedAt) ? o.lastFocusedAt : null,
-		needsUser: turnNeedsUser(obj(o.turnWrapUp), obj(o.postTurnSummary)),
+		// Cut short like the rest: one that's cut keeps 40 characters, so it can't turn into one the indicator shows.
+		turnCategory: str(turnCategory(o), 40),
 	};
 }
 

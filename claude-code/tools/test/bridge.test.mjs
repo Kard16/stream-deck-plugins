@@ -3,11 +3,12 @@
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import net from 'node:net'
 import path from 'node:path'
 import test from 'node:test'
 
 import { parseWait, readToken, scrubber, startFakeBridge } from '../lib/bridge.mjs'
-import { send, within } from '../lib/client.mjs'
+import { hostHeader, send, within } from '../lib/client.mjs'
 import { MAX_BODY, fingerprint, summary } from '../lib/protocol.mjs'
 import { request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
@@ -48,6 +49,29 @@ test('bridge: the Host is checked before the token; then routes, methods and bod
   assert.equal(r.status, 400, 'a target that is not a URL')
   r = await call({ method: 'POST', path: '/v1/events', json: events })
   assert.equal(r.status, 204, 'and the server is still up')
+})
+
+test('bridge: Node\'s own error answers carry {"error"} too: a request it can\'t parse, or headers over its limit', async (t) => {
+  const env = tempEnv(t)
+  const bridge = await startBridge(t, env)
+  // Written straight to a socket, since a client library wouldn't send either.
+  const raw = (text) => within(new Promise((resolve, reject) => {
+    const chunks = []
+    const socket = net.connect(Number(new URL(bridge.url).port), '127.0.0.1', () => socket.write(text))
+    socket.on('data', (c) => chunks.push(c))
+    socket.on('error', reject)
+    socket.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')))
+  }), 3000, 'no answer within 3 s')
+  const answer = (text) => {
+    const [head, body] = text.split('\r\n\r\n')
+    return { status: Number(head.split(' ')[1]), type: /content-type: application\/json/i.test(head), json: body ? JSON.parse(body) : null }
+  }
+  assert.deepEqual(answer(await raw('NOT HTTP\r\n\r\n')), { status: 400, type: true, json: { error: 'Bad Request' } })
+  const big = `POST /v1/permission HTTP/1.1\r\nhost: ${hostHeader(bridge.url)}\r\nx-big: ${'x'.repeat(20_000)}\r\ncontent-length: 2\r\n\r\n{}`
+  assert.deepEqual(answer(await raw(big)), { status: 431, type: true, json: { error: 'Request Header Fields Too Large' } })
+  const r = await request(bridge, env.token, { path: '/control/taken' }).answer
+  assert.equal(r.status, 200, 'and it carries on')
+  assert.deepEqual(runLog(env).filter((e) => e.kind === 'client-error').map((e) => e.status), [400, 431])
 })
 
 test('bridge: hello answers with the version, and refuses another one', async (t) => {
@@ -147,6 +171,42 @@ test('bridge: values nested too deep in a mod\'s fields that PROTOCOL.md gives a
   assert.deepEqual(state.json.commands.map((c) => [c.state, c.error, c.detail]), [['failed', null, null]])
 })
 
+test('bridge: a mod value nested too deep in a refused hello\'s v, an event\'s t or a result\'s id or state fails nothing: its line names it instead', async (t) => {
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const lines = []
+  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l) })
+  const deep = `${'['.repeat(20_000)}${']'.repeat(20_000)}`
+  const post = (p, raw) => within(request(bridge, env.token, { method: 'POST', path: p, raw }).answer, 3000, `${p}: no answer within 3 s`)
+  const mod = `"sid":"${A.sid}","host":"${A.host}","inst":"${A.inst}"`
+  let r = await post('/v1/hello', `{"v":${deep},${mod}}`)
+  assert.deepEqual([r.status, r.json], [200, { v: 1, ok: false, error: 'version' }])
+  await post('/v1/hello', `{"v":1,${mod},"cwd":"/s","model":"m","plugin":"0.1.0","cc":"2.1.309"}`)
+  // The rest of its request still applies: the mod has spent the seq, and a retry would be dropped.
+  r = await post('/v1/events', `{${mod},"seq":1,"events":[{"t":${deep},"at":1},{"t":"measure","context":{"percent":12,"window":10},"at":1}]}`)
+  assert.equal(r.status, 204)
+  assert.equal(bridge.deck.view().context[A.host], 12)
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'x' } }).answer
+  await request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=0` }).answer
+  // A 500 here would come back after every hello, and the mod's line would never move on.
+  for (const raw of [`{${mod},"id":"${press.json.cmd}","state":${deep}}`, `{${mod},"id":${deep},"state":"done"}`]) {
+    r = await post('/v1/result', raw)
+    assert.equal(r.status, 204)
+  }
+  assert.equal(bridge.deck.view().cmds[press.json.cmd], 'delivered', 'neither result applies')
+
+  const said = lines.join('\n')
+  for (const line of [
+    'hello from local_a on version a value nested too deep to show: refused',
+    'local_a: event of unknown type a value nested too deep to show ignored',
+    `result for ${press.json.cmd} ignored: unknown state a value nested too deep to show`,
+    'result for a value nested too deep to show ignored: unknown command',
+  ]) assert.ok(said.includes(line), line)
+  const log = runLog(env)
+  assert.equal(log.filter((e) => e.kind === 'route-error').length, 0)
+  assert.ok(log.some((e) => e.kind === 'result-ignored' && e.id === press.json.cmd && /Maximum call stack/.test(e.unlogged)), 'the log line keeps what it can write')
+})
+
 test('bridge: a control answer is scrubbed of the token, the registry\'s and records\' fields included', async (t) => {
   const env = tempEnv(t)
   // A session named after a command line that set the token, and a record that took a run of it.
@@ -166,20 +226,35 @@ test('bridge: a control answer is scrubbed of the token, the registry\'s and rec
   assert.equal(state.deck.settings[A.host].model, 'model-<token>')
 })
 
-test('bridge: status rule 6 reads a record as the app does: a wrap-up with a description decides by its needsUser alone', async (t) => {
+test('bridge: status rule 6 is the app\'s own needs-input indicator, read from each shape of record as the app reads it', async (t) => {
   const env = tempEnv(t)
+  const last = { postTurnSummaryFor: 'msg-9', lastAssistantUuid: 'msg-9' }
   const cases = [
-    // [record, status]
-    [{ turnWrapUp: { description: 'Done.', needsUser: false }, postTurnSummary: { needs_action: true } }, 'idle'],
+    // [record, status]. With no wrap-up, a summary of the last assistant message says by its category.
+    [{ ...last, postTurnSummary: { status_category: 'blocked' } }, 'needs-you'],
+    [{ ...last, postTurnSummary: { status_category: 'need_input' } }, 'needs-you'],
+    [{ ...last, postTurnSummary: { status_category: 'review_ready', needs_action: 'Pick a colour.' } }, 'idle'],
+    [{ ...last, postTurnSummary: { status_category: 'failed' } }, 'idle'],
+    [{ ...last, postTurnSummary: { needs_action: 'Pick a colour.' } }, 'idle'],
+    [{ ...last, postTurnSummary: 'blocked' }, 'idle'],
+    // A summary of an earlier message, or with no ids to compare, or ids that aren't strings, doesn't count.
+    [{ postTurnSummaryFor: 'msg-8', lastAssistantUuid: 'msg-9', postTurnSummary: { status_category: 'blocked' } }, 'idle'],
+    [{ postTurnSummaryFor: 'msg-9', postTurnSummary: { status_category: 'blocked' } }, 'idle'],
+    [{ postTurnSummary: { status_category: 'need_input', needs_action: 'Pick a colour.' } }, 'idle'],
+    [{ postTurnSummaryFor: 7, lastAssistantUuid: 7, postTurnSummary: { status_category: 'blocked' } }, 'idle'],
+    // A valid wrap-up makes the record count, whatever its summary is for, and recasts the summary's category.
     [{ turnWrapUp: { description: 'Blocked on you.', needsUser: 'Approve the plan before I go on.' } }, 'needs-you'],
-    [{ turnWrapUp: { description: 'Done.', needsUser: '' }, postTurnSummary: { needs_action: 'Pick a colour.' } }, 'idle'],
-    [{ turnWrapUp: { description: '', needsUser: true } }, 'needs-you'],
-    // Without a string description the wrap-up doesn't count, and the summary decides.
-    [{ turnWrapUp: { needsUser: true } }, 'idle'],
-    [{ turnWrapUp: { description: 7, needsUser: false }, postTurnSummary: { needs_action: 'Pick a colour.' } }, 'needs-you'],
-    [{ postTurnSummary: { needs_action: true } }, 'needs-you'],
-    [{ postTurnSummary: { needs_action: '' } }, 'idle'],
-    [{ postTurnSummary: { needs_action: false } }, 'idle'],
+    [{ turnWrapUp: { description: '', needsUser: '' }, postTurnSummaryFor: 'msg-8', lastAssistantUuid: 'msg-9' }, 'needs-you'],
+    [{ turnWrapUp: { description: 'Done.' }, ...last, postTurnSummary: { status_category: 'blocked' } }, 'idle'],
+    [{ turnWrapUp: { description: 'Done.' }, ...last, postTurnSummary: { status_category: 'need_input' } }, 'idle'],
+    [{ turnWrapUp: { description: 'Done.' } }, 'idle'],
+    [{ turnWrapUp: { description: 'Stuck.', needsUser: 'Read the error.' }, ...last, postTurnSummary: { status_category: 'failed' } }, 'idle'],
+    // Any other wrap-up is dropped, as the app's loader drops it, and the summary decides alone.
+    [{ turnWrapUp: { description: 'Blocked on you.', needsUser: true } }, 'idle'],
+    [{ turnWrapUp: { description: 'Done.', needsUser: null }, ...last, postTurnSummary: { status_category: 'review_ready' } }, 'idle'],
+    [{ turnWrapUp: { description: 7, needsUser: 'Approve.' } }, 'idle'],
+    [{ turnWrapUp: { needsUser: 'Approve.' }, ...last, postTurnSummary: { status_category: 'review_ready' } }, 'idle'],
+    [{ turnWrapUp: 'Blocked on you.', ...last, postTurnSummary: { status_category: 'need_input' } }, 'needs-you'],
   ]
   const hosts = cases.map((_, i) => `local_r${i}`)
   cases.forEach(([record], i) => {
@@ -217,6 +292,23 @@ test('bridge: a long poll waits, answers when a command is queued, and needs a s
   assert.equal(r.status, 200, 'no host, but the registry knows the sid')
 })
 
+test('bridge: a poll from an older inst is answered at once with no commands, and the newest one\'s stays open', async (t) => {
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: 1 })
+  const bridge = await startBridge(t, env)
+  const hello = (inst) => request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: A.sid, host: A.host, inst, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
+  const next = (inst) => request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${inst}&wait=20` })
+  await hello('ia')
+  await hello('ia2')
+  const open = next('ia2')
+  await sleep(50)
+  const r = await within(next('ia').answer, 1000, 'the older inst\'s poll: no answer within 1 s')
+  assert.deepEqual([r.status, r.json], [200, { cmds: [] }])
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'x' } }).answer
+  const got = await within(open.answer, 1000, 'the newest inst\'s poll: no answer within 1 s')
+  assert.deepEqual(got.json, { cmds: [{ id: press.json.cmd, t: 'prompt', text: 'x' }] })
+})
+
 test('bridge: parseWait keeps the wait within 0 to 20 s', () => {
   assert.deepEqual(['0', '5', '20', '99', '', null, 'x', '-1', '2.5'].map(parseWait), [0, 5, 20, 20, 20, 20, 20, 20, 2.5])
 })
@@ -243,17 +335,20 @@ test('bridge: the folders feed the deck: sessions from the registry, settings fr
   fs.writeFileSync(path.join(env.registryDir, '13.json'), '{"half": ')
   // A .key file that a reader opening it would list: registry JSON for a session of its own.
   fs.writeFileSync(path.join(env.registryDir, '11.key'), JSON.stringify({ pid: 14, sessionId: 'sid-key', hostSessionId: 'local_key', name: 'Key', status: 'waiting', statusUpdatedAt: 1 }))
-  writeRecord(env, A.host, { model: 'claude-haiku-5-5', effort: 'low', permissionMode: 'default', lastFocusedAt: 5, postTurnSummary: { needs_action: true, status_detail: 'private text' } })
-  // App 4.4212.0 writes a sentence where needs_action was true.
+  writeRecord(env, A.host, {
+    model: 'claude-haiku-5-5', effort: 'low', permissionMode: 'default', lastFocusedAt: 5, postTurnSummaryFor: 'msg-1', lastAssistantUuid: 'msg-1',
+    postTurnSummary: { status_category: 'need_input', needs_action: 'private text', status_detail: 'private text' },
+  })
+  // App 4.4212.0 writes what the turn needs as a sentence.
   writeRegistry(env, 15, { sessionId: 'sid-b', hostSessionId: 'local_b', name: 'B', status: 'idle', statusUpdatedAt: 1 })
-  writeRecord(env, 'local_b', { model: 'claude-haiku-5-5', postTurnSummary: { needs_action: 'Approve the plan before I go on.' } })
+  writeRecord(env, 'local_b', { model: 'claude-haiku-5-5', turnWrapUp: { description: 'private text', needsUser: 'Approve the plan before I go on.' } })
   const bridge = await startBridge(t, env)
   const view = bridge.deck.view()
   assert.deepEqual(view.sessions.sort(), [A.host, 'local_b'], 'only entries with a hostSessionId are Code-tab sessions, and never a .key file')
   for (const what of ['local_key', 'sid-key']) assert.equal(JSON.stringify(bridge.deck.state()).includes(what), false, `nothing of the .key file: ${what}`)
   assert.deepEqual(view.settings[A.host], { model: 'claude-haiku-5-5', effort: 'low', mode: 'default' })
   assert.equal(view.status[A.host], 'needs-you', 'the record says the last turn needs the user')
-  assert.equal(view.status.local_b, 'needs-you', 'a sentence says so too')
+  assert.equal(view.status.local_b, 'needs-you', 'a wrap-up says so too')
   for (const what of ['private text', 'Approve the plan']) assert.equal(JSON.stringify(bridge.deck.state()).includes(what), false, `only the flag is kept: ${what}`)
 
   fs.rmSync(path.join(env.registryDir, `${A.pid}.json`))

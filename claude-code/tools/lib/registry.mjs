@@ -84,14 +84,35 @@ export async function signature(file) {
   }
 }
 
-/** A needs-the-user flag in a record: true or, from app 4.4212.0, a sentence, of which any non-empty one counts. */
-const needs = (v) => v === true || (typeof v === 'string' && v !== '')
+/**
+ * Whether the app's own needs-input indicator would show for a record (PROTOCOL.md, status rule 6): app
+ * 4.4212.0's `_D`, with its `Dw` and the record loader's `jM`.
+ * - A valid wrap-up is a `turnWrapUp` object with a string `description`, empty or not, and a `needsUser` that's
+ *   missing or a string. The loader drops any other.
+ * - The record counts only with a valid wrap-up, or a summary of its last assistant message: a
+ *   `postTurnSummaryFor` equal to its `lastAssistantUuid`. Both are ids, which the loader keeps only as strings.
+ * - The turn's category is the summary's `status_category`. A valid wrap-up recasts it: `failed` stays `failed`;
+ *   otherwise one with a `needsUser`, even an empty one, makes it `blocked`, and one without turns `blocked` and
+ *   `need_input` into `review_ready`.
+ * - The indicator shows for `blocked` and `need_input`.
+ */
+export function needsInput(record) {
+  const wrapUp = record.turnWrapUp
+  const valid = isObject(wrapUp) && typeof wrapUp.description === 'string' && (wrapUp.needsUser === undefined || typeof wrapUp.needsUser === 'string')
+  const forLast = typeof record.postTurnSummaryFor === 'string' && record.postTurnSummaryFor === record.lastAssistantUuid
+  if (!valid && !forLast) return false
+  let category = isObject(record.postTurnSummary) ? record.postTurnSummary.status_category : undefined
+  if (valid && category !== 'failed') {
+    if (wrapUp.needsUser !== undefined) category = 'blocked'
+    else if (category === 'blocked' || category === 'need_input') category = 'review_ready'
+  }
+  return category === 'blocked' || category === 'need_input'
+}
 
 /**
- * The fields the deck uses from a record, or null when it can't be read. The app's summaries are text about
- * the user's work, so only whether the last turn needs the user is kept, read as the app reads it (PROTOCOL.md,
- * status rule 6): a `turnWrapUp` with a string `description` decides alone, by its `needsUser`, and the
- * summary's `needs_action` counts only without one.
+ * The fields the deck uses from a record, or null when it can't be read. The app's summaries and wrap-ups are
+ * text about the user's work, so only whether the last turn needs the user is kept: whether the app's own
+ * needs-input indicator would show (needsInput).
  */
 export async function readRecord(file) {
   let obj
@@ -102,7 +123,6 @@ export async function readRecord(file) {
   }
   if (!isObject(obj)) return null
   const out = pick(obj, ['model', 'effort', 'permissionMode', 'lastFocusedAt'])
-  const wrapUp = obj.turnWrapUp
-  out.needsUser = isObject(wrapUp) && typeof wrapUp.description === 'string' ? needs(wrapUp.needsUser) : needs(obj.postTurnSummary?.needs_action)
+  out.needsUser = needsInput(obj)
   return out
 }
