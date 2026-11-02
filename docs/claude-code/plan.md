@@ -495,6 +495,23 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Tools:** permission answers are checked exactly, values from mod bodies are stored only as strings, the fingerprint check pairs only by fp, rule 3 goes by observation, and the write guard sees the firmlink. Also the Saved Prompt lock, the old poll's answer, "not delivered" and rule 6. The refixer fixed one major: a subagent's `failed` had ended the main loop's fingerprint wait.
   - **Re-run by the main thread:** plugin 55/55, `tsc`, validate and the fixtures check; deck 168/168, typecheck, build and validate; tools 100/100. The deck's and the tools' tests pass with the clock two days ahead too.
   - **Left open:** a handful of minors and contract questions, batched with step 4's findings into the next round.
+- 2026-11-01, **ladder step 4 passes in Deck test T1** (the snapshot at b5685f5 against the fake bridge; run log in the scratchpad's `step4/run/`). T1 loaded the real plugin at start, hooks and mod, with no prompt.
+  - **Approve:** a Write in Manual reached `/v1/permission` and was held as `p1` (`Write`, `t1-a.txt`). Both sides' fingerprints were `42e4136f` (`fp-check match: true`). Approve with `shown: p1` allowed it, and the Write finished 10 ms later. The turn ended `done`, and the file holds "alpha".
+  - **Deny:** held as `p2` with matching fps (`a4326d9c`). The Deny stopped the turn (`turn.end` reason `answer`), and no file was written.
+  - **Prompts:** a prompt right after the Deny went in at once, so a deck Deny doesn't block prompts. A second prompt sent while T1 was busy reported `waiting` and went in 20 s later, when that turn ended.
+  - **One-press mode:** a raise to Accept edits raised the app's permission request 10 ms after delivery. The fake allowed it in under 1 ms, and the command was `done` 24 ms after delivery, with the app's text and then `settings {mode}`. Lowering back to Manual raised a request too this time, also allowed by the mode rule.
+  - **Events:** `attach` and `detach` came as the user looked at T1, and `measure` carried context and `{usd}` cost. `settings` carried `mode` from the first prompt and `effort: "max"`: the preset sets no model or effort, so T1 inherited the main thread's.
+  - **Found:**
+    - **A deck Deny also breaks the mod's next request.** The `tool.end` send right after the interrupt failed without reaching the bridge. The mod backed off 1 s, said hello on the same `inst`, and resent it under the same `seq`. It recovered as designed, but every Deny costs a 1 s delay and a debug-log line. Likely the engine abandons the mod's fetches at an interrupt (reference.md, "Work that outlives a dispatch").
+    - **A call refused at the permission prompt reaches the mod as an error result,** with `is_error` and the standard rejection text, not as `{deny}`. So `tool.end` says `ok: false` without `denied`. PROTOCOL.md should say so.
+    - **The deck only accepts 64-character tokens,** and the preset holds the spike's 48-character one. Sessions from the preset can reach the real deck only once the user puts the deck's token in the preset.
+  - **Not covered, left for Phase 4 with the user:** a request answered in the app (release rule 1), a question (`ask`), Esc, and whether any card flashes in the app during a one-press raise.
+- 2026-11-01, **ladder step 5, the part without presses, passes.**
+  - **Setup:** the fake bridge was stopped, `claude-code/sandbox-plugin` now points at `../claude-code/plugin`, and `.gitignore` takes the `tsconfig.json` the engine writes there. Only our deck plugin was restarted (`streamdeck restart com.karimdhanji.claude`). It now runs round 3's build, listening on 127.0.0.1:47600 with its own token; the S6 build on 47601 is gone.
+  - **The run:** `fake-claude --interactive hello status auth answered-in-app answered-in-app-registry session-gone`, with Enter piped to its eye checks: 6 passed, 0 failed.
+  - **The deck's log:** each play's fresh `inst` read as a restart, and the old poll was answered. Auth refusals came in the contract's order. Held requests #1 and #2 were released by rule 1 (fps `71376090`, `85db07b2`), and #3 when its client closed. Nothing was left held.
+  - **Not covered:** the fixtures with presses, and every "CHECK on the deck" line, go to Phase 4.
+  - **Left over:** T1 and S0 still carry the spike token, so their mods get 401 from the deck and keep backing off. That's harmless, and a line in its log every 30 s each.
 
 ## Progress
 

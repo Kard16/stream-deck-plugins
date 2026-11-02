@@ -35,3 +35,5 @@ spikes/results/
 
 # Claude Code side: bridge tokens and sockets, sandbox scratch
 **/run/
+# Written by the engine when a session loads the plugin; it extends the engine's own (self-ignoring) types folder
+claude-code/plugin/tsconfig.json
