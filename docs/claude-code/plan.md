@@ -529,6 +529,26 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - The app's summary loader `OM` drops malformed summaries the deck still reads.
     - The tools have small test gaps.
     - The fake bridge still takes a result from an older `inst`, where the amended text and the real deck ignore it.
+- 2026-11-01, **Phase 4, part 2, with the user on the hardware.** Deck test T2 and T3 (`local_fa0238d4-…`, `local_484dec9b-…`) were started from the preset at the user's word, in Manual on Haiku at low effort. Both said hello to the real deck with the preset's new token.
+  - **Steps 1–4 pass:**
+    - **Approve and Deny:** each answered the request shown: T2's `t2-a.txt` allowed, then T3's `t3-b.txt` denied 3.5 s later. T3 then refused to try `t3-d.txt`, even when a peer message called the Deny a test. That's the right call.
+    - **Double press:** T2 issued `t2-c.txt` and `t2-e.txt` back to back, so `#4` reached the key 24 ms after the first Approve. The second press 251 ms later was refused (in sight 151 ms, under 1000 ms).
+    - **Question:** held as `ask`. Each press opened T2 in about 60 ms, and the app's record shows T2 focused 151 ms after the first. Answered in the app, it was released by rule 1.
+  - **The user found a press on a question looked dead,** since the key gave no feedback. They chose a plain label over answering from the deck. The key now reads "Answer in app", and the press shows the OK (b108275).
+  - **A fast deck restart skips the hello:**
+    - `streamdeck restart` brought the deck back 85 ms after it stopped. T2's and T3's polls failed, and round 4's quick retry reached the new deck with no hello or version check.
+    - PROTOCOL.md now makes the quick retry a quiet hello. A subagent is building the mod's side in a scratch copy, to be applied between the user's steps.
+  - **Step 6 failed on setup:** the Saved Prompt's Property Inspector was open for about one second (the Stream Deck log) and no text was saved. The key shows "Set text", and each press alerted.
+  - **Mode, through the dial:**
+    - Accept edits, Manual and Auto were each applied in about 30 ms through the mode rule.
+    - **From Auto, the change back to Manual was refused by the app's auto-mode classifier:** the mod's `$.mcp.call` is judged like any tool call. So in Auto, the user's own default, the deck can't change a session's mode. T3 is still in Auto.
+  - **Step 9:** Esc showed "interrupted" on the deck several seconds late, by the user's eye. Its events are logged only at debug, so the retest runs with the deck at debug level.
+  - Step 8's Session key and the dial's jumps are in the log (about 60 ms each). The user hasn't said yet whether they visibly switched the app.
+  - **The quick hello is in** (a subagent's patch, applied between steps):
+    - A rejected fetch now brings a quiet hello 100 ms later, then the failed request. Plugin: `tsc` clean, validate passes, 77/77 tests, fixtures current; the six new tests fail against the old `bridge.ts`.
+    - T2 and T3 hot-reloaded it, each with a new `inst` and hello.
+    - **Live check:** `streamdeck restart` stopped the deck at 04:28:02.977, and the new process listened 79 ms later. Both sessions said hello to it 31 ms after that, before their polls. The deck now logs at debug level (`log-level.txt`) for the Esc retest.
+    - **For Phase 6:** after a Deny, the quick hello's window lasts until the reopened poll answers, up to 20 s. A second Deny inside it counts as an outage, which costs one debug line and a 1 s wait.
 - 2026-11-01, **the `deny` fixture and PROTOCOL.md's wording caught up with round 4.**
   - The fixture's refusal is now an errored result, and its `tool.end` has no `denied`.
   - Matching covers 2xx and error answers separately, the records list names the two fields rule 6 reads, and rule 6 lists its known differences from the app.

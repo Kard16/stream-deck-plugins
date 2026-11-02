@@ -3,14 +3,15 @@
 //
 // Nothing here holds up a hook: emit() and result() queue and return, and the sends, the poll and the retries run
 // on their own, through the engine's fetch and clock (BridgeHost: register.ts's adapter over `$`, or a test's
-// fake). A fetch that rejects, with no answer at all, goes once more 100 ms later and quietly: the engine abandons a
-// mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still there. A failed request
-// (a second rejection, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts an outage: one log line,
-// then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is answered, the poll starts
-// again and the queued requests go out in order, a failed one again with its own seq. The outage ends only when
-// the request that began it goes through, so a bridge that answers hello and fails that request again doesn't start
-// the waits over. Each hello opens an epoch, and a send or poll left over from an older one changes nothing when it
-// settles.
+// fake). A fetch that rejects, with no answer at all, is followed 100 ms later by a quick hello, quietly: the engine
+// abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still there, and a
+// deck that restarts can be back within those 100 ms, and must hear hello before anything else. A failed request (a
+// failure of that hello or of what follows it, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts
+// an outage: one log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is
+// answered, the poll starts again and the queued requests go out in order, a failed one again with its own seq. The
+// outage ends only when the request that began it, or began the quick hello it grew from, goes through, so a bridge
+// that answers hello and fails that request again doesn't start the waits over. Each hello opens an epoch, and a
+// send or poll left over from an older one changes nothing when it settles.
 
 import { changed, type DeckEvent, type Settings } from './events'
 
@@ -28,9 +29,11 @@ export const POLL_WAIT_S = 20
  */
 export const STALL_MS = 35_000
 /**
- * A fetch that rejects, with no answer at all, goes once more this long after, with no hello and no log line, and
- * only the second one's failure counts (PROTOCOL.md, "Failure and recovery"). The engine abandons a mod's fetches
- * when a turn is interrupted, a deck Deny included, while the bridge is still there (ladder step 4).
+ * A fetch that rejects, with no answer at all, is followed this long after by a hello, with no log line and no
+ * outage yet: only a failure of that hello, or of what follows it, begins one (PROTOCOL.md, "Failure and
+ * recovery"). The engine abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge
+ * is still there (ladder step 4). And `streamdeck restart` brought the deck back 85 ms after it stopped (Phase 4), so
+ * the failed request sent again on its own would have been the new deck's first, with no hello and no version check.
  */
 export const RETRY_MS = 100
 /**
@@ -183,6 +186,12 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
    * answered alone ends only an outage a hello began.
    */
   let outage: Channel | undefined
+  /**
+   * The channel whose rejected fetch began a quick hello; undefined when none is on, and always while an outage is.
+   * Until that request goes through, any failure is the second one: it begins the outage the rejection held off, and
+   * that outage is still the rejected request's.
+   */
+  let quick: Channel | undefined
   let retry: Timer | undefined
   /** The epoch whose sender is working through the queue, or -1. */
   let sending = -1
@@ -218,43 +227,22 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   }
 
   /**
-   * `once()`, and once more RETRY_MS after it rejects, with no hello and no log line, so that only a second rejection
-   * rejects. An answer of any status, or a stall, counts as it comes. The second try starts from the timer, as the
-   * backoff's hellos do, apart from whatever the engine abandoned the first with; when epoch `ep` has ended by then,
-   * nothing goes out and the first rejection stands.
+   * A hello, event or result, settling `undefined` once it has gone STALL_MS unanswered. An answer that comes after
+   * that is ignored: the request counts as failed, and goes again after the next hello. A send whose fetch rejects
+   * rejects too, for its caller to hand to rejected().
    */
-  function twice<T>(ep: number, once: () => Promise<T>): Promise<T> {
-    return once().catch(
-      (err: unknown) =>
-        new Promise<T>((resolve, reject) => {
-          const again = (): void => {
-            if (ep === epoch) once().then(resolve, reject)
-            else reject(err)
-          }
-          if (timer(RETRY_MS, again) === undefined) again()
-        }),
-    )
-  }
-
-  /**
-   * A hello, event or result in epoch `ep`, settling `undefined` once it has gone STALL_MS unanswered. An answer
-   * that comes after that is ignored: the request counts as failed, and goes again after the next hello. A send that
-   * rejects goes once more (twice()), with a STALL_MS of its own.
-   */
-  function send(path: string, body: string, ep: number): Promise<HttpAnswer | undefined> {
-    return twice(ep, async () => {
-      let stalled: (none: undefined) => void = () => {}
-      const unanswered = new Promise<undefined>(resolve => {
-        stalled = resolve
-      })
-      const stall = timer(STALL_MS, () => stalled(undefined))
-      try {
-        const sent = host.fetch(`${BRIDGE_URL}${path}`, { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body })
-        return await Promise.race([sent, unanswered])
-      } finally {
-        stall?.cancel()
-      }
+  async function send(path: string, body: string): Promise<HttpAnswer | undefined> {
+    let stalled: (none: undefined) => void = () => {}
+    const unanswered = new Promise<undefined>(resolve => {
+      stalled = resolve
     })
+    const stall = timer(STALL_MS, () => stalled(undefined))
+    try {
+      const sent = host.fetch(`${BRIDGE_URL}${path}`, { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body })
+      return await Promise.race([sent, unanswered])
+    } finally {
+      stall?.cancel()
+    }
   }
 
   async function refreshSid(): Promise<void> {
@@ -301,9 +289,9 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     }
     let res: HttpAnswer | undefined
     try {
-      res = await send('/v1/hello', JSON.stringify(body), ep)
+      res = await send('/v1/hello', JSON.stringify(body))
     } catch (err) {
-      if (ep === epoch) fail('hello', describe(err, ids.token))
+      if (ep === epoch) rejected('hello', err)
       return
     }
     if (ep !== epoch) return
@@ -338,19 +326,43 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   }
 
   /**
+   * A request on `channel` had no answer at all in the current epoch: its fetch rejected. Unless an outage or a
+   * quick hello is on, that's no failure yet (PROTOCOL.md, "Failure and recovery"): the epoch ends quietly, with no
+   * log line and the outage's waits untouched, and hello goes RETRY_MS later, ahead of the request, for a deck that
+   * restarted meanwhile. Otherwise it fails as any request does: the second failure after a quick hello, or one more
+   * in an outage.
+   */
+  function rejected(channel: Channel, err: unknown): void {
+    if (silent()) return
+    if (outage !== undefined || quick !== undefined) {
+      fail(channel, describe(err, ids.token))
+      return
+    }
+    quick = channel
+    helloAfter(RETRY_MS)
+  }
+
+  /**
    * A request on `channel` failed in the current epoch: end the epoch, start an outage with its one log line unless
    * one is on, and hello again after the outage's next wait.
    */
   function fail(channel: Channel, why: string): void {
     if (silent()) return
-    epoch++
-    phase = 'down'
     if (outage === undefined) {
-      outage = channel
+      // During a quick hello this is the second failure: the outage begins, and it's the rejected request's.
+      outage = quick ?? channel
+      quick = undefined
       say(`The Stream Deck bridge at ${BRIDGE_URL} isn't answering (${why}); retrying in the background.`)
     }
     const wait = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)] ?? 30_000
     attempt++
+    helloAfter(wait)
+  }
+
+  /** Ends the epoch, and says hello again after `wait`. */
+  function helloAfter(wait: number): void {
+    epoch++
+    phase = 'down'
     retry?.cancel()
     retry = timer(wait, () => {
       retry = undefined
@@ -359,11 +371,13 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   }
 
   /**
-   * A request on `channel` went through in the current epoch. If a failure there began the outage, the outage is
-   * over, and the next one logs and waits from 1 s again. The line resends its failed request first, so the first
-   * line request through after a hello is that one, unless MAX_QUEUED piled up behind it and pushed it out.
+   * A request on `channel` went through in the current epoch. If a rejection there began the quick hello, or a
+   * failure there the outage, that's over: the next rejection has a quick hello of its own, and the next outage logs
+   * and waits from 1 s again. The line resends its failed request first, so the first line request through after a
+   * hello is that one, unless MAX_QUEUED piled up behind it and pushed it out.
    */
   function through(channel: Channel): void {
+    if (quick === channel) quick = undefined
     if (outage !== channel) return
     outage = undefined
     attempt = 0
@@ -408,9 +422,9 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
         }
         let res: HttpAnswer | undefined
         try {
-          res = await send(item.path, body, ep)
+          res = await send(item.path, body)
         } catch (err) {
-          if (ep === epoch) fail('line', describe(err, ids.token))
+          if (ep === epoch) rejected('line', err)
           return
         }
         if (ep !== epoch) return
@@ -450,10 +464,10 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       const soon = timer(POLL_MIN_MS, () => floorReached())
       let res: HttpAnswer
       try {
-        res = await twice(ep, () => pollOnce(ep))
+        res = await pollOnce(ep)
       } catch (err) {
         soon?.cancel()
-        if (ep === epoch) fail('poll', describe(err, ids.token))
+        if (ep === epoch) rejected('poll', err)
         return
       }
       // Commands a poll brought run even when its epoch has ended, a stalled one's too: the deck counts them as in

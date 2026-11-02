@@ -220,6 +220,13 @@ export function world(on: On, o: WorldOptions = {}) {
     abandon: (route: string, n = 1): void => {
       abandoned.set(route, (abandoned.get(route) ?? 0) + n)
     },
+    /**
+     * Every request in flight fails at once with no answer at all, the polls the bridge holds and the requests it
+     * left hanging alike, as the engine abandons a mod's fetches when a turn is interrupted (ladder step 4).
+     */
+    abandonOpen: (): void => {
+      for (const entry of [...held.splice(0), ...hung.splice(0)]) entry.reply({ deny: 'The operation was aborted.' })
+    },
     /** The bridge wakes up late: answers every request it left hanging, oldest first. */
     answerHung: (status: number, body?: unknown): void => {
       for (const entry of hung.splice(0)) entry.reply(answer(status, body))
