@@ -1,15 +1,28 @@
 // The fake deck: what the deck plugin knows and does, without the hardware or the Stream Deck SDK
-// (claude-code/protocol/PROTOCOL.md, v1). It holds permission requests and sorts them into kinds, queues
-// commands and hands them to long polls, follows each session from the mod's hello and events, applies the
-// release rules, and works out each session's status the way the deck shows it.
+// (claude-code/protocol/PROTOCOL.md, v1). It takes the hooks' requests only from sessions the registry confirms,
+// holds permission requests and sorts them into kinds, answers mode checks, queues commands and hands them to long
+// polls, follows each session from the mod's hello and events, applies the release rules, and works out each
+// session's status the way the deck shows it.
 //
-// No I/O here: bridge.mjs feeds it HTTP requests and folder readings, and its clock and timers are injected,
-// so the tests drive it directly. Presses come from the control interface in place of the keys.
+// No I/O here: bridge.mjs feeds it HTTP requests and folder readings, and reads the registry once more when a
+// request asks for it (hookNeedsReading, helloNeedsReading). Its clocks and timers are injected, so the tests drive
+// it directly. Presses come from the control interface in place of the keys.
 
-import { ASK_TOOLS, AT_ONCE_MS, FINAL_STATES, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, VERSION, answerFor, fingerprint, summary } from './protocol.mjs'
+import { ASK_TOOLS, AT_ONCE_MS, FINAL_STATES, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, NOT_THIS_SESSION, PRE_ALLOW, VERSION, answerFor, fingerprint, summary } from './protocol.mjs'
 
 /** A control call, or a mod request, that can't be carried out as asked: bridge.mjs answers it with 400. */
 export class BadRequest extends Error {}
+
+/**
+ * A hello from a host the registry lists under another sessionId (PROTOCOL.md, "Desktop sessions only"): a `claude`
+ * started inside that session, which inherits its host id. bridge.mjs answers it with 409 `{"error": "not this
+ * session"}`.
+ */
+export class NotThisSession extends Error {
+  constructor() {
+    super(NOT_THIS_SESSION)
+  }
+}
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
@@ -50,11 +63,15 @@ const statusAt = (f) => (Number.isFinite(f.statusUpdatedAt) ? f.statusUpdatedAt 
 function newSession(host) {
   return {
     host,
-    /** The latest Claude Code session id, and every one its mod and its PermissionRequests have come with: it can change. */
+    /**
+     * The latest Claude Code session id its mod came with, and every one: it can change, and the host fallback places
+     * a mod's request by any of them (PROTOCOL.md, Identity). The hooks' never count here.
+     */
     sid: null,
     sids: new Set(),
+    /** The current instance: the last inst that said hello for the session and hadn't before. Only a hello sets it. */
     inst: null,
-    /** Every inst seen for the session: one seen before doesn't count as a restart again. */
+    /** Every inst that has said hello for the session: one of them never counts as a restart, or as current, again. */
     insts: new Set(),
     /** True once anything has come from its mod: hello, events, a poll or a result. */
     plugin: false,
@@ -71,10 +88,11 @@ function newSession(host) {
     fpCalls: [],
     /**
      * The main loop's current or last turn: its id, did the deck see it end, how, did it fail, when the deck got its
-     * turn.end, as a #seenTick (status rule 3), and when it got the turn's last end, a turn.end or failed, by its
-     * clock (#afterTurnEnd).
+     * turn.end, as a #seenTick (status rule 3), and when it got the turn's last end, a turn.end or failed: by the
+     * wall clock for people (`endedAt`), and by the monotonic clock for the polls answered at once (`endedMono`,
+     * #afterTurnEnd).
      */
-    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null },
+    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null, endedMono: null },
     context: null,
     /** The latest model, effort and mode from the plugin: hello, settings events, PermissionRequests. */
     settings: { model: null, effort: null, mode: null },
@@ -82,7 +100,7 @@ function newSession(host) {
     onScreen: false,
     ended: null,
     poll: null,
-    /** When the session's last open poll ended, or null while one is open or before its first. */
+    /** When the session's last open poll ended, by the monotonic clock; null while one is open or before its first. */
     pollEndedAt: null,
     /** Fails the session's waiting prompts once it has gone IN_FLIGHT_MS without an open poll. */
     gapTimer: null,
@@ -94,6 +112,7 @@ const wire = (c) => (c.t === 'prompt' ? { id: c.id, t: c.t, text: c.text } : { i
 
 export class FakeDeck {
   #now
+  #mono
   #log
   #inFlightMs
   #setTimer
@@ -132,13 +151,17 @@ export class FakeDeck {
   #pollSeq = 0
 
   /**
-   * Options: `now` (ms clock), `log(event)` (structured events; `say` is a line for people), `inFlightMs`
-   * (how long a delivered command waits for its final result, and a queued one for a poll), `cmdPrefix`
-   * (command ids are the prefix and a number: deliberately not the fixtures' `c1`, so the tests exercise
-   * binding), `setTimer`/`clearTimer`.
+   * Options: `now` (the wall clock, ms: arrival times, and what people read in the state), `monoNow` (a monotonic
+   * clock, ms, as the deck's: the 60 s of polls answered at once after a turn end, and a session's time without an
+   * open poll; a wall clock that a time sync moves, or that a fixture runner makes follow the registry's times,
+   * mustn't move them), `log(event)` (structured events; `say` is a line for people), `inFlightMs` (how long a
+   * delivered command waits for its final result, and a queued one for a poll), `cmdPrefix` (command ids are the
+   * prefix and a number: deliberately not the fixtures' `c1`, so the tests exercise binding),
+   * `setTimer`/`clearTimer` (relative ms, as setTimeout's).
    */
-  constructor({ now = Date.now, log = () => {}, inFlightMs = IN_FLIGHT_MS, cmdPrefix = 'cmd-', setTimer, clearTimer } = {}) {
+  constructor({ now = Date.now, monoNow = () => performance.now(), log = () => {}, inFlightMs = IN_FLIGHT_MS, cmdPrefix = 'cmd-', setTimer, clearTimer } = {}) {
     this.#now = now
+    this.#mono = monoNow
     this.#log = log
     this.#inFlightMs = inFlightMs
     this.#cmdPrefix = cmdPrefix
@@ -158,8 +181,9 @@ export class FakeDeck {
   }
 
   /**
-   * The host a request is for: its own `host`, else its `sid` looked up in the registry, then among every sid and
-   * host pair the bridge has seen from mods and hooks (PROTOCOL.md, Identity).
+   * The host a mod's request is for: its own `host`, else its `sid` looked up in the registry, then among every sid
+   * and host pair the bridge has seen from mods (PROTOCOL.md, Identity). The hooks' requests are never placed so:
+   * only the registry confirms them (#confirmed).
    */
   #hostFor(sid, host) {
     const h = hostValue(host)
@@ -172,7 +196,7 @@ export class FakeDeck {
     return null
   }
 
-  /** A sid the session's mod or hook came with: the latest, and one more pair for the host fallback. */
+  /** A sid the session's mod came with: the latest, and one more pair for the host fallback. */
   #sawSid(s, sid) {
     if (!str(sid)) return
     s.sid = sid
@@ -180,22 +204,61 @@ export class FakeDeck {
   }
 
   /**
-   * The session a mod request names, marked as having the plugin. A new inst means the mod restarted; one
-   * seen before for the session, a late request from an instance already replaced, doesn't count again.
+   * The session a mod request names, marked as having the plugin. Whatever its inst, this changes no instance: only
+   * a hello makes an inst current (PROTOCOL.md, Identity, and hello below).
    */
-  #touchMod(sid, host, inst) {
+  #touchMod(sid, host) {
     const h = this.#hostFor(sid, host)
     if (!h) return null
     const s = this.#session(h)
     s.plugin = true
     s.lastSeen = this.#now()
     this.#sawSid(s, sid)
-    if (str(inst) && !s.insts.has(inst)) {
-      if (s.inst !== null) this.#modRestarted(s, inst)
-      s.insts.add(inst)
-      s.inst = inst
-    }
     return s
+  }
+
+  /**
+   * PROTOCOL.md, "Desktop sessions only": the host of a hook's request when the registry, as last read, lists its
+   * X-Deck-Host with a sessionId equal to its session_id; else null. Every Claude Code process that reads
+   * ~/.claude/settings.json runs the hooks, and a `claude` started inside a desktop session sends that session's
+   * host with its own session id, so the header alone proves nothing.
+   */
+  #confirmed(hostHeader, sessionId) {
+    const host = hostValue(hostHeader)
+    const sid = str(sessionId)
+    if (!host || !sid) return null
+    return this.#registry.get(host)?.sessionId === sid ? host : null
+  }
+
+  /**
+   * Whether bridge.mjs reads the registry once more before it hands this hook's request over (PROTOCOL.md, "Desktop
+   * sessions only"): the latest reading doesn't confirm its session, and another could, since it names a host and a
+   * session id.
+   */
+  hookNeedsReading(hostHeader, body) {
+    const b = isObject(body) ? body : {}
+    return this.#confirmed(hostHeader, b.session_id) === null && hostValue(hostHeader) !== null && str(b.session_id) !== null
+  }
+
+  /**
+   * A hook's request from a session the registry doesn't confirm: no decision at once, and nothing held, made or
+   * changed, the session's settings included. The process's own permission flow decides.
+   */
+  #unconfirmed(route, b, hostHeader, responder) {
+    responder.send(200, answerFor('none'))
+    const host = hostValue(hostHeader)
+    const sid = str(b.session_id)
+    const tool = typeof b.tool_name === 'string' ? b.tool_name : ''
+    const listed = host ? this.#registry.get(host) : undefined
+    const why =
+      !host ? 'no host: X-Deck-Host is missing or not a local_ id'
+      : !sid ? 'no session_id'
+      : !listed ? `the registry doesn't list ${host}`
+      : !str(listed.sessionId) ? `the registry lists ${host} without a sessionId`
+      : `the registry lists ${host} under another sessionId`
+    const what = route === 'pretool' ? 'mode check' : 'permission request'
+    this.#log({ kind: 'unconfirmed', route, host, sid, tool, why, say: `${what} for ${display(tool)} from ${host ?? '(no host)'}: {} at once, nothing held: ${why}` })
+    return { kind: 'unconfirmed' }
   }
 
   /** A mod request that names no session the bridge can place. PROTOCOL.md, Identity: it gets 400. */
@@ -205,9 +268,9 @@ export class FakeDeck {
   }
 
   /**
-   * PROTOCOL.md, Identity: a new inst forgets the session's current tool, fails its delivered and waiting
-   * commands, and answers the old instance's open poll with no commands, so what's queued from then on waits for
-   * the new one. The session's requests still wait for their tool.starts, which the old instance's line may yet
+   * PROTOCOL.md, Identity: a hello from a new inst forgets the session's current tool, fails its delivered and
+   * waiting commands, and answers the old instance's open poll with no commands, so what's queued from then on waits
+   * for the new one. The session's requests still wait for their tool.starts, which the old instance's line may yet
    * bring, or may have lost.
    */
   #modRestarted(s, inst) {
@@ -218,40 +281,88 @@ export class FakeDeck {
     this.#endPoll(s, [])
     this.#armPollGap(s)
     this.#log({ kind: 'mod-restart', host: s.host, from: s.inst, to: inst, say: `${s.host}: the mod restarted (inst ${s.inst} → ${inst})` })
-    for (const h of this.#fpWaiting) if (this.#isOf(h, s.host, s.sid)) h.fpRestarted = true
+    for (const h of this.#fpWaiting) if (h.host === s.host) h.fpRestarted = true
   }
 
-  #heldOf(host, sid = this.#registry.get(host)?.sessionId) {
-    return this.#held.filter((h) => this.#isOf(h, host, sid))
-  }
-
-  /** Whether held request `h` is the session's: by its host, or by its sid when it came without one. */
-  #isOf(h, host, sid) {
-    return (host !== null && h.host === host) || (h.host === null && Boolean(str(sid)) && h.sid === sid)
+  /** The session's held requests, oldest first. Every one has a host: only a confirmed session's are held. */
+  #heldOf(host) {
+    return this.#held.filter((h) => h.host === host)
   }
 
   // ---- POST /v1/hello ------------------------------------------------------------------------------------
 
+  /**
+   * PROTOCOL.md, "Desktop sessions only": the hello's host and the sessionId the registry, as last read, lists it
+   * under, when that's another than the hello's sid; else null. A host the registry doesn't list yet, as a pre-warmed
+   * spare's, refuses nothing, and nor does an entry with no sessionId: only another sessionId does.
+   */
+  #helloConflict(b) {
+    const host = this.#hostFor(b.sid, b.host)
+    const listed = host ? str(this.#registry.get(host)?.sessionId) : null
+    return listed !== null && listed !== b.sid ? { host, listed } : null
+  }
+
+  /**
+   * Whether bridge.mjs reads the registry once more before it hands this hello over: the latest reading would refuse
+   * it, and a session whose id has just changed, after a /clear say, mustn't be refused on a reading made before.
+   */
+  helloNeedsReading(body) {
+    const b = isObject(body) ? body : {}
+    return b.v === VERSION && this.#helloConflict(b) !== null
+  }
+
+  /**
+   * PROTOCOL.md, Routes, Identity and "Desktop sessions only". A hello on another version is refused first. One from
+   * a host the registry lists under another sessionId throws NotThisSession, for a 409, and is taken no further:
+   * nothing of it is kept. Any other is taken, a spare's for a host the registry doesn't list yet included. Only a
+   * hello makes an inst the session's current one: one that hasn't said hello for the session before, and then the
+   * mod restarted if another was current. A hello from an inst that has said hello before is answered and its
+   * fields taken, but doesn't count again.
+   */
   hello(body) {
     const b = isObject(body) ? body : {}
     if (b.v !== VERSION) {
       this.#log({ kind: 'hello', ok: false, v: b.v ?? null, say: `hello from ${hostValue(b.host) ?? '?'} on version ${display(b.v)}: refused` })
       return { v: VERSION, ok: false, error: 'version' }
     }
-    const s = this.#touchMod(b.sid, b.host, b.inst)
+    const conflict = this.#helloConflict(b)
+    if (conflict) {
+      const inst = str(b.inst)
+      this.#log({
+        kind: 'hello', ok: false, status: 409, host: conflict.host, inst, sid: str(b.sid), listedSid: conflict.listed,
+        say: `hello ${conflict.host} inst ${inst ?? '?'} refused (409): the registry lists ${conflict.host} under another sessionId`,
+      })
+      throw new NotThisSession()
+    }
+    const s = this.#touchMod(b.sid, b.host)
     if (!s) this.#unplaced('hello')
+    const inst = str(b.inst)
+    const counts = inst !== null && !s.insts.has(inst)
+    if (counts) {
+      if (s.inst !== null) this.#modRestarted(s, inst)
+      s.insts.add(inst)
+      s.inst = inst
+    }
     const [cwd, model, mode, effort, plugin, cc] = [b.cwd, b.model, b.mode, b.effort, b.plugin, b.cc].map(asString)
-    s.hello = { at: this.#now(), cwd, model, mode, effort, plugin, cc }
+    s.hello = { at: this.#now(), inst, cwd, model, mode, effort, plugin, cc }
     for (const k of ['model', 'mode', 'effort']) if (str(b[k])) s.settings[k] = b[k]
-    this.#log({ kind: 'hello', ok: true, host: s.host, inst: s.inst, plugin, cc, model, say: `hello ${s.host} inst ${s.inst} (plugin ${plugin ?? '?'}, cc ${cc ?? '?'}, ${model ?? '?'})` })
+    const note = counts ? '' : inst === null ? ', no inst: none made current' : `, an inst that said hello before: ${s.inst} stays current`
+    this.#log({
+      kind: 'hello', ok: true, host: s.host, inst, current: s.inst, plugin, cc, model,
+      say: `hello ${s.host} inst ${inst ?? '?'} (plugin ${plugin ?? '?'}, cc ${cc ?? '?'}, ${model ?? '?'})${note}`,
+    })
     return { v: VERSION, ok: true }
   }
 
   // ---- POST /v1/events -----------------------------------------------------------------------------------
 
+  /**
+   * Taken from any inst of the session's, current or not (PROTOCOL.md, Identity): a replaced instance's late events
+   * still say what happened. A `seq` not above the last for its inst is a retry, and dropped.
+   */
   events(body) {
     const b = isObject(body) ? body : {}
-    const s = this.#touchMod(b.sid, b.host, b.inst)
+    const s = this.#touchMod(b.sid, b.host)
     if (!s) this.#unplaced('events')
     if (Number.isFinite(b.seq)) {
       // By the inst as a string, as every inst the deck keeps: any other value would be a key the state can't write.
@@ -275,7 +386,7 @@ export class FakeDeck {
       case 'turn.start':
         if (main) {
           // A new turn: the last one's end no longer has the polls answered at once (#afterTurnEnd).
-          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null }
+          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null, endedMono: null }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -286,7 +397,10 @@ export class FakeDeck {
           // reads done. One it can't tell apart, with no turn id on one side or the other, keeps it.
           const id = str(e.turn)
           const same = id === null || s.turn.id === null || id === s.turn.id
-          s.turn = { id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, endSeen: ++this.#seenTick, endedAt: this.#now() }
+          s.turn = {
+            id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, endSeen: ++this.#seenTick,
+            endedAt: this.#now(), endedMono: this.#mono(),
+          }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -296,6 +410,7 @@ export class FakeDeck {
           s.turn.sawEnd = true
           s.turn.failed = true
           s.turn.endedAt = this.#now()
+          s.turn.endedMono = this.#mono()
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -344,7 +459,7 @@ export class FakeDeck {
 
   /** Release rule 1: the mod reports tool.end with the same fp, from the same session. */
   #releaseByFp(s, fp) {
-    const h = this.#heldOf(s.host, s.sid).find((x) => x.fp === fp)
+    const h = this.#heldOf(s.host).find((x) => x.fp === fp)
     if (h) this.#release(h, 1, 'tool.end with the same fp')
   }
 
@@ -375,7 +490,7 @@ export class FakeDeck {
   /** A tool.start: pairs with the session's oldest waiting request that has its tool and fp, or waits as a call. */
   #fpFromTool(s, e, agent) {
     const c = { tool: str(e.tool), fp: str(e.fp), summary: str(e.summary), use: str(e.use), agent, start: ++this.#fpTick, end: null }
-    const h = this.#fpWaiting.find((x) => this.#isOf(x, s.host, s.sid) && x.tool === c.tool && x.fp === c.fp)
+    const h = this.#fpWaiting.find((x) => x.host === s.host && x.tool === c.tool && x.fp === c.fp)
     if (!h) {
       s.fpCalls.push(c)
       return
@@ -393,7 +508,7 @@ export class FakeDeck {
 
   /** Forgets the session's calls that ended before every waiting request of their tool arrived: none was theirs. */
   #fpPrune(s) {
-    const waiting = this.#fpWaiting.filter((h) => this.#isOf(h, s.host, s.sid))
+    const waiting = this.#fpWaiting.filter((h) => h.host === s.host)
     s.fpCalls = s.fpCalls.filter((c) => c.end === null || waiting.some((h) => h.tool === c.tool && h.fpFrom < c.end))
   }
 
@@ -405,11 +520,11 @@ export class FakeDeck {
     const i = this.#fpWaiting.indexOf(h)
     if (i < 0) return
     this.#fpWaiting.splice(i, 1)
-    const s = [...this.#sessions.values()].find((x) => this.#isOf(h, x.host, x.sid))
+    const s = this.#sessions.get(h.host)
     // A session without the plugin has no tool.starts to compare.
     if (!s?.plugin) return
     const calls = s.fpCalls.filter((c) => c.tool === h.tool && (c.end === null || c.end > h.fpFrom))
-    const others = this.#fpWaiting.filter((x) => this.#isOf(x, s.host, s.sid) && x.tool === h.tool)
+    const others = this.#fpWaiting.filter((x) => x.host === s.host && x.tool === h.tool)
     // Whichever call was this one's, the others of its tool can no longer be sure it wasn't theirs.
     for (const x of others) x.fpCrowded = true
     const doubt =
@@ -448,29 +563,29 @@ export class FakeDeck {
   // ---- POST /v1/permission -------------------------------------------------------------------------------
 
   /**
-   * Sorts a PermissionRequest into its kind (PROTOCOL.md, "Permission requests"). A `mode` request is
-   * allowed at once; `ask` and `tool` requests are held. `responder` is `{open, send(status, json)}`.
-   * Returns `{kind, id}` for a held request, `{kind: 'mode', cmd}` for one answered.
+   * A PermissionRequest (PROTOCOL.md, "Permission requests"), taken only from a session the registry confirms
+   * ("Desktop sessions only"): any other gets no decision at once. A confirmed one is sorted into its kind: a `mode`
+   * request is allowed at once, and `ask` and `tool` requests are held. `responder` is `{open, send(status, json)}`.
+   * Returns `{kind, id}` for a held request, `{kind: 'mode', cmd}` for one allowed, `{kind: 'unconfirmed'}`.
    */
   permission({ body, hostHeader, responder }) {
     const b = isObject(body) ? body : {}
+    const host = this.#confirmed(hostHeader, b.session_id)
+    if (!host) return this.#unconfirmed('permission', b, hostHeader, responder)
     const tool = typeof b.tool_name === 'string' ? b.tool_name : ''
     const input = b.tool_input
-    const sid = str(b.session_id)
-    const host = this.#hostFor(sid, hostHeader)
-    const s = host ? this.#session(host) : null
-    if (s) {
-      this.#sawSid(s, sid)
-      if (str(b.permission_mode)) s.settings.mode = b.permission_mode
-      if (isObject(b.effort) && str(b.effort.level)) s.settings.effort = b.effort.level
-    }
+    const sid = b.session_id
+    const s = this.#session(host)
+    if (str(b.permission_mode)) s.settings.mode = b.permission_mode
+    if (isObject(b.effort) && str(b.effort.level)) s.settings.effort = b.effort.level
     const fp = fingerprint(tool, input)
     const sum = summary(tool, input)
 
-    if (tool === MODE_TOOL && isObject(input) && input.session_id === 'self' && s) {
-      const cmd = this.#modeInFlight(s, input.mode)
+    if (tool === MODE_TOOL && isObject(input) && input.session_id === 'self') {
+      const cmd = this.#modeInFlight(host, input.mode, 'allowedRequest')
       if (cmd) {
-        // One press, one allowance: the request this command raised. A second one is an ordinary request.
+        // One press, one allowance: the request this command raised. A second one is an ordinary request. The mode
+        // check's own allowance is counted apart (pretool).
         cmd.allowedRequest = true
         responder.send(200, answerFor('allow'))
         this.#log({ kind: 'mode-allowed', host, cmd: cmd.id, mode: input.mode, fp, say: `${host}: mode ${input.mode} allowed at once (${cmd.id} in flight)` })
@@ -484,14 +599,52 @@ export class FakeDeck {
       arrived: this.#now(), seenWaiting: false, responder,
     }
     this.#held.push(h)
-    this.#log({ kind: 'held', id: h.id, host, sid, tool, requestKind: kind, summary: sum, fp, say: `${h.id} HELD ${kind} ${host ?? `(no host, sid ${sid ?? '?'})`} ${tool}: ${sum} fp ${fp}` })
+    this.#log({ kind: 'held', id: h.id, host, sid, tool, requestKind: kind, summary: sum, fp, say: `${h.id} HELD ${kind} ${host} ${tool}: ${sum} fp ${fp}` })
     this.#fpFromHeld(h, s)
     return { kind, id: h.id }
   }
 
-  #modeInFlight(s, mode) {
+  // ---- POST /v1/pretool ----------------------------------------------------------------------------------
+
+  /**
+   * A mode check (PROTOCOL.md, "Mode checks"): the mode hook's PreToolUse for the app's mode tool, answered at once
+   * and never held. From a session the registry confirms ("Desktop sessions only"), it's allowed when the session has
+   * a mode command in flight for the mode the call asks, for `self`: the first such check per command only, counted
+   * apart from kind mode's PermissionRequest, which the same command may still raise. Every other request gets no
+   * decision, and the session's own permission check decides, the auto-mode classifier included. It changes nothing
+   * else: a mode check isn't one of the session's PermissionRequests, whose mode and effort the deck shows.
+   * Returns `{kind: 'allow', cmd}`, `{kind: 'none'}` or `{kind: 'unconfirmed'}`.
+   */
+  pretool({ body, hostHeader, responder }) {
+    const b = isObject(body) ? body : {}
+    const host = this.#confirmed(hostHeader, b.session_id)
+    if (!host) return this.#unconfirmed('pretool', b, hostHeader, responder)
+    const tool = typeof b.tool_name === 'string' ? b.tool_name : ''
+    const input = b.tool_input
+    const mine = tool === MODE_TOOL && isObject(input) && input.session_id === 'self'
+    const cmd = mine ? this.#modeInFlight(host, input.mode, 'allowedCheck') : null
+    if (cmd) {
+      cmd.allowedCheck = true
+      responder.send(200, PRE_ALLOW)
+      this.#log({ kind: 'mode-check', host, allowed: true, cmd: cmd.id, mode: input.mode, say: `${host}: mode check for ${input.mode} allowed at once (${cmd.id} in flight)` })
+      return { kind: 'allow', cmd: cmd.id }
+    }
+    responder.send(200, answerFor('none'))
+    const why =
+      tool !== MODE_TOOL ? `${display(tool)} isn't the mode tool`
+      : !mine ? 'the call isn\'t for self'
+      : `no mode command for ${display(input.mode)} in flight whose check hasn't been allowed`
+    this.#log({ kind: 'mode-check', host, allowed: false, tool, mode: mine ? asString(input.mode) : null, why, say: `${host}: mode check: no decision, ${why}` })
+    return { kind: 'none' }
+  }
+
+  /**
+   * The session's mode command in flight (delivered, or a stray waiting) for `mode` that hasn't had `allowance` yet:
+   * `allowedRequest` for kind mode's PermissionRequest, `allowedCheck` for the mode check. Each is one per command.
+   */
+  #modeInFlight(host, mode, allowance) {
     for (const c of this.#commands.values()) {
-      if (c.host === s.host && c.t === 'mode' && IN_FLIGHT.has(c.state) && c.mode === mode && !c.allowedRequest) return c
+      if (c.host === host && c.t === 'mode' && IN_FLIGHT.has(c.state) && c.mode === mode && !c[allowance]) return c
     }
     return null
   }
@@ -538,19 +691,21 @@ export class FakeDeck {
    * A long poll (PROTOCOL.md, "Commands"). Answers at once with what's queued, else holds up to `wait`
    * seconds. A new poll answers the session's older one with no commands, and so does the end of the main
    * loop's turn (#turnEnded). From that turn end, while the registry still says busy, it answers at once with
-   * what's queued or nothing (#afterTurnEnd). Returns the poll's id, or null when the poll names no session the
-   * bridge can place.
+   * what's queued or nothing (#afterTurnEnd). `responder` is a permission request's, with `cut()` too, which drops
+   * the connection with no answer (reset). Returns the poll's id, or null when the poll names no session the bridge
+   * can place.
    */
   poll({ sid, host, inst, wait, responder }) {
-    const s = this.#touchMod(sid, host, inst)
+    const s = this.#touchMod(sid, host)
     if (!s) return null
     const id = ++this.#pollSeq
-    if (str(inst) !== s.inst) {
-      // PROTOCOL.md, Identity: a poll from an inst other than the session's newest, one already replaced, is
-      // answered at once with no commands. It never takes the newest one's place or a command, nor does it show
+    if (s.inst === null || str(inst) !== s.inst) {
+      // PROTOCOL.md, Identity: only a hello makes an inst current. A poll from any other inst, one replaced since or
+      // one that hasn't said hello to this deck (a replaced instance's late poll after a deck restart, say), is
+      // answered at once with no commands. It never takes the current one's place or a command, nor does it show
       // that the session's mod is there for a waiting prompt's clock.
       responder.send(200, { cmds: [] })
-      this.#log({ kind: 'poll-stale', host: s.host, poll: id, inst: str(inst), newest: s.inst })
+      this.#log({ kind: 'poll-stale', host: s.host, poll: id, inst: str(inst), current: s.inst })
       return id
     }
     if (s.poll) {
@@ -564,12 +719,12 @@ export class FakeDeck {
       // Answered at once: the mod is there, but the session has no open poll again.
       this.#deliver(queued, s)
       responder.send(200, { cmds: queued.map(wire) })
-      s.pollEndedAt = this.#now()
+      s.pollEndedAt = this.#mono()
       this.#armPollGap(s)
-      if (afterTurnEnd) this.#log({ kind: 'poll-at-once', host: s.host, poll: id, cmds: queued.map((c) => c.id), sinceTurnEndMs: this.#now() - s.turn.endedAt })
+      if (afterTurnEnd) this.#log({ kind: 'poll-at-once', host: s.host, poll: id, cmds: queued.map((c) => c.id), sinceTurnEndMs: this.#mono() - s.turn.endedMono })
       return id
     }
-    const p = { id, responder, inst: s.inst, since: this.#now(), timer: null }
+    const p = { id, responder, inst: s.inst, since: this.#mono(), timer: null }
     p.timer = this.#setTimer(() => {
       if (s.poll === p) this.#endPoll(s, [])
     }, wait * 1000)
@@ -596,8 +751,8 @@ export class FakeDeck {
    * kept the deck showing working for up to 20 s more (Phase 4). The mod polls again, and from now on its polls are
    * answered at once while the registry still says busy (#afterTurnEnd). With no poll open there's nothing to
    * answer: a waiting prompt's time without one still runs from when the last one ended. The report may come from an
-   * inst seen before, whose events still count: the session's turn has ended all the same, so the poll it answers is
-   * the newest instance's.
+   * inst that isn't current, whose events still count: the session's turn has ended all the same, so the poll it
+   * answers is the current instance's.
    */
   #turnEnded(s, t) {
     const p = s.poll
@@ -612,13 +767,14 @@ export class FakeDeck {
    * comes, or 60 s pass. A poll the mod opened while its last events were still on its line, a measure after the
    * turn.end say, would otherwise keep the session busy until its wait ran out (Phase 4); answered at once, the mod
    * waits out the rest of its second before the next, and that moment with no request open lets Claude Code turn the
-   * session idle. Judged as each poll arrives, by the bridge's latest registry reading and its own clock: a session
-   * the registry doesn't list, or lists as anything but busy, has its polls held as usual, and every main-loop
-   * turn.end or failed starts the 60 s again.
+   * session idle. Judged as each poll arrives, by the bridge's latest registry reading and its monotonic clock, as
+   * the deck's: a session the registry doesn't list, or lists as anything but busy, has its polls held as usual,
+   * and every main-loop turn.end or failed starts the 60 s again. The wall clock plays no part, so neither a time
+   * sync nor a fixture runner's clock that follows the registry's times can end the 60 s early or draw them out.
    */
   #afterTurnEnd(s) {
-    const at = s.turn.endedAt
-    return at !== null && this.#now() - at < AT_ONCE_MS && this.#registry.get(s.host)?.status === 'busy'
+    const at = s.turn.endedMono
+    return at !== null && this.#mono() - at < AT_ONCE_MS && this.#registry.get(s.host)?.status === 'busy'
   }
 
   /** Ends the session's open poll: answered with `cmds` if they're given and its client is still there. */
@@ -628,7 +784,7 @@ export class FakeDeck {
     s.poll = null
     this.#clearTimer(p.timer)
     if (cmds && p.responder.open) p.responder.send(200, { cmds })
-    s.pollEndedAt = this.#now()
+    s.pollEndedAt = this.#mono()
     this.#armPollGap(s)
   }
 
@@ -647,7 +803,7 @@ export class FakeDeck {
       s.gapTimer = null
       for (const c of waiting()) this.#finish(c, 'failed', { error: 'no result' })
     }
-    const left = (s.pollEndedAt ?? this.#now()) + this.#inFlightMs - this.#now()
+    const left = (s.pollEndedAt ?? this.#mono()) + this.#inFlightMs - this.#mono()
     if (left <= 0) expire()
     else s.gapTimer = this.#setTimer(expire, left)
   }
@@ -676,13 +832,14 @@ export class FakeDeck {
   }
 
   /**
-   * How a command went. One for an unknown or finished command, or from another session, is ignored. A
-   * prompt's `waiting` stops its 60 s clock (see #armPollGap); a mode command keeps it even after a stray one,
-   * which bounds how long the mode rule can allow a change.
+   * How a command went (PROTOCOL.md, "Commands"). One for an unknown or finished command, from another session, or
+   * from an inst other than the one its command was delivered to is ignored: a result with no inst included, as it
+   * can't be from that inst. A prompt's `waiting` stops its 60 s clock (see #armPollGap); a mode command keeps it
+   * even after a stray one, which bounds how long the mode rule can allow a change.
    */
   result(body) {
     const b = isObject(body) ? body : {}
-    const s = this.#touchMod(b.sid, b.host, b.inst)
+    const s = this.#touchMod(b.sid, b.host)
     if (!s) this.#unplaced('result')
     const c = typeof b.id === 'string' ? this.#commands.get(b.id) : undefined
     const id = typeof b.id === 'string' ? b.id : b.id === undefined ? '?' : display(b.id)
@@ -691,6 +848,7 @@ export class FakeDeck {
     if (FINAL.has(c.state)) return ignore(`already ${c.state}`)
     if (c.state === 'queued') return ignore('not delivered yet')
     if (s.host !== c.host) return ignore(`it was for ${c.host}`)
+    if (str(b.inst) === null || b.inst !== c.inst) return ignore(`it came from inst ${b.inst === undefined ? '(none)' : display(b.inst)}, and was delivered to ${c.inst}`)
     if (b.state === 'waiting') {
       c.state = 'waiting'
       if (c.t === 'prompt') {
@@ -773,7 +931,9 @@ export class FakeDeck {
   #queue(host, fields) {
     const c = {
       id: `${this.#cmdPrefix}${++this.#cmdSeq}`, host, ...fields, state: 'queued', queuedAt: this.#now(),
-      deliveredAt: null, finishedAt: null, inst: null, error: null, detail: null, allowedRequest: false, timer: null,
+      deliveredAt: null, finishedAt: null, inst: null, error: null, detail: null,
+      // A mode command's two allowances, one each, counted apart: its mode check's and its raise's PermissionRequest's.
+      allowedCheck: false, allowedRequest: false, timer: null,
     }
     this.#commands.set(c.id, c)
     // PROTOCOL.md, "Commands": one that no poll takes in time fails, so a key waiting on it can't stay locked.
@@ -823,12 +983,13 @@ export class FakeDeck {
    * Release rules 2 and 3 are judged by what the bridge itself saw, as PROTOCOL.md lets a fake bridge. Release
    * rule 2's "held from before that change": the request was held when a reading showed the session `waiting`.
    * Release rule 3: a reading shows the session `idle` and the one before showed it otherwise, so the change came
-   * after every request held now arrived; a session's first reading is no change. Status rule 3 is judged by what
-   * the bridge saw too: a `busy` began before the main loop's last turn.end when the reading where the session's
-   * `status` or `statusUpdatedAt` last changed, or its first, came before the bridge got that turn.end (#status).
-   * So a rewritten `statusUpdatedAt` is a new `busy`, as it would be by the times, and a new `name` or a missing
-   * `statusUpdatedAt` isn't. Comparing arrivals with `statusUpdatedAt` instead would mix the bridge's clock with
-   * the registry's, which differ in the fixtures (their times are made up).
+   * after every request held now arrived. A request is held only for a session the registry confirmed as it came
+   * ("Desktop sessions only"), so the reading that releases it is never the session's first. Status rule 3 is
+   * judged by what the bridge saw too: a `busy` began before the main loop's last turn.end when the reading where
+   * the session's `status` or `statusUpdatedAt` last changed, or its first, came before the bridge got that
+   * turn.end (#status). So a rewritten `statusUpdatedAt` is a new `busy`, as it would be by the times, and a new
+   * `name` or a missing `statusUpdatedAt` isn't. Comparing arrivals with `statusUpdatedAt` instead would mix the
+   * bridge's clock with the registry's, which differ in the fixtures (their times are made up).
    */
   applyRegistry(entries) {
     const next = new Map()
@@ -852,8 +1013,6 @@ export class FakeDeck {
       seen.set(host, same ? this.#statusSeen.get(host) : tick)
     }
     this.#statusSeen = seen
-    // A request held without a host: the registry, or a sid and host pair seen since it came, may place it now.
-    for (const h of this.#held) if (h.host === null && h.sid) h.host = this.#hostFor(h.sid, null)
 
     for (const [host, f] of next) {
       const p = prev.get(host)
@@ -863,22 +1022,22 @@ export class FakeDeck {
     for (const [host, p] of prev) {
       if (next.has(host)) continue
       this.#log({ kind: 'registry', change: 'removed', host, last: p, say: `registry - ${host}` })
-      for (const h of this.#heldOf(host, p.sessionId)) this.#release(h, 4, 'the session\'s registry file disappeared')
+      for (const h of this.#heldOf(host)) this.#release(h, 4, 'the session\'s registry file disappeared')
       this.#sessionEnded(host)
     }
     for (const [host, f] of next) {
       if (prev.get(host)?.status === 'waiting' && f.status !== 'waiting') {
-        const mine = this.#heldOf(host, f.sessionId)
+        const mine = this.#heldOf(host)
         if (mine.length === 1 && mine[0].seenWaiting) this.#release(mine[0], 2, 'the registry shows the session leaving waiting')
       }
     }
     for (const [host, f] of next) {
       const before = prev.get(host)
       if (f.status !== 'idle' || !before || before.status === 'idle') continue
-      for (const h of this.#heldOf(host, f.sessionId)) this.#release(h, 3, 'the registry shows the session turning idle since it arrived')
+      for (const h of this.#heldOf(host)) this.#release(h, 3, 'the registry shows the session turning idle since it arrived')
     }
     for (const [host, f] of next) {
-      if (f.status === 'waiting') for (const h of this.#heldOf(host, f.sessionId)) h.seenWaiting = true
+      if (f.status === 'waiting') for (const h of this.#heldOf(host)) h.seenWaiting = true
     }
     // PROTOCOL.md, "Commands": a reading that turns busy within the 60 s after the main loop's turn end answers the
     // poll held before it did, after a turn shorter than a scan or while the reading still said waiting after a Deny,
@@ -974,7 +1133,7 @@ export class FakeDeck {
     const listed = this.listed
     const hosts = new Set(listed)
     for (const host of this.#sessions.keys()) hosts.add(host)
-    for (const h of this.#held) if (h.host) hosts.add(h.host)
+    for (const h of this.#held) hosts.add(h.host)
     const status = {}
     const doing = {}
     const context = {}
@@ -1006,10 +1165,10 @@ export class FakeDeck {
     const sessions = {}
     for (const [host, s] of this.#sessions) {
       sessions[host] = {
-        sid: s.sid, inst: s.inst, plugin: s.plugin, hello: s.hello, lastSeq: Object.fromEntries(s.seq),
+        sid: s.sid, inst: s.inst, insts: [...s.insts], plugin: s.plugin, hello: s.hello, lastSeq: Object.fromEntries(s.seq),
         tools: [...s.tools].map(([use, t]) => ({ use, tool: t.tool, summary: t.summary, fp: t.fp, agent: t.agent })),
         turn: s.turn, statusSeen: this.#statusSeen.get(host) ?? null, context: s.context, settings: s.settings, onScreen: s.onScreen, attachAt: s.attachAt, ended: s.ended,
-        poll: s.poll ? { id: s.poll.id, inst: s.poll.inst, openMs: now - s.poll.since } : null,
+        poll: s.poll ? { id: s.poll.id, inst: s.poll.inst, openMs: this.#mono() - s.poll.since } : null,
         lastSeenMs: s.lastSeen === null ? null : now - s.lastSeen,
       }
     }
@@ -1026,16 +1185,33 @@ export class FakeDeck {
 
   // ---- reset and close ------------------------------------------------------------------------------------
 
-  /** Forgets everything but the id counters (command ids stay unique for the bridge's run). */
+  /**
+   * Forgets everything but the id counters (command ids stay unique for the bridge's run). Held requests get no
+   * decision, so the app's dialogs decide.
+   *
+   * A reset cuts each open poll off with no answer (`responder.cut()`), as a deck that restarts drops it, since the
+   * bridge goes on serving. The reset forgets every inst that said hello, and only a hello makes one current again
+   * (PROTOCOL.md, Identity). A mod says hello again only after a failed request ("Failure and recovery"): with its
+   * fetch failed, it does, about 100 ms later. A poll answered with no commands would go through instead, and the mod
+   * would poll on with its polls answered at once, unheard for good. At shutdown (`why` 'shutdown') open polls are
+   * answered with no commands: the bridge stops listening, so the mod's next request fails all the same.
+   */
   reset(why = 'reset') {
     const what = `the bridge was ${why === 'reset' ? 'reset' : 'shut down'}`
     for (const h of [...this.#held]) this.#release(h, why, what)
     for (const s of this.#sessions.values()) {
       this.#clearTimer(s.gapTimer)
-      if (!s.poll) continue
-      this.#clearTimer(s.poll.timer)
-      if (s.poll.responder.open) s.poll.responder.send(200, { cmds: [] })
+      const p = s.poll
+      if (!p) continue
+      this.#clearTimer(p.timer)
       s.poll = null
+      if (!p.responder.open) continue
+      if (why !== 'reset') {
+        p.responder.send(200, { cmds: [] })
+        continue
+      }
+      p.responder.cut()
+      this.#log({ kind: 'poll-cut', host: s.host, poll: p.id, inst: p.inst, why: what })
     }
     for (const c of this.#commands.values()) this.#clearTimer(c.timer)
     this.#fpWaiting = []
@@ -1050,7 +1226,7 @@ export class FakeDeck {
     this.#lastPress = null
   }
 
-  /** Shutting down: held requests get no decision, so the app's dialogs decide; polls get no commands. */
+  /** Shutting down: held requests get no decision, so the app's dialogs decide; open polls get no commands. */
   close() {
     this.reset('shutdown')
   }

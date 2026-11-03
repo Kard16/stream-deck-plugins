@@ -13,12 +13,13 @@
 // that answers hello and fails that request again doesn't start the waits over. Each hello opens an epoch, and a
 // send or poll left over from an older one changes nothing when it settles.
 
+import { whyQuiet, type Read } from './desktop'
 import { changed, type DeckEvent, type Settings } from './events'
 
 export const BRIDGE_URL = 'http://127.0.0.1:47600'
 export const PROTOCOL_VERSION = 1
 /** The plugin's version for the hello, kept in step with .claude-plugin/plugin.json: `$.plugin` has none. */
-export const PLUGIN_VERSION = '0.1.0'
+export const PLUGIN_VERSION = '0.2.0'
 export const BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10_000, 30_000]
 /** How long the bridge may hold a poll (PROTOCOL.md, "Rates"). */
 export const POLL_WAIT_S = 20
@@ -62,8 +63,15 @@ export type BridgeHost = {
   /** `$.clock.after`: a mod has no timers of its own. */
   after: (ms: number, fn: () => void) => Timer
   log: (text: string) => void
+  /** DECK_TOKEN. */
   token: () => Promise<string | undefined>
+  /** CLAUDE_CODE_HOST_SESSION_ID. */
   hostId: () => Promise<string | undefined>
+  /** CLAUDE_CODE_ENTRYPOINT, CLAUDECODE, CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_TAGS: with the two above, the gate's. */
+  entrypoint: () => Promise<string | undefined>
+  claudeCode: () => Promise<string | undefined>
+  childSession: () => Promise<string | undefined>
+  tags: () => Promise<string | undefined>
   sid: () => Promise<string>
   cwd: () => Promise<string>
   model: () => Promise<string>
@@ -75,7 +83,10 @@ export type ResultExtra = { error?: string; detail?: string }
 export type Command = Record<string, unknown> & { id: string }
 
 export type Bridge = {
-  /** Reads the token and the host id, then says hello; with no token, logs that once and stays quiet. */
+  /**
+   * Reads the environment, then says hello in a desktop session of its own (desktop.ts). Anywhere else it logs once
+   * which of the gate's tests failed, and sends nothing at all.
+   */
   start: () => void
   /** Queues an event, which goes out in its turn with the next seq. */
   emit: (event: DeckEvent) => void
@@ -256,15 +267,41 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     void boot()
   }
 
+  /** A variable's value, undefined when it's unset, or null when the engine wouldn't read it. */
+  async function variable(read: () => Promise<string | undefined>): Promise<Read> {
+    try {
+      return await read()
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The gate (PROTOCOL.md, "Desktop sessions only"): hello only from a desktop session of its own with a token.
+   * Anywhere else nothing is sent, ever, and the one log line names each test that failed. What the hooks queued
+   * meanwhile goes too.
+   */
   async function boot(): Promise<void> {
-    ids.token = ((await quiet(host.token)) ?? '').trim()
-    ids.host = (await quiet(host.hostId)) ?? ''
-    if (ids.token === '') {
+    const [entrypoint, hostId, claudeCode, childSession, tags, token] = await Promise.all(
+      [host.entrypoint, host.hostId, host.claudeCode, host.childSession, host.tags, host.token].map(variable),
+    )
+    // Set first, so the log line hides the token should another variable hold it.
+    ids.token = (token ?? '').trim()
+    const why = whyQuiet({
+      CLAUDE_CODE_ENTRYPOINT: entrypoint,
+      CLAUDE_CODE_HOST_SESSION_ID: hostId,
+      CLAUDECODE: claudeCode,
+      CLAUDE_CODE_CHILD_SESSION: childSession,
+      CLAUDE_CODE_TAGS: tags,
+      DECK_TOKEN: token,
+    })
+    if (why.length > 0) {
       phase = 'off'
       queue.length = 0
-      say("DECK_TOKEN isn't set, so this session doesn't talk to the Stream Deck.")
+      say(`This process doesn't talk to the Stream Deck, which is for desktop sessions only: ${why.join('; ')}.`)
       return
     }
+    ids.host = hostId ?? ''
     void hello()
   }
 

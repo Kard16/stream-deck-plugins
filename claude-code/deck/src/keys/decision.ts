@@ -15,7 +15,7 @@ export type KeySurface = {
 export interface DecisionModel {
 	readonly held: HeldRequests;
 	readonly online: boolean;
-	titleFor(host: string | null): string;
+	titleFor(host: string): string;
 	onChange(listener: () => void): () => void;
 }
 
@@ -112,11 +112,6 @@ export class DecisionKeys {
 		}
 		if (result.ok && result.did === "jump") {
 			const { held } = result;
-			if (held.host === null) {
-				this.#log.info(`${name}: #${held.id} ${quote(held.tool, 40)} needs the user, but its session isn't known, so there's nowhere to jump`);
-				this.#alert(key);
-				return;
-			}
 			this.#log.info(`${name}: jump to ${held.host} for #${held.id} ${quote(held.tool, 40)}, which needs the user in the app`);
 			this.#open(held.host);
 			// Without feedback the press looked dead when the session was already on screen (Phase 4).

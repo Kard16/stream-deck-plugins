@@ -51,12 +51,12 @@ function setup() {
 	const jumps: string[] = [];
 	const permission = (host: string, tool: string, input: unknown): FakeReply => {
 		const reply = new FakeReply();
-		model.permission({ session_id: "x", tool_name: tool, tool_input: input }, host, reply);
+		model.permission({ session_id: host === A ? "sid-1" : "sid-2", tool_name: tool, tool_input: input }, host, reply);
 		return reply;
 	};
 	/** The mod of a session says hello and opens its long poll. */
 	const mod = (host: string): FakeReply => {
-		model.hello({ v: 1, host, inst: `i-${host}`, model: "claude-haiku-5-5" });
+		model.hello({ v: 1, sid: host === A ? "sid-1" : "sid-2", host, inst: `i-${host}`, model: "claude-haiku-5-5" });
 		const poll = new FakeReply();
 		model.next(new URLSearchParams({ host, inst: `i-${host}`, wait: "20" }), poll);
 		return poll;
@@ -260,7 +260,7 @@ describe("Saved Prompt keys", () => {
 
 	test("while the key's last prompt is queued, delivered or waiting, a press alerts and sends nothing: a double press sends once", () => {
 		const { clock, model, surface, feedback, log } = setup();
-		model.hello({ v: 1, host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
+		model.hello({ v: 1, sid: "sid-1", host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
 		model.pick(A);
 		const keys = new PromptKeys(model, { clock, log });
 		keys.add("k", surface("k"), { text: "Carry on." });
@@ -295,7 +295,7 @@ describe("Saved Prompt keys", () => {
 	test("a prompt that no poll takes within 60 s fails as not delivered, which frees the key", () => {
 		const { clock, model, surface, feedback, log } = setup();
 		// The session has the plugin, but its mod has stopped polling.
-		model.hello({ v: 1, host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
+		model.hello({ v: 1, sid: "sid-1", host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
 		model.pick(A);
 		const keys = new PromptKeys(model, { clock, log });
 		keys.add("k", surface("k"), { text: "Carry on." });

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // The fake bridge: the deck plugin's side of the bridge protocol (claude-code/protocol/PROTOCOL.md, v1),
 // without the deck, to run the real Claude Code plugin against (ladder step 4 in docs/claude-code/plan.md).
-// It holds permission requests until told otherwise (only the mode rule answers on its own), queues commands
-// for the mod's long poll, follows sessions and events, applies the release rules, and logs every request
-// and answer to its run folder. The same file is a small CLI for its token-checked /control/ routes.
-// README.md has the walkthrough. Node 24, no dependencies.
+// It takes the hooks' requests only from sessions the registry confirms, holds permission requests until told
+// otherwise (only the mode rules answer on their own: a mode check and a raise's PermissionRequest for a mode
+// command in flight), queues commands for the mod's long poll, follows sessions and events, applies the release
+// rules, and logs every request and answer to its run folder. The same file is a small CLI for its token-checked
+// /control/ routes. README.md has the walkthrough. Node 24, no dependencies.
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,8 +36,9 @@ Running it:
                        ~/Library/Application Support/Claude/claude-code-sessions)
   --registry-ms N      how often to read the registry (default ${DEFAULTS.registryMs}; 0 reads only on rescan)
   --quiet              only the first line, where it listens
-  It logs every request and answer to the run folder as JSONL, never the token. Ctrl-C answers any held
-  request with {} (no decision), so the app's dialogs decide.
+  It logs every request and answer to the run folder as JSONL, never the token. It takes a hook's request
+  only from a session the registry lists with that X-Deck-Host and session_id, and answers any other {} at
+  once. Ctrl-C answers any held request with {} (no decision), so the app's dialogs decide.
 
 Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}) or --port, with --token-file:
   state                          the deck's view, sessions, held requests, commands, registry
@@ -48,9 +50,11 @@ Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}
   prompt <host> <text>           the Saved Prompt key with that text: queues a prompt for that
                                  session (local_…), or alerts while the key's last prompt is
                                  still queued, delivered or waiting
-  mode <host> <mode>             the Mode dial: ${MODES.join(', ')}
+  mode <host> <mode>             the Mode dial: ${MODES.join(', ')}. Its mode check, and the
+                                 PermissionRequest a raise brings, are allowed at once, once each
   rescan                         reads the registry and records now
-  reset                          forgets everything: held requests get {}, polls no commands
+  reset                          forgets everything: held requests get {}, and open polls are
+                                 cut off with no answer, so their mods say hello again
   It prints the answer as JSON and exits 1 when the call failed or the press alerted, and 2 for a
   usage error, before it reads any token.
 

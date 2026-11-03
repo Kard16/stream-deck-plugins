@@ -20,7 +20,7 @@ test('hello goes first, with the ids, cwd, model and versions; then one poll, wi
     inst: expect.any(String),
     cwd: '/sandbox',
     model: MODEL,
-    plugin: '0.1.0',
+    plugin: '0.2.0',
     cc: '2.1.309',
   })
   expect(poll?.method).toBe('GET')
@@ -35,14 +35,6 @@ test('hello says cc "unknown" when the engine gives no version', async ($, on) =
   await $.session.start(START)
   await w.settle()
   expect(w.to('/v1/hello')[0]?.body.cc).toBe('unknown')
-})
-
-test('without CLAUDE_CODE_HOST_SESSION_ID the mod still talks, with host empty, and the bridge looks the sid up', async ($, on) => {
-  const w = world(on, { env: { DECK_TOKEN: 'tok-only' } })
-  await $.session.start(START)
-  await w.settle()
-  expect(w.to('/v1/hello')[0]?.body).toMatchObject({ sid: SID, host: '' })
-  expect(w.to('/v1/next')[0]?.query).toMatchObject({ sid: SID, host: '' })
 })
 
 test('an input the mod can\'t read costs it its event, never the hook', async ($, on) => {

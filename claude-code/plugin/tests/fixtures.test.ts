@@ -1,13 +1,15 @@
 // The plugin side of the protocol's fixtures (PROTOCOL.md, "Fixtures"): each conversation with `mod` lines is
 // played against the real mod, through the engine's own test kit.
 //
-// Beneath the mod, the runner answers `$.session.*` and `$.env.get` from the fixture's setup, `$.prompt.submit`
-// and `$.mcp.call` from its `engine` lines (checking their arguments), and each engine event with the `mod`
-// line's result. It stands for the bridge too: hello answers {"v": 1, "ok": true}, events and results 204, and a
-// poll nothing, unless a `reply` line says otherwise. Each request the mod sends must be the fixture's next
-// `plugin` line (polls in order among themselves), with the token in its Authorization header, and the mod may
-// send nothing more. Lines about /v1/permission, other sessions, presses, the registry and the deck's state are
-// the deck side's.
+// Beneath the mod, the runner answers `$.session.*` and `$.env.get` from the fixture's setup, as a desktop session
+// of its own (PROTOCOL.md, "Desktop sessions only"): CLAUDE_CODE_ENTRYPOINT is claude-desktop, and CLAUDECODE,
+// CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_TAGS are unset. It answers `$.prompt.submit` and `$.mcp.call` from the
+// fixture's `engine` lines (checking their arguments), and each engine event with the `mod` line's result. It
+// stands for the bridge too: hello answers {"v": 1, "ok": true}, events and results 204, and a poll nothing, unless
+// a `reply` line says otherwise. Each request the mod sends must be the fixture's next `plugin` line (polls in order
+// among themselves), with the token in its Authorization header, and the mod may send nothing more. Lines about
+// /v1/permission and /v1/pretool, which Claude Code's hooks send, not the mod, and lines about other sessions,
+// presses, the registry and the deck's state are the deck side's.
 
 import type { On } from 'claude-code'
 import { expect, mock, test, type Engine, type MockClock } from 'claude-code/testing'
@@ -164,7 +166,8 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
   }
 
   const clock = mock.clock(on)
-  mock.env(on, { DECK_TOKEN: s.token, CLAUDE_CODE_HOST_SESSION_ID: s.host })
+  // A desktop session of its own; a variable not listed is unset.
+  mock.env(on, { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_HOST_SESSION_ID: s.host, DECK_TOKEN: s.token })
   on('session.id', () => ({ value: s.sid }))
   on('session.model', () => ({ value: s.model }))
   on('session.cwd', () => ({ value: s.cwd }))
@@ -246,7 +249,9 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
     } else if ('plugin' in line) {
       const p = line.plugin
       const { route, query } = parsePath(p.path)
-      if (route === '/v1/permission' || !ours(p)) {
+      // The hooks' requests: their reply lines are skipped with them.
+      const hooks = route === '/v1/permission' || route === '/v1/pretool'
+      if (hooks || !ours(p)) {
         if (p.as !== undefined) labels.set(p.as, null)
         continue
       }

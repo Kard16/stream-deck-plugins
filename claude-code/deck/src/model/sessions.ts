@@ -8,23 +8,31 @@ import {
 	ALLOW_DECISION,
 	ASK_TOOLS,
 	asHost,
+	type Hello,
+	type HookRequest,
 	isObj,
 	MODE_TOOL,
 	type ModEvent,
 	type ModRef,
 	modRef,
+	NO_DECISION,
 	type Obj,
 	parseEvent,
 	parseHello,
+	parseHook,
 	parsePermission,
 	parsePoll,
 	parseResult,
+	type PermissionRequest,
+	PRETOOL_ALLOW,
 	PROTOCOL_VERSION,
+	ROUTES,
 } from "../protocol/wire.js";
 import type { AppRecord } from "../records/records.js";
 import { compareSessions, type RegistrySession } from "../registry/registry.js";
 import { type Clock, realClock } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
+import { QuietLog } from "../util/quiet-log.js";
 import { type SessionStatus, sessionStatus } from "./status.js";
 
 /** One session as the deck shows it. */
@@ -44,7 +52,7 @@ export type SessionView = {
 	model: string | null;
 	effort: string | null;
 	mode: string | null;
-	/** The bridge has heard from the session's mod, so it can take prompts and mode changes. */
+	/** The session's mod has said hello, so it has a current instance to take prompts and mode changes. */
 	plugin: boolean;
 	/** False only for a picked target whose registry file has gone: it has ended. */
 	listed: boolean;
@@ -60,20 +68,28 @@ type RunningTool = { use: string | null; tool: string; summary: string; fp: stri
 type BridgeSession = {
 	host: string;
 	/**
-	 * Every Claude Code session id its mod and its PermissionRequests have come with, since one can change during a
-	 * session (PROTOCOL.md, Identity): the host fallback places a request by any of them.
+	 * Every Claude Code session id its mod has come with, since one can change during a session (PROTOCOL.md,
+	 * Identity): the host fallback places a mod request without a usable host by any of them.
 	 */
 	sids: Set<string>;
 	/**
-	 * The current mod instance, and every one seen for the session: one seen before never counts as a restart
-	 * again. They go with the rest when the session ends.
+	 * The current mod instance: the last to say hello that hadn't before. Null until one does, and only a hello
+	 * makes one current (PROTOCOL.md, Identity). Only its polls are held and get commands.
 	 */
 	inst: string | null;
-	insts: Set<string>;
+	/**
+	 * The instances that have said hello for the session, oldest first, the last HELLOS_KEPT of them: a hello from
+	 * one of these never counts as a restart again. They go with the rest when the session ends.
+	 */
+	hellos: Set<string>;
+	/**
+	 * The mod instance whose poll, events or result came last while no instance was current ("" for one without an
+	 * inst), or null if none has: read only while none is, when it means the session's mod is there but takes no
+	 * commands until it says hello. See #noHello.
+	 */
+	noHelloFrom: string | null;
 	/** The last `seq` seen, per instance. */
 	lastSeq: Map<string, number>;
-	/** The mod has talked to the bridge (any route), so the session has the plugin. */
-	mod: boolean;
 	cwd: string | null;
 	/** The latest from hello, `settings` events and PermissionRequests; each wins over the app's record. */
 	settings: { model: string | null; mode: string | null; effort: string | null };
@@ -94,6 +110,12 @@ type BridgeSession = {
 
 const NO_HOST: RouteAnswer = { status: 400, body: { error: "unknown session: no host, and the registry doesn't know the sid" } };
 
+/** A hello from a host the registry lists under another session id (PROTOCOL.md, Desktop sessions only). */
+const NOT_THIS_SESSION = { error: "not this session" };
+
+/** How many of a session's instances that said hello the deck remembers. The protocol asks for at least 8. */
+export const HELLOS_KEPT = 64;
+
 /** The longest title kept; the strips and keys cut it further. */
 const MAX_TITLE = 120;
 
@@ -103,20 +125,37 @@ const MAX_TITLE = 120;
  */
 const AT_ONCE_MS = 60_000;
 
+/**
+ * How the registry's latest reading lists a host: with the given session id among its files'; with other session
+ * ids only; or not at all, which includes files that name no session id.
+ */
+type Listing = "this" | "other" | "none";
+
 export type SessionModelOptions = {
 	log?: Log;
-	/** Timers for the long poll and the in-flight limit, and the time since a turn ended for answering polls at once. */
+	/**
+	 * Timers for the long poll and the in-flight limit, the time since a turn ended for answering polls at once, and
+	 * the quiet logging of refused requests.
+	 */
 	clock?: Clock;
 	/** Wall-clock ms, compared with the registry's `statusUpdatedAt` and the records' `lastFocusedAt`. */
 	wallNow?: () => number;
 	inFlightMs?: number;
+	/**
+	 * Reads the registry again now, rather than at its next scan, and resolves once setRegistry has had any change
+	 * (the watcher's scanNow). A hook's request or a hello the latest reading doesn't confirm waits for that one more
+	 * reading (PROTOCOL.md, Desktop sessions only). Without it, the latest reading is all there is.
+	 */
+	rescan?: () => Promise<void>;
 };
 
 /**
  * The deck's session model (PROTOCOL.md, "The deck's session model"). It merges the registry, the app's
  * records and what the bridge hears, keyed by the app's `local_…` id; it's also the bridge's routes. It holds
- * the PermissionRequests, applies the release rules, queues the commands that key presses make, and works
- * out each session's status, settings and context, and the target session for prompts and mode.
+ * the PermissionRequests, answers the mode checks, applies the release rules, queues the commands that key
+ * presses make, and works out each session's status, settings and context, and the target session for prompts
+ * and mode. It lists only the sessions the registry lists, and takes the hooks' requests only from those
+ * (PROTOCOL.md, Desktop sessions only).
  */
 export class SessionModel implements BridgeRoutes {
 	readonly held: HeldRequests;
@@ -124,10 +163,20 @@ export class SessionModel implements BridgeRoutes {
 	readonly #log: Log;
 	readonly #clock: Clock;
 	readonly #wallNow: () => number;
+	readonly #rescan: (() => Promise<void>) | null;
+	/** Refused hellos and unconfirmed hook requests, keyed by route and reason (Phase 6's quiet logs). */
+	readonly #refusals: QuietLog;
+	/** Mod requests for a session no instance has said hello for, keyed by host: see #noHello. */
+	readonly #noHellos: QuietLog;
 	readonly #listeners = new Set<() => void>();
 	readonly #bridge = new Map<string, BridgeSession>();
 	#registry = new Map<string, RegistrySession>();
 	#ordered: RegistrySession[] = [];
+	/**
+	 * By host, the session ids the registry's files list it with, every file counted, a lingering one of a restarted
+	 * process included: what confirms a hook's request or a hello (PROTOCOL.md, Desktop sessions only).
+	 */
+	#listed = new Map<string, Set<string>>();
 	/**
 	 * By key, the wall-clock ms of the deck's first reading of each listed session's registry status: the first that
 	 * showed it since one showed another, or the session's first. Status rule 3 takes it when `statusUpdatedAt` is
@@ -146,6 +195,9 @@ export class SessionModel implements BridgeRoutes {
 		this.#log = opts.log ?? nullLog;
 		this.#clock = opts.clock ?? realClock;
 		this.#wallNow = opts.wallNow ?? Date.now;
+		this.#rescan = opts.rescan ?? null;
+		this.#refusals = new QuietLog(this.#log, { clock: this.#clock });
+		this.#noHellos = new QuietLog(this.#log, { clock: this.#clock });
 		this.held = new HeldRequests({ log: this.#log });
 		this.commands = new CommandQueue({ clock: this.#clock, log: this.#log, inFlightMs: opts.inFlightMs });
 		this.held.onChange(() => this.#emit());
@@ -193,6 +245,14 @@ export class SessionModel implements BridgeRoutes {
 		const before = this.#registry;
 		this.#registry = next;
 		this.#ordered = [...next.values()].sort(compareSessions);
+		this.#listed = new Map();
+		for (const s of sessions) {
+			const host = asHost(s.hostSessionId);
+			if (host === null) continue;
+			const sids = this.#listed.get(host) ?? new Set<string>();
+			if (s.sessionId !== null) sids.add(s.sessionId);
+			this.#listed.set(host, sids);
+		}
 		// Each status's first reading (status rule 3), noted before a release below repaints the deck.
 		for (const [key, s] of next) if (before.get(key)?.status !== s.status) this.#firstReadings.set(key, now);
 		for (const key of this.#firstReadings.keys()) if (!next.has(key)) this.#firstReadings.delete(key);
@@ -224,12 +284,6 @@ export class SessionModel implements BridgeRoutes {
 			const host = asHost(old.hostSessionId);
 			if (host !== null) this.#ended(host);
 		}
-		// Requests that came without a usable host: the registry may know their sid now.
-		for (const h of this.held.list()) {
-			if (h.host !== null || h.sid === null) continue;
-			const host = this.#hostForSid(h.sid);
-			if (host !== null) this.held.setHost(h.id, host);
-		}
 		if (this.#picked !== null) {
 			const picked = next.get(this.#picked);
 			if (picked) this.#pickedTitle = this.#title(picked);
@@ -250,67 +304,59 @@ export class SessionModel implements BridgeRoutes {
 
 	// ---- the bridge's routes ----
 
-	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void {
+	/**
+	 * `POST /v1/permission`, from a confirmed session only: the deck's own mode change in flight is allowed at once
+	 * (kind mode), and anything else is held. A request from any other process gets no decision at once.
+	 */
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void> {
+		// When it arrived, for release rules 2 and 3, before any second reading of the registry.
+		const at = this.#wallNow();
 		const p = parsePermission(body);
 		if (!p) {
 			this.#log.info("PERMISSION refused: the body isn't a PermissionRequest (no tool_name)");
 			reply.send(400, JSON.stringify({ error: "not a PermissionRequest" }));
 			return;
 		}
-		const host = asHost(deckHost) ?? this.#hostForSid(p.sid);
-		if (host !== null) {
-			const b = this.#bridgeFor(host);
-			if (p.sid) b.sids.add(p.sid);
-			if (p.mode) b.settings.mode = p.mode;
-			if (p.effort) b.settings.effort = p.effort;
-		}
-		// Kind mode: the deck's own mode change, in flight, raised this. The only answer without a key press.
-		if (host !== null && p.tool === MODE_TOOL && isObj(p.input) && p.input.session_id === "self") {
-			const cmd = this.commands.inFlightMode(host, p.input.mode);
-			if (cmd) {
-				cmd.allowed = true;
-				reply.send(200, JSON.stringify(ALLOW_DECISION));
-				this.#log.info(`ALLOWED the mode change to ${quote(String(p.input.mode), 20)} for ${host}: the deck's own command ${cmd.id}`);
-				this.#emit();
-				return;
-			}
-		}
-		const held = this.held.hold(
-			{
-				at: this.#wallNow(),
-				host,
-				sid: p.sid,
-				tool: p.tool,
-				kind: ASK_TOOLS.has(p.tool) ? "ask" : "tool",
-				summary: summary(p.tool, p.input),
-				fp: fingerprintOrNull(p.tool, p.input),
-			},
-			reply,
-		);
-		reply.onClose(() => this.held.close(held.id));
+		return this.#fromConfirmed(ROUTES.permission, deckHost, p.sid, reply, (host) => this.#takePermission(p, host, at, reply));
 	}
 
-	hello(body: Obj): RouteAnswer {
+	/**
+	 * `POST /v1/pretool`, the mode check: answered at once and never held. Allowed only for the deck's own mode
+	 * change in flight, from a confirmed session; anything else gets no decision (PROTOCOL.md, Mode checks).
+	 */
+	pretool(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void> {
+		const p = parseHook(body);
+		if (!p) {
+			this.#log.debug("PRETOOL: no decision: the body isn't a PreToolUse (no tool_name)");
+			reply.send(200, JSON.stringify(NO_DECISION));
+			return;
+		}
+		return this.#fromConfirmed(ROUTES.pretool, deckHost, p.sid, reply, (host) => this.#checkMode(p, host, reply));
+	}
+
+	/**
+	 * `POST /v1/hello`. Refused with 409 when the registry lists its host under another session id; taken
+	 * otherwise, from a host the registry doesn't list yet included, as from one of the app's spare processes
+	 * (PROTOCOL.md, Desktop sessions only). When the latest reading doesn't list the host with the hello's session
+	 * id, the registry is read once more first.
+	 */
+	hello(body: Obj): RouteAnswer | Promise<RouteAnswer> {
 		const h = parseHello(body);
 		if (h.v !== PROTOCOL_VERSION) {
 			this.#log.warn(`HELLO from ${h.host ?? "an unknown session"} speaks version ${showVersion(h.v)}; the deck speaks ${PROTOCOL_VERSION}`);
 			return { status: 200, body: { v: PROTOCOL_VERSION, ok: false, error: "version" } };
 		}
-		const b = this.#modSession(h);
-		if (!b) return NO_HOST;
-		if (h.cwd) b.cwd = h.cwd;
-		if (h.model) b.settings.model = h.model;
-		if (h.mode) b.settings.mode = h.mode;
-		if (h.effort) b.settings.effort = h.effort;
-		this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)} plugin ${quote(h.plugin, 20)} cc ${quote(h.cc, 20)}`);
-		this.#emit();
-		return { status: 200, body: { v: PROTOCOL_VERSION, ok: true } };
+		const host = h.host ?? this.#hostForSid(h.sid);
+		if (host === null) return NO_HOST;
+		if (this.#rescan === null || this.#listing(host, h.sid) === "this") return this.#greet(h, host);
+		return this.#readAgain().then(() => this.#greet(h, host));
 	}
 
 	events(body: Obj): RouteAnswer {
 		const ref = modRef(body);
 		const b = this.#modSession(ref);
 		if (!b) return NO_HOST;
+		this.#noHello(b, ref.inst, "sends events");
 		const inst = ref.inst ?? "";
 		const seq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : null;
 		const last = b.lastSeq.get(inst) ?? 0;
@@ -343,10 +389,13 @@ export class SessionModel implements BridgeRoutes {
 			reply.send(NO_HOST.status, JSON.stringify(NO_HOST.body));
 			return;
 		}
-		// From an instance older than the session's newest: answered at once with none, so it neither displaces the
-		// newest one's poll nor takes its commands, and doesn't count as the newest one polling.
-		if (q.inst !== b.inst) {
-			this.#log.debug(`POLL ${b.host} from older mod instance ${quote(q.inst, 40)}: answered with none`);
+		// From an instance that isn't the session's current one, replaced since or never said hello to this deck:
+		// answered at once with none, so it neither displaces the current one's poll nor takes its commands, and
+		// doesn't count as the session's mod polling (PROTOCOL.md, Identity). With no current instance at all, that's
+		// logged at info, quietly.
+		if (b.inst === null || q.inst !== b.inst) {
+			if (b.inst === null) this.#noHello(b, q.inst, "polls");
+			else this.#log.debug(`POLL ${b.host} from mod instance ${quote(q.inst, 40)}, not the current one: answered with none`);
 			reply.send(200, JSON.stringify({ cmds: [] }));
 			return;
 		}
@@ -364,6 +413,7 @@ export class SessionModel implements BridgeRoutes {
 		const r = parseResult(body);
 		const b = this.#modSession(r);
 		if (!b) return NO_HOST;
+		this.#noHello(b, r.inst, "sends a result");
 		if (r.id !== null) this.commands.result(b.host, r.inst, r.id, r.state, r.error, r.detail);
 		return { status: 204 };
 	}
@@ -382,8 +432,7 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/** A session's title for a held request: the registry's, the record's, the folder's; else "Unknown session". */
-	titleFor(host: string | null): string {
-		if (host === null) return "Unknown session";
+	titleFor(host: string): string {
 		const s = this.#registry.get(host);
 		if (s) return this.#title(s);
 		const rec = this.#records.get(host)?.title;
@@ -453,7 +502,11 @@ export class SessionModel implements BridgeRoutes {
 		const view = this.session(key);
 		if (!view) return { ok: false, why: `${this.#pickedTitle && key === this.#picked ? quote(this.#pickedTitle) : key} has ended` };
 		if (view.host === null) return { ok: false, why: `${quote(view.title)} has no app id` };
-		if (!view.plugin) return { ok: false, why: `${quote(view.title)} doesn't have the plugin` };
+		if (!view.plugin) {
+			// Its mod talks, but hasn't said hello to this deck: it has the plugin, and can't take commands (#noHello).
+			const talking = (this.#bridge.get(view.host)?.noHelloFrom ?? null) !== null;
+			return { ok: false, why: talking ? `${quote(view.title)}'s mod hasn't said hello to this deck, so it can't take commands until it does` : `${quote(view.title)} doesn't have the plugin` };
+		}
 		return { ok: true, cmd: this.commands.queue(view.host, spec) };
 	}
 
@@ -546,26 +599,197 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * The session of a mod request, by its host or else its sid. An `inst` not seen before means the mod
-	 * restarted: the session's current tool and in-flight commands are forgotten, and a poll the old instance
-	 * left open is answered with none.
+	 * The session of a mod request, by its host or else its sid: the registry's, then the pairs mods have sent. It
+	 * doesn't touch which instance is current: only a hello does that (#greet).
 	 */
 	#modSession(ref: ModRef): BridgeSession | null {
 		const host = ref.host ?? this.#hostForSid(ref.sid);
 		if (host === null) return null;
 		const b = this.#bridgeFor(host);
 		if (ref.sid) b.sids.add(ref.sid);
-		b.mod = true;
-		if (ref.inst !== null && !b.insts.has(ref.inst)) {
-			if (b.inst !== null) {
-				this.#log.info(`RESTART ${host}: mod instance ${quote(ref.inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten, and any poll the old one left open is answered`);
-				b.tools = [];
-				this.commands.restarted(host, ref.inst, "the mod restarted");
-			}
-			b.insts.add(ref.inst);
-			b.inst = ref.inst;
-		}
 		return b;
+	}
+
+	/**
+	 * A mod request for a session with no current instance. Until an instance says hello, its polls get none and a
+	 * press on it is refused (PROTOCOL.md, Identity), yet its mod is there. Apart from a replaced instance's late
+	 * request just before the live one's hello, that's a live mod the deck lost track of:
+	 * - The deck restarted while the mod had no request open, so no fetch of its failed. Between a poll answered within
+	 *   1 s and its next, the mod waits out the rest of that second, as after every turn's end.
+	 * - Or a registry reading without the session made the deck forget it (release rule 4), and answer its poll.
+	 * Its requests all go through, so it says hello again only when it reloads, and until then the session takes no
+	 * prompts or mode changes. The contract leaves the deck no way to ask for a hello, so this only makes it plain:
+	 * at info the first time, then at most once in 10 minutes with the count since, and the rest at debug; afresh once
+	 * a hello makes an instance current. Only at debug for a session the registry doesn't list, which takes no presses
+	 * anyway: one that's ending, say, whose mod polled again once the deck answered its poll at release rule 4.
+	 */
+	#noHello(b: BridgeSession, inst: string | null, sends: string): void {
+		if (b.inst !== null) return;
+		b.noHelloFrom = inst ?? "";
+		const line = `NO HELLO ${b.host}: mod instance ${quote(inst, 40)} ${sends}, but no instance has said hello to this deck for the session, so it takes no prompts or mode changes until one does`;
+		if (this.#registry.has(b.host)) this.#noHellos.note(b.host, line);
+		else this.#log.debug(`${line}; the registry doesn't list it`);
+	}
+
+	/**
+	 * A hello, once the registry has been read again if need be: refused with 409 when the registry lists its host
+	 * under another session id, as for a `claude` started inside that session, and taken otherwise, from a host the
+	 * registry doesn't list yet included. The session then stays unlisted until the registry lists it, since
+	 * `sessions()` lists only the registry's.
+	 */
+	#greet(h: Hello, host: string): RouteAnswer {
+		if (this.#listing(host, h.sid) === "other") {
+			this.#refusals.note(
+				`${ROUTES.hello} not this session`,
+				`HELLO refused with 409 for ${host} inst ${quote(h.inst, 40)} sid ${quote(h.sid, 40)}: the registry lists that host under another session id`,
+			);
+			return { status: 409, body: NOT_THIS_SESSION, logged: true };
+		}
+		const b = this.#bridgeFor(host);
+		if (h.sid) b.sids.add(h.sid);
+		if (!this.#makeCurrent(b, h.inst)) {
+			// Its events and results are still taken, but its hello's settings may be stale, and its polls get none.
+			this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)}, which ${h.inst === null ? "has no inst" : "said hello before"}: taken, but not the current instance, which stays ${quote(b.inst, 40)}`);
+			return { status: 200, body: { v: PROTOCOL_VERSION, ok: true } };
+		}
+		if (h.cwd) b.cwd = h.cwd;
+		if (h.model) b.settings.model = h.model;
+		if (h.mode) b.settings.mode = h.mode;
+		if (h.effort) b.settings.effort = h.effort;
+		this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)} plugin ${quote(h.plugin, 20)} cc ${quote(h.cc, 20)}${this.#listing(host, h.sid) === "none" ? "; the registry doesn't list it yet" : ""}`);
+		this.#emit();
+		return { status: 200, body: { v: PROTOCOL_VERSION, ok: true } };
+	}
+
+	/**
+	 * Makes a hello's instance the session's current one, unless it has said hello before; returns whether it's
+	 * the current one now. A new instance replacing another means the mod restarted: the session's current tool
+	 * and in-flight commands are forgotten, and a poll the old instance left open is answered with none
+	 * (PROTOCOL.md, Identity).
+	 */
+	#makeCurrent(b: BridgeSession, inst: string | null): boolean {
+		if (inst === null) return false;
+		if (inst === b.inst) return true;
+		if (b.hellos.has(inst)) return false;
+		if (b.inst !== null) {
+			this.#log.info(`RESTART ${b.host}: mod instance ${quote(inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten, and any poll the old one left open is answered`);
+			b.tools = [];
+			this.commands.restarted(b.host, inst, "the mod restarted");
+		}
+		b.inst = inst;
+		b.hellos.add(inst);
+		// A mod that talked without a hello (#noHello) has said one: should that happen again, its first line goes at info.
+		this.#noHellos.forget(b.host);
+		for (const old of b.hellos) {
+			if (b.hellos.size <= HELLOS_KEPT) break;
+			b.hellos.delete(old);
+		}
+		return true;
+	}
+
+	/**
+	 * Runs `take` for a hook's request from a confirmed session: one the registry lists under the request's
+	 * `X-Deck-Host`, with a `sessionId` equal to its `session_id`. When the latest reading doesn't show that, the
+	 * registry is read once more first. A request still not confirmed gets no decision at once, and nothing else
+	 * comes of it: nothing held, no settings taken (PROTOCOL.md, Desktop sessions only). Returns a promise only
+	 * when it reads the registry again.
+	 */
+	#fromConfirmed(route: string, deckHost: string | undefined, sid: string | null, reply: PollReply, take: (host: string) => void): void | Promise<void> {
+		const host = asHost(deckHost);
+		if (host !== null && this.#listing(host, sid) === "this") {
+			take(host);
+			return;
+		}
+		// Without a host or a session id to look for, another reading can't confirm it.
+		if (host === null || sid === null || this.#rescan === null) {
+			this.#unconfirmed(route, host, sid, reply);
+			return;
+		}
+		return this.#readAgain().then(() => {
+			// The client may have gone while the registry was read: then there's nothing to answer or hold.
+			if (!reply.open) return;
+			if (this.#listing(host, sid) === "this") take(host);
+			else this.#unconfirmed(route, host, sid, reply);
+		});
+	}
+
+	/** A hook's request from a session the registry doesn't confirm: no decision, at once, logged quietly. */
+	#unconfirmed(route: string, host: string | null, sid: string | null, reply: PollReply): void {
+		reply.send(200, JSON.stringify(NO_DECISION));
+		const [reason, why] =
+			host === null
+				? ["no host", "no X-Deck-Host that's an app id"]
+				: sid === null
+					? ["no session id", "no session_id"]
+					: this.#listing(host, sid) === "other"
+						? ["another session", "the registry lists that host under another session id"]
+						: ["not listed", "the registry doesn't list that host"];
+		this.#refusals.note(`${route} ${reason}`, `UNCONFIRMED ${route} from ${host ?? "no host"} sid ${quote(sid, 40)}: ${why}, so no decision`);
+	}
+
+	/** How the registry's latest reading lists `host`: with `sid`, with other session ids only, or not at all. */
+	#listing(host: string, sid: string | null): Listing {
+		const sids = this.#listed.get(host);
+		if (!sids || sids.size === 0) return "none";
+		return sid !== null && sids.has(sid) ? "this" : "other";
+	}
+
+	/** Reads the registry once more, through `rescan`; a failure leaves the latest reading as it is. */
+	async #readAgain(): Promise<void> {
+		if (this.#rescan === null) return;
+		try {
+			await this.#rescan();
+		} catch (err) {
+			this.#log.warn(`reading the registry again failed: ${describeError(err)}`);
+		}
+	}
+
+	/**
+	 * A PermissionRequest from a confirmed session. Its settings are the session's. Kind mode, the deck's own mode
+	 * change in flight, is allowed at once, once per command; anything else is held (PROTOCOL.md, Permission
+	 * requests).
+	 */
+	#takePermission(p: PermissionRequest, host: string, at: number, reply: PollReply): void {
+		const b = this.#bridgeFor(host);
+		if (p.mode) b.settings.mode = p.mode;
+		if (p.effort) b.settings.effort = p.effort;
+		// Kind mode: the deck's own mode change, in flight, raised this. One of the two answers the bridge gives
+		// without a key press, along with the mode check's allow; a key press started both.
+		if (p.tool === MODE_TOOL && isObj(p.input) && p.input.session_id === "self") {
+			const cmd = this.commands.inFlightMode(host, p.input.mode, "permission");
+			if (cmd) {
+				cmd.allowed.permission = true;
+				reply.send(200, JSON.stringify(ALLOW_DECISION));
+				this.#log.info(`ALLOWED the mode change to ${quote(String(p.input.mode), 20)} for ${host}: the deck's own command ${cmd.id}`);
+				this.#emit();
+				return;
+			}
+		}
+		const held = this.held.hold(
+			{ at, host, tool: p.tool, kind: ASK_TOOLS.has(p.tool) ? "ask" : "tool", summary: summary(p.tool, p.input), fp: fingerprintOrNull(p.tool, p.input) },
+			reply,
+		);
+		reply.onClose(() => this.held.close(held.id));
+	}
+
+	/**
+	 * A mode check from a confirmed session: the allow for the first check of the deck's own mode change in flight
+	 * for that mode, counted apart from kind mode's PermissionRequest; no decision for anything else (PROTOCOL.md,
+	 * Mode checks).
+	 */
+	#checkMode(p: HookRequest, host: string, reply: PollReply): void {
+		const self = p.tool === MODE_TOOL && isObj(p.input) && p.input.session_id === "self";
+		const mode = self && isObj(p.input) ? p.input.mode : undefined;
+		const cmd = self ? this.commands.inFlightMode(host, mode, "pretool") : null;
+		if (!cmd) {
+			reply.send(200, JSON.stringify(NO_DECISION));
+			const why = self ? `no mode command in flight for ${typeof mode === "string" ? quote(mode, 20) : "that mode"} that hasn't had its check allowed` : `${quote(p.tool, 60)} isn't the app's mode tool for the session itself`;
+			this.#log.debug(`PRETOOL ${host}: no decision: ${why}`);
+			return;
+		}
+		cmd.allowed.pretool = true;
+		reply.send(200, JSON.stringify(PRETOOL_ALLOW));
+		this.#log.info(`ALLOWED the mode check for the change to ${quote(String(mode), 20)} for ${host}: the deck's own command ${cmd.id}`);
 	}
 
 	#bridgeFor(host: string): BridgeSession {
@@ -575,9 +799,9 @@ export class SessionModel implements BridgeRoutes {
 				host,
 				sids: new Set(),
 				inst: null,
-				insts: new Set(),
+				hellos: new Set(),
+				noHelloFrom: null,
 				lastSeq: new Map(),
-				mod: false,
 				cwd: null,
 				settings: { model: null, mode: null, effort: null },
 				turn: null,
@@ -591,7 +815,7 @@ export class SessionModel implements BridgeRoutes {
 		return b;
 	}
 
-	/** The registry's host for a Claude Code session id, else the one a mod request or PermissionRequest named with it. */
+	/** The registry's host for a Claude Code session id, else the one a mod request named with it. */
 	#hostForSid(sid: string | null): string | null {
 		if (sid === null) return null;
 		for (const s of this.#ordered) if (s.sessionId === sid) return asHost(s.hostSessionId);
@@ -631,7 +855,7 @@ export class SessionModel implements BridgeRoutes {
 			model: b?.settings.model ?? rec?.model ?? null,
 			effort: b?.settings.effort ?? rec?.effort ?? null,
 			mode: b?.settings.mode ?? rec?.permissionMode ?? null,
-			plugin: b?.mod ?? false,
+			plugin: (b?.inst ?? null) !== null,
 			listed: true,
 		};
 	}

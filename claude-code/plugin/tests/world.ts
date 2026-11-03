@@ -12,6 +12,16 @@ export const MODEL = 'claude-haiku-5-5'
 export const BRIDGE = 'http://127.0.0.1:47600'
 export const START = { cwd: '/sandbox', surface: null, isInteractive: false } as const
 
+/**
+ * A desktop session of its own, as the app starts one (PROTOCOL.md, "Desktop sessions only"): its entrypoint, its
+ * host id and the token, with CLAUDECODE, CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_TAGS unset.
+ */
+export const DESKTOP_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_ENTRYPOINT: 'claude-desktop',
+  CLAUDE_CODE_HOST_SESSION_ID: HOST,
+  DECK_TOKEN: TOKEN,
+}
+
 /** A request the mod sent: what the bridge would see, and the mock clock's time it came at. */
 export type Sent = {
   method: string
@@ -32,8 +42,10 @@ export type Reply = { status: number; body?: unknown }
 export type Mode = 'up' | 'down' | 'hang'
 
 export type WorldOptions = {
-  /** The environment `$.env.get` reads; by default the token and the host id. */
-  env?: Record<string, string>
+  /** The environment `$.env.get` reads; one not listed is unset. By default DESKTOP_ENV. */
+  env?: Readonly<Record<string, string>>
+  /** Variables whose `$.env.get` the engine refuses, as a plugin above or a host rule might. */
+  unreadable?: readonly string[]
   mode?: Mode
   /** Answers `$.prompt.submit`: a drop reason refuses it; by default the prompt enters. */
   submit?: (text: string) => string | undefined
@@ -76,7 +88,13 @@ export function world(on: On, o: WorldOptions = {}) {
   }
 
   const clock = mock.clock(on)
-  mock.env(on, o.env ?? { DECK_TOKEN: TOKEN, CLAUDE_CODE_HOST_SESSION_ID: HOST })
+  // mock.env answers from a set of variables, but can't refuse a read, so the world answers `$.env.get` itself.
+  const env = o.env ?? DESKTOP_ENV
+  const unreadable = new Set(o.unreadable ?? [])
+  on('env.get', (_$, e) => {
+    if (unreadable.has(e.name)) return { deny: `${e.name} can't be read here` }
+    return { value: Object.hasOwn(env, e.name) ? env[e.name] : undefined }
+  })
   on('session.id', () => ({ value: session.sid }))
   on('session.model', () => (session.model === undefined ? { deny: "the model can't be read" } : { value: session.model }))
   on('session.cwd', () => ({ value: '/sandbox' }))

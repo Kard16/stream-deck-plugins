@@ -1,0 +1,10 @@
+{"note":"Only a hello makes an instance current. A poll from an instance that never said hello to this deck, like a replaced instance's late request after a deck restart, is answered at once and takes no commands. The current instance keeps its poll and gets the command. No mod lines: the plugin side skips this fixture."}
+{"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
+{"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"0.1.0","cc":"2.1.309"}}}
+{"reply":{"to":"h","status":200,"body":{"v":1,"ok":true}}}
+{"plugin":{"as":"n1","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"plugin":{"as":"x1","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=istale&wait=20"}}
+{"reply":{"to":"x1","status":200,"body":{"cmds":[]}}}
+{"press":{"prompt":{"session":"local_test-a","text":"Say hello."}}}
+{"reply":{"to":"n1","status":200,"body":{"cmds":[{"id":"c1","t":"prompt","text":"Say hello."}]}}}
+{"expect":{"cmds":{"c1":"delivered"}}}

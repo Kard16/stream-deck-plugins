@@ -139,15 +139,16 @@ const B = { sid: '3fa86955-0000-4000-8000-00000000000b', host: 'local_test-b', i
 const ALLOW = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
 const DENY = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Denied from the Stream Deck.', interrupt: true } } }
 const MODE_TOOL = 'mcp__ccd_session_mgmt__set_session_permission_mode'
+const PRE_ALLOW = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'The mode change pressed on the Stream Deck.' } }
 
 const note = (text) => ({ note: text })
 
-function setup(sessions = [A], status = {}) {
+function setup(sessions = [A], status = {}, modes = {}) {
   return {
     setup: {
       session: { sid: A.sid, host: A.host, model: MODEL, cwd: CWD, token: 'fixture-token' },
       registry: sessions.map((s) => ({ pid: s.pid, sessionId: s.sid, hostSessionId: s.host, name: s.name, cwd: CWD, status: status[s.host] ?? 'idle', statusUpdatedAt: T0 })),
-      records: Object.fromEntries(sessions.map((s) => [s.host, { model: MODEL, effort: 'low', permissionMode: 'default', lastFocusedAt: T0 }])),
+      records: Object.fromEntries(sessions.map((s) => [s.host, { model: MODEL, effort: 'low', permissionMode: modes[s.host] ?? 'default', lastFocusedAt: T0 }])),
     },
   }
 }
@@ -182,6 +183,29 @@ function session(S) {
           permission_mode: 'default',
           effort: { level: 'low' },
           prompt_id: 'prompt-1',
+          ...extra,
+        },
+      },
+    }),
+    /** The mode hook's PreToolUse, as Claude Code 2.1.309 sent it for the mod's call in the Auto spike (2026-11-03). */
+    pretool: (as, tool, input, extra = {}) => ({
+      plugin: {
+        as,
+        method: 'POST',
+        path: '/v1/pretool',
+        headers: { 'X-Deck-Host': S.host },
+        body: {
+          session_id: S.sid,
+          transcript_path: `/Users/me/.claude/projects/-Users-me-sandbox/${S.sid}.jsonl`,
+          cwd: CWD,
+          prompt_id: 'prompt-1',
+          permission_mode: 'default',
+          effort: { level: 'low' },
+          hook_event_name: 'PreToolUse',
+          tool_name: tool,
+          tool_input: input,
+          tool_use_id: 'toolu_plugin_0001',
+          mcp_server: { name: 'ccd_session_mgmt', source: 'sdk' },
           ...extra,
         },
       },
@@ -437,12 +461,14 @@ const fixtures = {}
   const input = { session_id: 'self', mode: 'acceptEdits' }
   const text = 'This session now runs in Accept edits mode (acceptEdits), from Manual ("default") to Accept edits (acceptEdits). It applies to the rest of this turn and every turn after it.'
   fixtures['mode-raise'] = [
-    note("One press raises the session to Accept edits. The mod calls the app's mode tool, the app raises a PermissionRequest for it, and the bridge allows that at once because the change is in flight (the user's answer after S4)."),
+    note("One press raises the session to Accept edits. The mod calls the app's mode tool. The mode hook asks first, and the bridge allows the change because it is in flight. The raise then brings up the app's PermissionRequest, which the bridge allows too (the user's answer after S4; the Auto spike, 2026-11-03)."),
     setup(),
     ...a.hello(),
     { press: { mode: { session: A.host, mode: 'acceptEdits' } } },
     reply('n1', { cmds: [{ id: 'c1', t: 'mode', mode: 'acceptEdits' }] }),
     { engine: { call: 'mcp.call', args: { server: 'ccd_session_mgmt', tool: 'set_session_permission_mode', args: input }, returns: { content: [{ type: 'text', text }], isError: false } } },
+    a.pretool('q1', MODE_TOOL, input),
+    reply('q1', PRE_ALLOW),
     a.permission('p1', MODE_TOOL, input, { mcp_server: 'ccd_session_mgmt' }),
     reply('p1', ALLOW),
     { expect: { held: [] } },
@@ -457,14 +483,86 @@ const fixtures = {}
   const a = session(A)
   const input = { session_id: 'self', mode: 'acceptEdits' }
   fixtures['mode-not-ours'] = [
-    note("A PermissionRequest for the app's mode tool with no mode command in flight, as when Claude calls the tool itself, is an ordinary tool request: held, and never allowed by the bridge on its own. No mod lines: the plugin side skips this fixture."),
+    note("A call to the app's mode tool with no mode command in flight, as when Claude calls the tool itself. Its mode check gets no decision, and its PermissionRequest is an ordinary tool request: held, and never allowed by the bridge on its own. No mod lines: the plugin side skips this fixture."),
     setup([A], { [A.host]: 'busy' }),
+    a.pretool('q1', MODE_TOOL, input),
+    reply('q1', {}),
     a.permission('p1', MODE_TOOL, input, { mcp_server: 'ccd_session_mgmt' }),
     a.registry({ status: 'waiting', statusUpdatedAt: T0 + 1000 }),
     { expect: { held: [held(A, MODE_TOOL, input)], status: { [A.host]: 'approval' } } },
     { press: { deny: {} } },
     reply('p1', DENY),
     { expect: { held: [] } },
+  ]
+}
+
+{
+  const a = session(A)
+  const input = { session_id: 'self', mode: 'default' }
+  const text = 'This session now runs in Manual mode (default), from Auto ("auto") to Manual (default). It applies to the rest of this turn and every turn after it.'
+  const auto = { permission_mode: 'auto' }
+  fixtures['mode-from-auto'] = [
+    note("One press takes a session in Auto to Manual. Before the app's mode tool runs, the mode hook asks the bridge, which allows the change because it is in flight, so the auto-mode classifier never judges it (the Auto spike, 2026-11-03). A change that doesn't raise brings no PermissionRequest. A check for another mode, a second check for the same command, and one after the command finished all get no decision."),
+    setup([A], {}, { [A.host]: 'auto' }),
+    ...a.hello(),
+    { expect: { settings: { [A.host]: { mode: 'auto' } } } },
+    { press: { mode: { session: A.host, mode: 'default' } } },
+    reply('n1', { cmds: [{ id: 'c1', t: 'mode', mode: 'default' }] }),
+    a.pretool('q1', MODE_TOOL, { session_id: 'self', mode: 'acceptEdits' }, auto),
+    reply('q1', {}),
+    { engine: { call: 'mcp.call', args: { server: 'ccd_session_mgmt', tool: 'set_session_permission_mode', args: input }, returns: { content: [{ type: 'text', text }], isError: false } } },
+    a.pretool('q2', MODE_TOOL, input, auto),
+    reply('q2', PRE_ALLOW),
+    a.pretool('q3', MODE_TOOL, input, auto),
+    reply('q3', {}),
+    { expect: { held: [] } },
+    a.next('n2'),
+    a.result('c1', 'done', { detail: '*' }),
+    a.ev({ t: 'settings', mode: 'default' }),
+    { expect: { cmds: { c1: 'done' }, settings: { [A.host]: { mode: 'default' } } } },
+    a.pretool('q4', MODE_TOOL, input),
+    reply('q4', {}),
+  ]
+}
+
+{
+  const a = session(A)
+  const stale = 'istale'
+  fixtures['stray-instance'] = [
+    note("Only a hello makes an instance current. A poll from an instance that never said hello to this deck, like a replaced instance's late request after a deck restart, is answered at once and takes no commands. The current instance keeps its poll and gets the command. No mod lines: the plugin side skips this fixture."),
+    setup(),
+    { plugin: { as: 'h', method: 'POST', path: '/v1/hello', body: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: CWD, model: MODEL, plugin: '0.1.0', cc: '2.1.309' } } },
+    reply('h', { v: 1, ok: true }),
+    a.next('n1'),
+    { plugin: { as: 'x1', method: 'GET', path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${stale}&wait=20` } },
+    reply('x1', { cmds: [] }),
+    { press: { prompt: { session: A.host, text: 'Say hello.' } } },
+    reply('n1', { cmds: [{ id: 'c1', t: 'prompt', text: 'Say hello.' }] }),
+    { expect: { cmds: { c1: 'delivered' } } },
+  ]
+}
+
+{
+  const a = session(A)
+  const child = '3fa86955-0000-4000-8000-0000000000c1'
+  const spare = { sid: '3fa86955-0000-4000-8000-0000000000d1', host: 'local_test-spare' }
+  const write = { file_path: `${CWD}/s9.txt`, content: 'nine' }
+  const hello = (as, sid, host, inst) => ({ plugin: { as, method: 'POST', path: '/v1/hello', body: { v: 1, sid, host, inst, cwd: CWD, model: MODEL, plugin: '0.2.0', cc: '2.1.309' } } })
+  fixtures['not-desktop'] = [
+    note("Claude Code processes that aren't a desktop session of their own get nothing from the bridge (the route research, 2026-11-03). A terminal session's PermissionRequest has no host. A claude started inside session A sends A's host with its own session id, in a PermissionRequest and in a mode check. Each gets no decision at once, and nothing is held. A hello under A's host with another session id is refused. A hello for a host the registry doesn't list yet, as from the app's pre-warmed spare, is taken, and the deck doesn't list that session until the registry does. No mod lines: the plugin side skips this fixture."),
+    setup(),
+    { plugin: { ...a.permission('p1', 'Write', write, { session_id: '3fa86955-0000-4000-8000-0000000000e1' }).plugin, headers: { 'X-Deck-Host': null } } },
+    reply('p1', {}),
+    a.permission('p2', 'Write', write, { session_id: child }),
+    reply('p2', {}),
+    a.pretool('q1', MODE_TOOL, { session_id: 'self', mode: 'default' }, { session_id: child }),
+    reply('q1', {}),
+    { expect: { held: [] } },
+    hello('h1', child, A.host, 'ichild'),
+    reply('h1', { error: '*' }, 409),
+    hello('h2', spare.sid, spare.host, 'ispare'),
+    reply('h2', { v: 1, ok: true }),
+    { expect: { sessions: [A.host] } },
   ]
 }
 

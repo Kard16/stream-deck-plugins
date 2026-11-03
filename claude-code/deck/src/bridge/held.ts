@@ -15,15 +15,17 @@ export interface Responder {
  */
 export type HeldKind = "tool" | "ask";
 
-/** A PermissionRequest the bridge holds until a press answers it or a release rule lets it go. */
+/**
+ * A PermissionRequest the bridge holds until a press answers it or a release rule lets it go. Only a request from
+ * a session the registry confirms is held (PROTOCOL.md, Desktop sessions only), so each has its session's host.
+ */
 export type Held = {
 	/** 1, 2, 3… in arrival order: for the log, and for knowing which request a key showed. */
 	readonly id: number;
 	/** Wall-clock ms when it arrived, compared with the registry's `statusUpdatedAt` (release rules 2 and 3). */
 	readonly at: number;
-	/** The app's `local_…` id, from `X-Deck-Host` or the registry; null until the registry knows the sid. */
-	host: string | null;
-	readonly sid: string | null;
+	/** The app's `local_…` id, from `X-Deck-Host`, which the registry lists with the request's `session_id`. */
+	readonly host: string;
 	readonly tool: string;
 	readonly kind: HeldKind;
 	readonly summary: string;
@@ -85,17 +87,9 @@ export class HeldRequests {
 		const held: Held = { ...req, id: this.#nextId++ };
 		this.#entries.push({ held, responder });
 		// The fp is logged so ladder step 4 can compare it with the mod's for the same call (PROTOCOL.md).
-		this.#log.info(`HELD #${held.id} ${held.kind} ${quote(held.tool, 60)} ${quote(held.summary, 40)} fp ${held.fp ?? "none"} from ${held.host ?? `sid ${quote(held.sid, 40)}`}; ${this.size} held`);
+		this.#log.info(`HELD #${held.id} ${held.kind} ${quote(held.tool, 60)} ${quote(held.summary, 40)} fp ${held.fp ?? "none"} from ${held.host}; ${this.size} held`);
 		this.#emit();
 		return held;
-	}
-
-	/** The registry now knows the session of a request that came without a usable host. */
-	setHost(id: number, host: string): void {
-		const entry = this.#entries.find((e) => e.held.id === id);
-		if (!entry || entry.held.host === host) return;
-		entry.held.host = host;
-		this.#emit();
 	}
 
 	/** Release rule 5: the client of request `id` went away (the hook's timeout, or the session ended). */

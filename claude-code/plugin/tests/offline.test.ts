@@ -8,19 +8,7 @@ import { HOST, MODEL, START, TOKEN, world } from './world'
 
 const READ = { tool: 'Read', tool_use_id: 'u1', file_path: '/sandbox/notes.md' } as const
 
-test("without DECK_TOKEN the mod sends nothing, says so once in the log, and passes every hook through", async ($, on) => {
-  const w = world(on, { env: { CLAUDE_CODE_HOST_SESSION_ID: HOST } })
-  await $.session.start(START)
-  await w.settle()
-  await $.turn.start({ text: 'go', turnId: 't1' })
-  expect(await $.tool.call(READ)).toEqual({ result: 'ran' })
-  await $.classic.Stop({ stop_hook_active: false, permission_mode: 'default', effort: { level: 'low' } })
-  await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
-  await w.clock.advance(120_000)
-  expect(w.sent).toEqual([])
-  expect(w.logs).toHaveLength(1)
-  expect(w.logs[0]).toMatch(/DECK_TOKEN/)
-})
+// Without DECK_TOKEN the mod never talks at all: desktop.test.ts, with the gate's other tests.
 
 test("with the bridge down from the start, the first hello's refusal has a quick hello 100 ms later, whose refusal begins the outage: hello backs off 1, 2, 5, 10 and 30 s, then every 30 s, and logs once; the hello answered at last ends that outage", async ($, on) => {
   const w = world(on, { mode: 'down' })

@@ -4,11 +4,12 @@ The wire protocol between the Claude Code plugin `streamdeck-bridge` (`claude-co
 
 Changes go through the main thread. A change that breaks either side bumps `v`.
 
-Contents: [Parties](#parties) · [Transport](#transport) · [Identity](#identity) · [Routes](#routes) · [Permission requests](#permission-requests) · [Held requests](#held-requests) · [Commands](#commands) · [Events](#events) · [Fingerprints and summaries](#fingerprints-and-summaries) · [The deck's session model](#the-decks-session-model) · [Failure and recovery](#failure-and-recovery) · [Rates](#rates) · [The plugin's hooks.json](#the-plugins-hooksjson) · [Fixtures](#fixtures) · [Amendments](#amendments)
+Contents: [Parties](#parties) · [Transport](#transport) · [Identity](#identity) · [Desktop sessions only](#desktop-sessions-only) · [Routes](#routes) · [Permission requests](#permission-requests) · [Mode checks](#mode-checks) · [Held requests](#held-requests) · [Commands](#commands) · [Events](#events) · [Fingerprints and summaries](#fingerprints-and-summaries) · [The deck's session model](#the-decks-session-model) · [Failure and recovery](#failure-and-recovery) · [Rates](#rates) · [The plugin's hooks.json](#the-plugins-hooksjson) · [Fixtures](#fixtures) · [Amendments](#amendments)
 
 ## Parties
 
 - **The permission hook:** an `http` PermissionRequest hook in the plugin's `hooks/hooks.json`. Claude Code posts the hook's input and waits for the answer, while the app shows its own dialog beside it. The first answer wins (S2).
+- **The mode hook:** an `http` PreToolUse hook in the same `hooks/hooks.json`, matched to the app's mode tool alone. Claude Code posts the hook's input before the tool's permission check, the auto-mode classifier included, and waits for the answer ([Mode checks](#mode-checks)).
 - **The mod:** the plugin's `hooks/register.ts`, one instance per session, on the mods API of the app's Claude Code 2.1.309. It says hello, reports events, and fetches and runs the deck's commands.
 - **The bridge:** the HTTP server inside the deck plugin.
 - **The deck:** the rest of the deck plugin. It merges what the bridge hears with the session registry and the app's session records ([The deck's session model](#the-decks-session-model)).
@@ -21,23 +22,51 @@ Nothing else talks to the bridge, and the bridge never calls the plugin.
 - Every request carries:
   - `Host: 127.0.0.1:47600` or `localhost:47600`. Anything else gets 403, before the token is looked at. That stops a web page that rebinds a DNS name to 127.0.0.1.
   - `Authorization: Bearer <token>`. Missing or wrong: 401, with `WWW-Authenticate: Bearer realm="streamdeck"`.
-- **The token** is the trimmed content of the deck plugin's `com.karimdhanji.claude.sdPlugin/run/token`, which the deck creates on first start (file `0600`, folder `0700`). The plugin reads it from the environment variable `DECK_TOKEN`: the `deck-sandbox` preset sets it during development, and Phase 5 decides how the user's own sessions get it. Neither side ever logs it.
+- **The token** is the trimmed content of the deck plugin's `com.karimdhanji.claude.sdPlugin/run/token`, which the deck creates on first start (file `0600`, folder `0700`). The plugin reads it from the environment variable `DECK_TOKEN`. The `deck-sandbox` preset sets it for throwaway sessions, and the `env` block of `~/.claude/settings.json` sets it for the user's own (Phase 5). In a desktop session the launch environment wins key by key, so a preset's value beats the settings' (the route research, 2026-11-03). Neither side ever logs it.
 - Bodies are JSON in UTF-8, at most 8 MiB (413 above). A body that isn't JSON gets 400, an unknown route 404, a wrong method 405. Error answers are `{"error": "<reason>"}`.
-- Unknown fields are ignored on both sides, so either side can add fields without a version bump. Answers to `/v1/permission` are the exception: Claude Code reads them, and a 2xx answer is exactly one of the bodies in [Permission requests](#permission-requests). Any other status carries `{"error": "<reason>"}`, like every error answer.
+- Unknown fields are ignored on both sides, so either side can add fields without a version bump. Answers to `/v1/permission` and `/v1/pretool` are the exception: Claude Code reads them, and a 2xx answer is exactly one of the bodies in [Permission requests](#permission-requests) or [Mode checks](#mode-checks). Any other status carries `{"error": "<reason>"}`, like every error answer.
 - No CORS headers.
 
 ## Identity
 
 - **`sid`:** Claude Code's session id, a UUID. The mod reads it with `$.session.id()`; the hook's body has it as `session_id`. It can change during a session's life (the app's records keep `priorCliSessionIds`), so the deck doesn't key on it.
-- **`host`:** the app's `local_…` id, fixed for the session's life, and what the jump link `claude://code/continue?session=<host>` takes (S5). The mod reads `CLAUDE_CODE_HOST_SESSION_ID` with `$.env.get`; the hook sends it in the header `X-Deck-Host`. A value that doesn't match `^local_[A-Za-z0-9-]{1,64}$` counts as missing, such as an empty one or a `$CLAUDE_CODE_HOST_SESSION_ID` that Claude Code didn't fill in. The bridge then looks `sid` up in the registry, and then among the `sid` and `host` pairs it has seen from mods and hooks. A mod request it still can't place gets 400; a PermissionRequest is held without a host.
-- **`inst`:** a random id the mod picks each time it loads, hot reloads included. A new `inst` for the same `host` means the mod restarted. The deck then forgets that session's current tool and fails its `delivered` and `waiting` commands with "the mod restarted". It keeps the rest, queued commands included. If the old instance left a poll open, the deck answers it with `{"cmds": []}`, so commands queued from then on wait for the new instance. An `inst` the deck has already seen for that `host` doesn't count again, and its events and results are still taken. Its polls are answered at once with `{"cmds": []}`: they never displace the newest instance's poll and never receive commands. The deck keeps at least the last 8 per `host`.
+- **`host`:** the app's `local_…` id, fixed for the session's life, and what the jump link `claude://code/continue?session=<host>` takes (S5). The mod reads `CLAUDE_CODE_HOST_SESSION_ID` with `$.env.get`; the hook sends it in the header `X-Deck-Host`. A value that doesn't match `^local_[A-Za-z0-9-]{1,64}$` counts as missing, such as an empty one or a `$CLAUDE_CODE_HOST_SESSION_ID` that Claude Code didn't fill in. For a mod's request, the bridge then looks `sid` up in the registry, and then among the `sid` and `host` pairs it has seen from mods. A mod request it still can't place gets 400. The hooks' requests are placed only as [Desktop sessions only](#desktop-sessions-only) says.
+- **`inst`:** a random id the mod picks each time it loads, hot reloads included. **Only a hello makes an `inst` the session's current one.**
+  - **A hello from an `inst` the deck hasn't had a hello from for that `host`** means the mod restarted. The deck then forgets that session's current tool and fails its `delivered` and `waiting` commands with "the mod restarted". It keeps the rest, queued commands included. If the old instance left a poll open, the deck answers it with `{"cmds": []}`, so commands queued from then on wait for the new instance.
+  - **Any other `inst` doesn't count:** one the deck has had a hello from before, or one that hasn't said hello to this deck. Its events and results are still taken. Its polls are answered at once with `{"cmds": []}`: they never displace the current instance's poll and never receive commands.
+  - The deck remembers at least the last 8 `inst`s per `host` that said hello.
+  - **Why:** a live mod says hello before anything else to a deck it hasn't talked to ([Routes](#routes)). Before 2026-11-03 any new `inst` counted. So after a deck restart, a replaced instance's late request could become the newest instance, and the live instance's polls were then answered at once for good (round 4's review).
 - The deck keys sessions by `host`.
+
+## Desktop sessions only
+
+From Phase 5 the plugin is in `~/.claude/settings.json`, so every Claude Code process on this Mac that reads it loads the plugin (the route research, 2026-11-03):
+- **Terminal and VS Code sessions, and `claude -p` runs,** with no host id.
+- **A `claude` started inside a desktop session,** by its Bash tool, a hook or a script. It inherits the session's `CLAUDE_CODE_ENTRYPOINT` and host id, with `CLAUDECODE` and `CLAUDE_CODE_CHILD_SESSION` set to `1`.
+- **The side chats and recaps the app forks from a preset session.** They carry its host id and a `CLAUDE_CODE_TAGS`. Forks of the user's own sessions read no settings.
+- **The app's pre-warmed spare processes.** They run the mod with the host id of the session they'll become, before one is claimed.
+
+Only a desktop session of its own talks to the bridge.
+
+- **The mod says nothing at all to the bridge, and logs that once,** unless all of these hold:
+  - `CLAUDE_CODE_ENTRYPOINT` is `claude-desktop` or `claude-desktop-3p`;
+  - `CLAUDE_CODE_HOST_SESSION_ID` matches the host pattern;
+  - `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_TAGS` are unset or empty;
+  - `DECK_TOKEN` is set.
+
+  That's the engine's own test for trusting a host id (`dp()` and `_M()` in 2.1.309), plus the forks' tags. A spare passes it: its mod talks as the session it will become, and the deck lists that session once the registry does.
+- **The bridge takes a PermissionRequest or a mode check only from a confirmed session.** Hooks can't be gated: `hooks.json` has no condition on the environment, and a hook's process always has `CLAUDECODE` set.
+  - A confirmed session is one the registry lists under the request's `X-Deck-Host`, with a `sessionId` equal to the request's `session_id`.
+  - If the deck's latest reading doesn't show that, it reads the registry once more.
+  - A request still not confirmed gets `{}` at once, and nothing is held. The process's own permission flow decides.
+- **A hello from a host the registry lists under another `sessionId` is refused,** with 409 `{"error": "not this session"}`. A hello from a host the registry doesn't list yet, as from a spare, is taken, and the deck lists that session once the registry does.
 
 ## Routes
 
 | Route | From | Does | Answer |
 |---|---|---|---|
 | `POST /v1/permission` | the hook | holds a PermissionRequest | 200, a decision or `{}` |
+| `POST /v1/pretool` | the mode hook | checks a mode change, at once | 200, an allow or `{}` |
 | `POST /v1/hello` | the mod | announces the mod | 200 `{"v": 1, "ok": true}` |
 | `POST /v1/events` | the mod | reports events | 204 |
 | `GET /v1/next` | the mod | fetches commands, long poll | 200 `{"cmds": [...]}` |
@@ -52,7 +81,7 @@ Every mod request names its session with `sid`, `host` and `inst`: in the body, 
 `POST /v1/permission`: the body is the hook's input as Claude Code sends it. The bridge reads `session_id`, `tool_name`, `tool_input`, `permission_mode` and `effort`, and the header `X-Deck-Host`. There's no `tool_use_id` in it (S2).
 
 The bridge sorts each request into one kind:
-- **mode:** `tool_name` is `mcp__ccd_session_mgmt__set_session_permission_mode`, `tool_input.session_id` is `"self"`, and the same session has a `mode` command in flight ([Commands](#commands)) whose `mode` equals `tool_input.mode`. The bridge answers Allow at once, to the first such request only: a second one for the same command is an ordinary `tool` request. It's the only answer the bridge gives without a key press, and a key press started it (the user's answer after S4).
+- **mode:** `tool_name` is `mcp__ccd_session_mgmt__set_session_permission_mode`, `tool_input.session_id` is `"self"`, and the same session has a `mode` command in flight ([Commands](#commands)) whose `mode` equals `tool_input.mode`. The bridge answers Allow at once, to the first such request only: a second one for the same command is an ordinary `tool` request. Along with the mode check's allow ([Mode checks](#mode-checks)), it's the only answer the bridge gives without a key press, and a key press started both (the user's answer after S4).
 - **ask:** `tool_name` is `AskUserQuestion` or `ExitPlanMode`. Held for display only: the deck never answers it, and a press on it jumps to the session (kickoff answer 3).
 - **tool:** everything else, the app's mode tool included when no matching command is in flight. Held until Approve or Deny, or released ([Held requests](#held-requests)).
 
@@ -62,6 +91,23 @@ Answers, all 200:
 - **No decision:** `{}`. The app's dialog decides.
 
 Every answer is exactly one of these three bodies. The deck never sends `updatedPermissions` or `updatedInput`, never adds a field inside `hookSpecificOutput`, and never sends Claude Code's own top-level hook fields (`continue`, `stopReason`, `decision`, `reason`, `systemMessage`, `suppressOutput`).
+
+## Mode checks
+
+`POST /v1/pretool`: the body is the mode hook's input as Claude Code sends it, a PreToolUse for the app's mode tool alone ([The plugin's hooks.json](#the-plugins-hooksjson)). The bridge reads `tool_name` and `tool_input`, and the header `X-Deck-Host`. It answers at once and never holds the request.
+
+Answers, both 200:
+- **Allow**, when `tool_name` is `mcp__ccd_session_mgmt__set_session_permission_mode`, `tool_input.session_id` is `"self"`, and the session `X-Deck-Host` names has a `mode` command in flight ([Commands](#commands)) whose `mode` equals `tool_input.mode`. Only the first such request per command gets it, as with kind mode:
+  `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "The mode change pressed on the Stream Deck."}}`
+- **No decision**, otherwise: `{}`. That includes a request whose `X-Deck-Host` is missing or doesn't match the host pattern ([Identity](#identity)). The session's own permission check then decides, the auto-mode classifier included.
+
+Every 2xx answer is exactly one of these two bodies. The bridge never denies or asks here.
+
+**Why:**
+- In Auto, Claude Code judges the mod's call to the mode tool as it judges a call of Claude's own, with the server-side auto-mode classifier. A mod's call has none of the model's verdicts to go on. In Phase 4 the call was refused in 14 ms. On 2026-11-03 it went unanswered for minutes (T3).
+- A PreToolUse allow skips that check. In T4, the change from Auto to Manual was `done` in 31 ms, and no PermissionRequest came.
+- The user pressed for the change, and that press is what the classifier stands in for.
+- A raise still brings up the app's own approval as a PermissionRequest, which kind mode allows ([Permission requests](#permission-requests)).
 
 ## Held requests
 
@@ -91,12 +137,15 @@ The deck queues commands for a session when the user presses a key. The mod fetc
 - One open poll per session: a new poll answers any older one from the same session with `{"cmds": []}` at once.
 - A command is `queued`, then `delivered` once a poll has answered it, then `waiting` (prompts only), then `done`, `refused` or `failed`.
 - A queued command that no poll has taken 60 s after it was queued counts as `failed`, with "not delivered": the session's mod isn't polling.
-- A delivered command with no result 60 s after delivery counts as `failed`, with "no result". A prompt's `waiting` stops that clock, since the engine holds the prompt until the turn ends (S3). A waiting prompt then ends with its final result, a new `inst`, or the session's end. It also fails, with "no result", once its mod's newest instance has gone 60 s with no poll open and none sent. A live mod always keeps one open; a poll answered at once counts, but an older instance's doesn't. Mode commands keep the 60 s even after a stray `waiting`, which bounds how long the mode rule can allow a change.
+- A delivered command with no result 60 s after delivery counts as `failed`, with "no result". A prompt's `waiting` stops that clock, since the engine holds the prompt until the turn ends (S3). A waiting prompt then ends with its final result, a new `inst`, or the session's end. It also fails, with "no result", once its mod's current instance has gone 60 s with no poll open and none sent. A live mod always keeps one open; a poll answered at once counts, but one from an `inst` that doesn't count doesn't. Mode commands keep the 60 s even after a stray `waiting`, which bounds how long the mode rule can allow a change.
 - The mod polls again as soon as a poll answers. After an empty answer that came in under 1 s, or one whose commands it all skipped, it may first wait out that second, so a bridge answering at once can't drive a busy loop. After a failed poll it waits as in [Failure and recovery](#failure-and-recovery).
 
 **Command shapes.** `id` is a string the deck picks, unique within the bridge's run.
 - `{"id": "c1", "t": "prompt", "text": "..."}`: the mod calls `$.prompt.submit({text, asUser: true})`. The engine holds it until the session is idle (S3).
-- `{"id": "c2", "t": "mode", "mode": "acceptEdits"}`: the mod calls `$.mcp.call("ccd_session_mgmt", "set_session_permission_mode", {session_id: "self", mode})`. `mode` is `default` (the app's Manual), `acceptEdits`, `plan` or `auto`, never `bypassPermissions`. Every change raises a PermissionRequest for that tool, which the bridge allows as kind mode (S4). After `done`, the mod sends a `settings` event with the new mode.
+- `{"id": "c2", "t": "mode", "mode": "acceptEdits"}`: the mod calls `$.mcp.call("ccd_session_mgmt", "set_session_permission_mode", {session_id: "self", mode})`. `mode` is `default` (the app's Manual), `acceptEdits`, `plan` or `auto`, never `bypassPermissions`. After `done`, the mod sends a `settings` event with the new mode.
+  - **Before the call runs,** the mode hook asks the bridge, which allows it ([Mode checks](#mode-checks)).
+  - **A raise** then brings up the app's approval as a PermissionRequest, which the bridge allows as kind mode (S4). A change that doesn't raise brings none.
+  - **A session gets the mode hook only when it starts** ([The plugin's hooks.json](#the-plugins-hooksjson)). In a session started before its plugin had the hook, a change from Auto is refused or never answered. The deck then fails it after 60 s with "no result".
 
 There are no model or effort commands: the deck shows them and never changes them (the user's answer after S4).
 
@@ -235,14 +284,33 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__ccd_session_mgmt__set_session_permission_mode",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:47600/v1/pretool",
+            "timeout": 5,
+            "headers": {
+              "Authorization": "Bearer $DECK_TOKEN",
+              "X-Deck-Host": "$CLAUDE_CODE_HOST_SESSION_ID"
+            },
+            "allowedEnvVars": ["DECK_TOKEN", "CLAUDE_CODE_HOST_SESSION_ID"]
+          }
+        ]
+      }
     ]
   },
   "modules": ["./register.ts"]
 }
 ```
 
-- No `matcher`, so every tool's request comes.
-- No `onFailure`, so a failure is no decision.
+- **The permission hook has no `matcher`,** so every tool's request comes.
+- **The mode hook's `matcher` names the app's mode tool alone,** so no other tool call waits on the deck. Its timeout is 5 s. The bridge answers at once, and a bridge that's down is no decision.
+- **No `onFailure`** on either, so a failure is no decision.
+- **Claude Code reads these hooks when a session starts.** A hot reload runs the new mod, but it doesn't add hooks to a running session (ladder step 4; the Auto spike, 2026-11-03). A session gets a new hook from its next start.
 - Status comes from the mod, not from command hooks: one module per session instead of a process per event. In S1 the mod's events also arrived 5–25 ms before the async hooks'.
 
 ## Fixtures
@@ -263,8 +331,8 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 
 **The plugin side** (Track A's runner, with `claude plugin test` and a fake `$`):
 - It plays the session in `setup.session`. It skips fixtures without `mod` lines, and lines about other sessions.
-- It skips `press`, `registry` and `expect` lines, and `plugin` and `reply` lines for `/v1/permission`, which Claude Code sends, not the mod.
-- It answers `$.session.id()`, `.model()`, `.cwd()` and `$.env.get` from `setup.session`.
+- It skips `press`, `registry` and `expect` lines, and `plugin` and `reply` lines for `/v1/permission` and `/v1/pretool`, which Claude Code sends, not the mod.
+- It answers `$.session.id()`, `.model()`, `.cwd()` and `$.env.get` from `setup.session`. It plays a desktop session of its own: `CLAUDE_CODE_ENTRYPOINT` is `claude-desktop`, and `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_TAGS` are unset.
 - It answers the mod's `/v1/hello` with `{"v": 1, "ok": true}` and its events and results with 204, unless a `reply` line says otherwise. It answers a poll only from a `reply` line; with none, the poll stays open to the end.
 
 **The deck side** (Track B's runner, against the real bridge on an ephemeral port, with a fake registry folder and records folder):
@@ -281,7 +349,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 
 **Matching:**
 - Every field of an expected object must be present and equal; extra fields are allowed. `"*"` matches any value. Arrays match when they have the same length and each element matches, in order.
-- Answers to `/v1/permission` are checked more strictly. An expected `{}` means no decision, so the answer must have no `hookSpecificOutput`. Every 2xx answer, whatever the line expects, must be one of the three bodies in [Permission requests](#permission-requests). Any other status on any route must carry `{"error": "<reason>"}`, as [Transport](#transport) says.
+- Answers to `/v1/permission` and `/v1/pretool` are checked more strictly. An expected `{}` means no decision, so the answer must have no `hookSpecificOutput`. Every 2xx answer, whatever the line expects, must be one of the bodies its route allows: the three in [Permission requests](#permission-requests), or the two in [Mode checks](#mode-checks). Any other status on any route must carry `{"error": "<reason>"}`, as [Transport](#transport) says.
 - A `path` with a query matches when the route is equal and each listed parameter is present and equal; other parameters may be there too.
 - `at` is never compared. The plugin side binds the mod's real `inst` to the fixture's at its first appearance.
 - Command ids are `"c1"`, `"c2"`… The deck side binds the deck's real id to the fixture's name at its first appearance in a `reply`, and uses the real one from then on.
@@ -339,3 +407,23 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
    - Both reviewers found that a poll could still come before the deck's once-a-second reading said `busy`, after a short turn or a Deny, and be held for 20 s. So a reading that turns `busy` in that time answers the poll the deck holds.
    - This corrects the 2026-11-02 entry. The 8.2 s after an Esc came from the same poll, and the delay follows every turn, not only an interrupted one. Status rule 3 stays, for the second before the deck reads the registry again. (The deck's session model)
 2. The `status`, `approve` and `prompt-refused` fixtures answer `n1` at the `turn.end` and the next poll at once while the registry says `busy`. `deny` holds its next poll: its registry still says `waiting`. (Fixtures)
+
+**2026-11-03, Phase 5** (`v` stays 1: one route and one hook are added, and a side without them treats the other's as unknown, which is no decision):
+1. **The mode hook and `POST /v1/pretool`.** Before the app's mode tool runs, a PreToolUse http hook asks the bridge. The bridge allows the deck's own change in flight, under the same rule as kind mode, and gives every other request `{}` at once. (Parties, Transport, Routes, Permission requests, Mode checks, Commands, The plugin's hooks.json)
+   - In Auto, the auto-mode classifier refused the mod's change in Phase 4 and left it unanswered for minutes on 2026-11-03.
+   - With the hook's allow, T4's change from Auto to Manual was `done` in 31 ms.
+   - A raise still brings up the app's approval as a PermissionRequest.
+   - A hot reload doesn't add the hook to a running session, so a session gets it from its next start.
+2. **Desktop sessions only.** With the plugin in `~/.claude/settings.json`, every Claude Code process that reads it loads the plugin: terminal and VS Code sessions, `claude -p` runs, a `claude` started inside a desktop session (which inherits its host id), forks of preset sessions, and the app's pre-warmed spares. So:
+   - The mod talks to the bridge only in a desktop session of its own, by the engine's own test plus the forks' tags.
+   - The bridge takes a hook's request only from a session the registry confirms by host and `session_id`, and answers any other with `{}` at once.
+   - A hello under a listed host with another `sessionId` gets 409.
+   - (Transport, Identity, Desktop sessions only, Fixtures)
+3. **Only a hello makes an `inst` current.** Any other request from an `inst` that hasn't said hello to this deck is an older instance's. That closes round 4's open point: after a deck restart, a replaced instance's late request could take over a session's polls. (Identity, Commands)
+4. **Fixtures:**
+   - `mode-raise` has the mode check before its PermissionRequest.
+   - `mode-not-ours` checks that a mode check with no command in flight gets `{}`.
+   - New: `mode-from-auto`, `stray-instance` and `not-desktop`.
+   - The plugin side plays a desktop session of its own.
+   - Runners treat `/v1/pretool` like `/v1/permission`: the plugin side skips it, and its answers are checked strictly.
+   - (Fixtures)

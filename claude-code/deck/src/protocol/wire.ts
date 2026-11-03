@@ -10,6 +10,7 @@ export const PROTOCOL_VERSION = 1;
 
 export const ROUTES = {
 	permission: "/v1/permission",
+	pretool: "/v1/pretool",
 	hello: "/v1/hello",
 	events: "/v1/events",
 	next: "/v1/next",
@@ -25,10 +26,21 @@ export const DENY_MESSAGE = "Denied from the Stream Deck.";
 export const DENY_DECISION = {
 	hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: DENY_MESSAGE, interrupt: true } },
 } as const;
-/** No decision: the app's own dialog decides. */
+/** No decision: the app's own dialog decides. For a mode check, the session's own permission check decides. */
 export const NO_DECISION = {} as const;
 
-/** The app's mode tool, as a PermissionRequest names it. The deck's own mode commands raise requests for it (S4). */
+/**
+ * The mode check's allow (PROTOCOL.md, Mode checks): the PreToolUse hook's answer that lets the deck's own mode
+ * change past the session's permission check, the auto-mode classifier included. The only other answer is `{}`.
+ */
+export const PRETOOL_ALLOW = {
+	hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "The mode change pressed on the Stream Deck." },
+} as const;
+
+/**
+ * The app's mode tool, as a PermissionRequest and a mode check name it. The deck's own mode commands call it: the
+ * mode hook asks first, and a raise brings up a PermissionRequest for it (S4).
+ */
 export const MODE_TOOL = "mcp__ccd_session_mgmt__set_session_permission_mode";
 
 /** Requests the deck shows but never answers: a press jumps to the session (kickoff answer 3). */
@@ -75,12 +87,8 @@ export function modRef(o: Obj): ModRef {
 	return { sid: text(o.sid), host: asHost(o.host), inst: text(o.inst) };
 }
 
-/** What the bridge reads from a PermissionRequest hook's body. */
-export type PermissionRequest = {
-	sid: string | null;
-	tool: string;
-	/** `tool_input`; a request without one fingerprints as `{}`. */
-	input: unknown;
+/** What the bridge reads from a PermissionRequest hook's body: a hook's request, and the session's settings. */
+export type PermissionRequest = HookRequest & {
 	/** `permission_mode` and `effort.level`, the session's settings when the request was made. */
 	mode: string | null;
 	effort: string | null;
@@ -88,12 +96,31 @@ export type PermissionRequest = {
 
 /** Null when the body isn't an object with a `tool_name`. */
 export function parsePermission(body: unknown): PermissionRequest | null {
+	const hook = parseHook(body);
+	if (!hook || !isObj(body)) return null;
+	// `effort` is `{level}` in 2.1.309's hook input; a plain string is read too.
+	const effort = isObj(body.effort) ? text(body.effort.level, 40) : text(body.effort, 40);
+	return { ...hook, mode: text(body.permission_mode, 40), effort };
+}
+
+/**
+ * What the bridge reads from either hook's body: the session it says it's from, the tool and its input. A mode
+ * check's body is a PreToolUse's, of which the bridge reads no more (PROTOCOL.md, Mode checks).
+ */
+export type HookRequest = {
+	/** `session_id`: Claude Code's id for the session the request comes from. */
+	sid: string | null;
+	tool: string;
+	/** `tool_input`; a request without one fingerprints as `{}`. */
+	input: unknown;
+};
+
+/** Null when the body isn't an object with a `tool_name`. */
+export function parseHook(body: unknown): HookRequest | null {
 	if (!isObj(body)) return null;
 	const tool = typeof body.tool_name === "string" && body.tool_name !== "" ? body.tool_name : null;
 	if (tool === null) return null;
-	// `effort` is `{level}` in 2.1.309's hook input; a plain string is read too.
-	const effort = isObj(body.effort) ? text(body.effort.level, 40) : text(body.effort, 40);
-	return { sid: text(body.session_id), tool, input: body.tool_input ?? {}, mode: text(body.permission_mode, 40), effort };
+	return { sid: text(body.session_id), tool, input: body.tool_input ?? {} };
 }
 
 export type Hello = ModRef & {

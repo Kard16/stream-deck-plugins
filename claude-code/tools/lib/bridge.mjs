@@ -1,7 +1,8 @@
-// The fake bridge's HTTP side (claude-code/protocol/PROTOCOL.md, v1): the five /v1/ routes on 127.0.0.1,
+// The fake bridge's HTTP side (claude-code/protocol/PROTOCOL.md, v1): the six /v1/ routes on 127.0.0.1,
 // the control routes beside them, the registry and records readings, and a JSONL log of every request and
 // answer in the run folder. The token is checked like the deck checks it and never written anywhere. The
-// deck's logic lives in deck.mjs; this file only adapts HTTP and the folders to it.
+// deck's logic lives in deck.mjs; this file only adapts HTTP and the folders to it, and reads the registry once
+// more when a hook's request or a hello needs it ("Desktop sessions only").
 
 import fs from 'node:fs'
 import http from 'node:http'
@@ -10,7 +11,7 @@ import path from 'node:path'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 
-import { BadRequest, FakeDeck } from './deck.mjs'
+import { BadRequest, FakeDeck, NotThisSession } from './deck.mjs'
 import { REPO } from './fixtures.mjs'
 import { MAX_BODY, MAX_WAIT_S, ROUTE_METHODS, ROUTES } from './protocol.mjs'
 import { findRecord, readRecord, readRegistry, signature } from './registry.mjs'
@@ -187,8 +188,9 @@ function forLog(body, text) {
 
 /**
  * Starts the fake bridge. Options (DEFAULTS fills the rest): `port` (0 for any free one), `token` or
- * `tokenFile`, `runDir`, `registryDir`, `recordsDir`, `registryMs` (0 reads only on /control/rescan),
- * `now` (the deck's clock, for tests), `inFlightMs`, `cmdPrefix`, `quiet`, `print(line)`.
+ * `tokenFile`, `runDir` (else a new folder under `runRoot`), `registryDir`, `recordsDir`, `registryMs` (0 reads
+ * only on /control/rescan, and when a request needs a second reading), `now` (the deck's wall clock, for tests),
+ * `monoNow` (its monotonic clock, for tests), `inFlightMs`, `cmdPrefix`, `quiet`, `print(line)`.
  * Resolves `{port, url, runDir, deck, rescan(), close()}`.
  */
 export async function startFakeBridge(options = {}) {
@@ -227,7 +229,7 @@ export async function startFakeBridge(options = {}) {
     if (say) print(`${clock()} ${scrub(say)}`)
   }
 
-  const deck = new FakeDeck({ log, now: o.now, inFlightMs: o.inFlightMs, cmdPrefix: o.cmdPrefix })
+  const deck = new FakeDeck({ log, now: o.now, monoNow: o.monoNow, inFlightMs: o.inFlightMs, cmdPrefix: o.cmdPrefix })
   let taken = 0
   let reqSeq = 0
   let port = null
@@ -337,6 +339,17 @@ export async function startFakeBridge(options = {}) {
         return !answered && !res.writableEnded && !res.destroyed && !req.socket.destroyed
       },
       send,
+      /**
+       * Drops the connection with no answer, as a deck that restarts drops it, so the client's request fails: a mod
+       * whose poll fails says hello again (PROTOCOL.md, "Failure and recovery"). A reset does this to open polls.
+       */
+      cut() {
+        if (!responder.open) return false
+        answered = true
+        write({ kind: 'cut', n, t: Date.now(), ms: round1(performance.now() - t0) })
+        req.socket.destroy()
+        return true
+      },
     }
     /** For held requests and polls: tells the deck when the client goes away first. */
     const watchClose = (fn) => {
@@ -409,13 +422,26 @@ export async function startFakeBridge(options = {}) {
           control(route, body ?? {}, send).catch((err) => failed('control-error', n, route, err, send))
           return
         }
-        try {
-          dispatch(route, url, req, body, responder, watchClose)
-        } catch (err) {
-          if (err instanceof BadRequest) send(400, { error: err.message })
+        const routeFailed = (err) => {
+          if (err instanceof NotThisSession) send(409, { error: err.message })
+          else if (err instanceof BadRequest) send(400, { error: err.message })
           else failed('route-error', n, route, err, send)
         }
-        counted()
+        // Taken once it's answered or held: after the second reading of the registry, for a request that needs one.
+        let pending
+        try {
+          pending = dispatch(route, url, req, body, responder, watchClose)
+        } catch (err) {
+          routeFailed(err)
+        }
+        if (!pending) {
+          counted()
+          return
+        }
+        pending.then(counted, (err) => {
+          routeFailed(err)
+          counted()
+        })
       },
       (err) => write({ kind: 'close', n, t: Date.now(), ms: round1(performance.now() - t0), error: errorText(err) }),
     )
@@ -435,16 +461,33 @@ export async function startFakeBridge(options = {}) {
     send(500, { error: `the fake bridge failed on this request: ${why}` })
   }
 
+  /**
+   * Hands a request to the deck. Returns a promise when the deck needs the registry read once more first
+   * (PROTOCOL.md, "Desktop sessions only"), which settles once the request is answered or held; else nothing.
+   */
   function dispatch(route, url, req, body, responder, watchClose) {
     switch (route) {
-      case ROUTES.permission: {
-        const r = deck.permission({ body, hostHeader: req.headers['x-deck-host'], responder })
-        if (r.id) watchClose(() => deck.clientClosed(r.id))
+      case ROUTES.permission:
+      case ROUTES.pretool: {
+        const hostHeader = req.headers['x-deck-host']
+        const take = () => {
+          const r = route === ROUTES.permission ? deck.permission({ body, hostHeader, responder }) : deck.pretool({ body, hostHeader, responder })
+          if (r.id) watchClose(() => deck.clientClosed(r.id))
+        }
+        // A hook's request from a session the latest reading doesn't confirm: the registry is read once more, and the
+        // deck then takes it or answers {} at once.
+        if (deck.hookNeedsReading(hostHeader, body)) return rescan().then(take)
+        take()
         return
       }
-      case ROUTES.hello:
-        responder.send(200, deck.hello(body))
+      case ROUTES.hello: {
+        const answer = () => responder.send(200, deck.hello(body))
+        // A hello the latest reading would refuse: read once more, so a session whose id has just changed isn't
+        // refused on a reading made before.
+        if (deck.helloNeedsReading(body)) return rescan().then(answer)
+        answer()
         return
+      }
       case ROUTES.events:
         deck.events(body)
         responder.send(204)
@@ -494,8 +537,9 @@ export async function startFakeBridge(options = {}) {
           send(200, { ok: true, sessions: deck.listed })
           return
         case '/control/reset':
-          // Forgets the run so far: held requests get no decision, polls no commands. The folders are read
-          // again from scratch, so what they hold now reads as new.
+          // Forgets the run so far: held requests get no decision, and open polls are cut off with no answer, so
+          // their mods say hello again (FakeDeck.reset). The folders are read again from scratch, so what they hold
+          // now reads as new.
           deck.reset()
           taken = 0
           registryEntries = new Map()

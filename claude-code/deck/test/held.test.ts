@@ -20,7 +20,7 @@ const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","
 const DENY_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from the Stream Deck.","interrupt":true}}}';
 
 function req(tool: string, fields: Partial<Omit<Held, "id">> = {}): Omit<Held, "id"> {
-	return { at: 1000, host: "local_a", sid: "sid-a", tool, kind: "tool", summary: tool, fp: "00000000", ...fields };
+	return { at: 1000, host: "local_a", tool, kind: "tool", summary: tool, fp: "00000000", ...fields };
 }
 
 describe("held requests", () => {
@@ -115,10 +115,10 @@ describe("held requests", () => {
 		assert.deepEqual(new HeldRequests().press(null, "allow"), { ok: false, why: "empty", held: null });
 	});
 
-	test("a request's session can be filled in later", () => {
-		const held = new HeldRequests();
-		const h = held.hold(req("A", { host: null }), new FakeResponder());
-		held.setHost(h.id, "local_x");
-		assert.equal(held.forHost("local_x").length, 1);
+	test("the log names each held request's session", () => {
+		const log = new RecordingLog();
+		const held = new HeldRequests({ log });
+		held.hold(req("Bash", { host: "local_x", summary: "ls" }), new FakeResponder());
+		assert.deepEqual(log.at("info"), ['info HELD #1 tool "Bash" "ls" fp 00000000 from local_x; 1 held']);
 	});
 });

@@ -5,7 +5,9 @@
 //   against its state, retried for up to 1 s as PROTOCOL.md allows.
 // - interactive: a person does it on the real deck. Presses are printed for them to make, registry lines
 //   are skipped (the real deck reads the real registry, which nothing here writes), and expect lines are
-//   shown for them to check by eye.
+//   shown for them to check by eye. An Approve or Deny press with nothing of fake-claude's held is skipped, so the
+//   person never presses on another session's request: a deck that takes the hooks' requests only from sessions
+//   its registry confirms answers the fixture's {} at once (PROTOCOL.md, "Desktop sessions only").
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -338,7 +340,16 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
     },
 
     async press(line, ctx) {
-      ui.show(`PRESS: ${describePress(line.value, ctx.open())}`)
+      const [key] = Object.keys(line.value)
+      const open = ctx.open()
+      if ((key === 'approve' || key === 'deny') && open.length === 0) {
+        // Approve and Deny act on the oldest held request, whosever it is: with none of fake-claude's held, a press
+        // could only land on a real session's.
+        ctx.skip({ line: line.n, press: key, why: "nothing fake-claude sent is held, so a press could only land on another session's request: the deck answers the fixture's hook requests {} at once when no registry it reads confirms their session" })
+        ui.show(`skip: press ${key}: nothing fake-claude sent is held`)
+        return
+      }
+      ui.show(`PRESS: ${describePress(line.value, open)}`)
       if (ctx.replyNext) ui.show(`  waiting up to ${Math.round(pressTimeoutMs / 1000)} s for the deck's answer…`)
       else await ui.ask('  Press Enter once you have. ')
     },

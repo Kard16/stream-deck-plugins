@@ -196,19 +196,32 @@ describe("command queue and long poll", () => {
 		assert.equal(cmd.state, "waiting");
 		clock.advance(1);
 		assert.deepEqual([cmd.state, cmd.error], ["failed", "no result"]);
-		assert.equal(queue.inFlightMode("local_a", "plan"), null, "so the bridge no longer allows that change");
+		assert.equal(queue.inFlightMode("local_a", "plan", "pretool"), null, "so the bridge no longer allows that change");
+		assert.equal(queue.inFlightMode("local_a", "plan", "permission"), null);
 	});
 
-	test("a mode command in flight is found once, for its session and mode", () => {
+	test("a mode command in flight is found once per hook, for its session and mode; each hook's allow is counted apart", () => {
 		const { queue } = setup();
 		const cmd = queue.queue("local_a", { t: "mode", mode: "acceptEdits" });
-		assert.equal(queue.inFlightMode("local_a", "acceptEdits"), null, "queued isn't in flight");
+		for (const hook of ["pretool", "permission"] as const) assert.equal(queue.inFlightMode("local_a", "acceptEdits", hook), null, `queued isn't in flight (${hook})`);
 		queue.poll("local_a", "ia", 20, new FakePoll());
-		assert.equal(queue.inFlightMode("local_b", "acceptEdits"), null);
-		assert.equal(queue.inFlightMode("local_a", "plan"), null);
-		assert.equal(queue.inFlightMode("local_a", "acceptEdits"), cmd);
-		cmd.allowed = true;
-		assert.equal(queue.inFlightMode("local_a", "acceptEdits"), null, "one allow per command");
+		for (const hook of ["pretool", "permission"] as const) {
+			assert.equal(queue.inFlightMode("local_b", "acceptEdits", hook), null);
+			assert.equal(queue.inFlightMode("local_a", "plan", hook), null);
+			assert.equal(queue.inFlightMode("local_a", "acceptEdits", hook), cmd);
+		}
+		cmd.allowed.pretool = true;
+		assert.equal(queue.inFlightMode("local_a", "acceptEdits", "pretool"), null, "one mode check's allow per command");
+		assert.equal(queue.inFlightMode("local_a", "acceptEdits", "permission"), cmd, "the PermissionRequest still has its own");
+		cmd.allowed.permission = true;
+		assert.equal(queue.inFlightMode("local_a", "acceptEdits", "permission"), null, "one PermissionRequest's allow per command");
+		// And the other way round, for a second command.
+		const next = queue.queue("local_a", { t: "mode", mode: "plan" });
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		next.allowed.permission = true;
+		assert.equal(queue.inFlightMode("local_a", "plan", "pretool"), next);
+		assert.equal(queue.result("local_a", "ia", next.id, "done", null, ""), true);
+		assert.equal(queue.inFlightMode("local_a", "plan", "pretool"), null, "a finished command isn't in flight");
 	});
 
 	test("a mod restart fails the in-flight commands and keeps the queued ones; a session's end fails both", () => {

@@ -105,14 +105,14 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
   }
 })
 
-test('cli: fake-claude --against-fake plays all 14 fixtures against the fake bridge\'s own CLI', async (t) => {
+test('cli: fake-claude --against-fake plays all 17 fixtures against the fake bridge\'s own CLI', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
   const r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile], { env: home })
   assert.equal(r.code, 0, `${r.out}${r.err}`)
-  assert.match(r.out, /14 passed, 0 failed \(against-fake\)/)
-  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 14)
+  assert.match(r.out, /17 passed, 0 failed \(against-fake\)/)
+  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 17)
 
   const one = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, '--verbose', 'two-held'], { env: home })
   assert.equal(one.code, 0, one.out)
@@ -137,6 +137,51 @@ test('cli: fake-claude --interactive reads the person\'s answers from stdin', as
   // At the end of its input it goes on as if the person pressed Enter.
   const eof = await run(CLAUDE, ['--interactive', '--url', url, '--token-file', env.tokenFile, 'hello'], { env: home, input: '' })
   assert.equal(eof.code, 0, eof.out)
+  // No registry the fake bridge reads lists approve's session: its permission request gets {} at once, so the press
+  // and the replies that hang on it are skipped, and counted.
+  const skips = await run(CLAUDE, ['--interactive', '--url', url, '--token-file', env.tokenFile, '--press-timeout', '5', 'approve'], { env: home, input: '' })
+  assert.equal(skips.code, 0, skips.out)
+  assert.match(skips.out, /skip: press approve: nothing fake-claude sent is held/)
+  assert.doesNotMatch(skips.out, /PRESS:/)
+  // The person's last answer was the end of input, so the result comes after its question, on the same line.
+  assert.match(skips.out, /ok {4}approve +2 checked .*\(2 reply\(s\) skipped, 1 press\(es\) skipped\)$/m)
+})
+
+test('cli: fake-claude\'s defaults are those README.md gives: the bridge on 47600, each mode\'s token, a press waited on for 300 s', async (t) => {
+  const env = tempEnv(t)
+  const r = await run(CLAUDE, ['--help'], { env: { HOME: env.root } })
+  assert.equal(r.code, 0, r.err)
+  assert.match(r.out, /--url URL +the bridge \(default http:\/\/127\.0\.0\.1:47600\)/)
+  assert.match(r.out, /--token-file PATH +the bridge's token \(default: --against-fake, spikes\/cc-bridge\/run\/token;\n +--interactive, claude-code\/deck\/com\.karimdhanji\.claude\.sdPlugin\/run\/token\)/)
+  assert.match(r.out, /--press-timeout S +--interactive: how long to wait for the answer after a press \(default 300\)/)
+})
+
+test('cli: the fake bridge\'s defaults are those README.md gives: port 47600, the spike bridge\'s token, the real folders read only, a run folder of its own', async (t) => {
+  const env = tempEnv(t)
+  const r = await run(BRIDGE, ['--help'], { env: { HOME: env.root } })
+  assert.equal(r.code, 0, r.err)
+  assert.match(r.out, /--port N +TCP port on 127\.0\.0\.1 \(default 47600; 0 picks a free one\)/)
+  assert.match(r.out, /--token-file PATH +the bearer token \(default spikes\/cc-bridge\/run\/token, the spike\n/)
+  assert.match(r.out, /--registry-dir DIR +the session registry, read only \(default ~\/\.claude\/sessions\)/)
+  assert.match(r.out, /--records-dir DIR +the app's session records, read only \(default\n +~\/Library\/Application Support\/Claude\/claude-code-sessions\)/)
+  assert.match(r.out, /--run-dir DIR +where events\.jsonl and bridge\.json go \(default\n +claude-code\/tools\/run\/<YYYYMMDD-HHMMSS>-fake-bridge\)/)
+  // The values themselves, and a run folder named as README.md says when none is given.
+  const script = path.join(env.root, 'defaults.mjs')
+  fs.writeFileSync(script, `import { DEFAULTS, startFakeBridge } from ${JSON.stringify(pathToFileURL(path.join(TOOLS, 'lib', 'bridge.mjs')).href)}
+const bridge = await startFakeBridge({ port: 0, tokenFile: ${JSON.stringify(env.tokenFile)}, runRoot: ${JSON.stringify(path.join(env.root, 'runs'))}, registryDir: ${JSON.stringify(env.registryDir)}, recordsDir: ${JSON.stringify(env.recordsDir)}, registryMs: 0, quiet: true })
+await bridge.close()
+process.stdout.write(JSON.stringify({ ...DEFAULTS, runDir: bridge.runDir }))
+`)
+  const d = await run(script, [], { env: { HOME: env.root } })
+  assert.equal(d.code, 0, d.err)
+  const got = JSON.parse(d.out)
+  const repo = path.resolve(TOOLS, '..', '..')
+  assert.deepEqual([got.port, got.tokenFile, got.registryDir, got.recordsDir, got.registryMs, got.runRoot], [
+    47600, path.join(repo, 'spikes', 'cc-bridge', 'run', 'token'), path.join(env.root, '.claude', 'sessions'),
+    path.join(env.root, 'Library', 'Application Support', 'Claude', 'claude-code-sessions'), 1000, path.join(repo, 'claude-code', 'tools', 'run'),
+  ])
+  assert.match(path.basename(got.runDir), /^\d{8}-\d{6}-fake-bridge$/)
+  assert.ok(fs.existsSync(path.join(got.runDir, 'events.jsonl')) && fs.existsSync(path.join(got.runDir, 'bridge.json')))
 })
 
 test('cli: the control commands', async (t) => {
@@ -274,19 +319,24 @@ test('cli: the app\'s folders stay protected when HOME points elsewhere', async 
   }
 })
 
-test('cli: SIGTERM answers a held request with no decision before the bridge exits', async (t) => {
-  const env = tempEnv(t)
-  const home = { HOME: env.root }
-  const { url, child } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
-  const held = send(url, {
-    method: 'POST', path: '/v1/permission',
-    headers: { host: hostHeader(url), authorization: `Bearer ${env.token}`, 'x-deck-host': 'local_x' },
-    body: JSON.stringify({ session_id: 's', tool_name: 'Write', tool_input: {} }),
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  test(`cli: ${signal} answers a held request with no decision, and an open poll with no commands, before the bridge exits`, async (t) => {
+    // SIGINT is Ctrl-C, as README.md says to stop it.
+    const env = tempEnv(t)
+    const home = { HOME: env.root }
+    fs.writeFileSync(path.join(env.registryDir, '7.json'), JSON.stringify({ pid: 7, sessionId: 's7', hostSessionId: 'local_x', status: 'busy', statusUpdatedAt: 1 }))
+    const { url, child, output } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir], home)
+    const headers = { host: hostHeader(url), authorization: `Bearer ${env.token}` }
+    const held = send(url, { method: 'POST', path: '/v1/permission', headers: { ...headers, 'x-deck-host': 'local_x' }, body: JSON.stringify({ session_id: 's7', tool_name: 'Write', tool_input: {} }) })
+    await send(url, { method: 'POST', path: '/v1/hello', headers, body: JSON.stringify({ v: 1, sid: 's7', host: 'local_x', inst: 'ix', cwd: '/s', model: 'm', plugin: '0.2.0', cc: '2.1.309' }) }).answer
+    const poll = send(url, { path: '/v1/next?sid=s7&host=local_x&inst=ix&wait=20', headers })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.deepEqual([held.settled, poll.settled], [false, false], 'both held')
+    const exited = new Promise((resolve) => child.once('exit', resolve))
+    child.kill(signal)
+    const [answer, polled] = [await held.answer, await poll.answer]
+    assert.deepEqual([answer.status, answer.json, polled.json], [200, {}, { cmds: [] }])
+    assert.equal(await exited, 0)
+    assert.match(output(), new RegExp(`${signal}: closing`))
   })
-  await new Promise((resolve) => setTimeout(resolve, 200))
-  const exited = new Promise((resolve) => child.once('exit', resolve))
-  child.kill('SIGTERM')
-  const answer = await held.answer
-  assert.deepEqual([answer.status, answer.json], [200, {}])
-  assert.equal(await exited, 0)
-})
+}

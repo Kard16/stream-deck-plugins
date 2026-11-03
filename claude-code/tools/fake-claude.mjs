@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // fake-claude: plays the plugin side of the bridge protocol's fixtures (claude-code/protocol/fixtures/)
-// against a bridge, standing in for Claude Code and the mod at once. It sends the fixtures' plugin lines and
-// checks the replies; press, registry and expect lines go one of two ways:
+// against a bridge, standing in for Claude Code and the mod at once: Claude Code's hooks send the permission
+// requests and mode checks, the mod the rest. It sends the fixtures' plugin lines and checks the replies; press,
+// registry and expect lines go one of two ways:
 // - --against-fake: through the fake bridge's control routes and folders, and checked against its state.
 // - --interactive: a person presses on the real deck plugin and checks it by eye (ladder step 5 in
-//   docs/claude-code/plan.md). Registry lines are skipped there.
+//   docs/claude-code/plan.md). Registry lines are skipped there, and so are the replies and presses that hang on
+//   them: no registry the real deck reads lists the fixtures' sessions.
 // README.md has the walkthrough. Node 24, no dependencies.
 
 import path from 'node:path'
@@ -34,7 +36,8 @@ Code and the mod would, and checks the bridge's replies. Fixtures are names in c
                        and expect lines are checked against its state. One failure ends that fixture.
   --interactive        against the real deck plugin (ladder step 5): it says what to press on the deck and
                        waits for the answer, skips registry lines (the deck reads the real registry, which
-                       this never writes), and shows expect lines for you to check by eye.
+                       this never writes) and the replies and presses that hang on them, and shows expect
+                       lines for you to check by eye.
   --url URL            the bridge (default http://127.0.0.1:47600)
   --token-file PATH    the bridge's token (default: --against-fake, ${path.relative(REPO, TOKEN_FILES['against-fake'])};
                        --interactive, ${path.relative(REPO, TOKEN_FILES.interactive)})
@@ -100,7 +103,9 @@ async function main(argv) {
         const r = await play(fx, { url, token, driver, say })
         results.push(r)
         const secs = ((Date.now() - started) / 1000).toFixed(2)
-        const extra = [r.skipped.length ? `${r.skipped.length} reply(s) skipped` : '', r.notes.length ? `${r.notes.length} note(s)` : ''].filter(Boolean).join(', ')
+        const replies = r.skipped.filter((s) => s.reply !== undefined).length
+        const presses = r.skipped.filter((s) => s.press !== undefined).length
+        const extra = [replies ? `${replies} reply(s) skipped` : '', presses ? `${presses} press(es) skipped` : '', r.notes.length ? `${r.notes.length} note(s)` : ''].filter(Boolean).join(', ')
         process.stdout.write(`${r.ok ? 'ok  ' : 'FAIL'}  ${fx.name.padEnd(26)} ${String(r.checked).padStart(2)} checked  ${secs} s${extra ? `  (${extra})` : ''}${r.ok ? '' : `\n      ${r.error}`}\n`)
       }
     } finally {

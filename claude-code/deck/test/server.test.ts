@@ -6,15 +6,26 @@ import { allowedHosts, BRIDGE_HOST, BRIDGE_PORT, MAX_BODY_BYTES } from "../src/b
 import { type BridgeRoutes, BridgeServer } from "../src/bridge/server.js";
 import { SessionModel } from "../src/model/sessions.js";
 import { fingerprint } from "../src/protocol/fingerprint.js";
+import type { RegistrySession } from "../src/registry/registry.js";
 import { SCRUB_RUN, Scrubber } from "../src/util/log.js";
+import { QUIET_MS } from "../src/util/quiet-log.js";
+import { FakeClock } from "./helpers/fake-clock.js";
 import { type Outcome, send, sendRaw, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
+const PRETOOL_ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"The mode change pressed on the Stream Deck."}}';
 const TOKEN = randomBytes(32).toString("hex");
 const HOST = "local_test-server";
 const BODY = JSON.stringify({ session_id: "sess-1", hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "ls" } });
 const MOD = { sid: "sess-1", host: HOST, inst: "i1" };
+/** The header a hook sends with its session's host. */
+const HOOK = { "x-deck-host": HOST };
+/** The session the tests' requests come from, as the registry lists it: the hooks' requests count only from it. */
+const LISTED: RegistrySession = { key: "101", name: "Server test", status: "busy", cwd: "/x", hostSessionId: HOST, sessionId: MOD.sid, statusUpdatedAt: 1, startedAt: 1 };
+/** The mode hook's input for the deck's own change to `mode`. */
+const modeCheck = (mode: string, sid = MOD.sid): string =>
+	JSON.stringify({ session_id: sid, hook_event_name: "PreToolUse", tool_name: "mcp__ccd_session_mgmt__set_session_permission_mode", tool_input: { session_id: "self", mode }, tool_use_id: "toolu_plugin_0001" });
 
 function status(outcome: Outcome): number | string {
 	return "status" in outcome ? outcome.status : outcome.error;
@@ -37,6 +48,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 	async function start(opts: Partial<ConstructorParameters<typeof BridgeServer>[0]> = {}) {
 		const log = new RecordingLog();
 		model = new SessionModel({ log });
+		model.setRegistry([LISTED]);
 		server = new BridgeServer({ port: 0, token: TOKEN, routes: model, log, ...opts });
 		const port = await server.listen();
 		return { model, log, port, server };
@@ -70,7 +82,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 
 	test("localhost:<port> is allowed as well", async () => {
 		const { model, port } = await start();
-		const { outcome } = send(port, { token: TOKEN, host: `localhost:${port}`, body: BODY });
+		const { outcome } = send(port, { token: TOKEN, host: `localhost:${port}`, body: BODY, headers: HOOK });
 		await waitFor(() => model.held.size === 1, "the request to be held");
 		model.held.press(1, "deny");
 		assert.equal(status(await outcome), 200);
@@ -156,6 +168,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 
 	test("GET /v1/next is held until a command is queued, then answers it", async () => {
 		const { model, port } = await start();
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, ...MOD, model: "m" }) }).outcome), 200);
 		const poll = send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` });
 		await waitFor(() => model.commands.polling(HOST), "the poll to be held");
 		assert.equal(status(await within(poll.outcome, 100)), "pending");
@@ -169,8 +182,9 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 
 	test("a client that gives up is removed from the held requests, and the log says so", async () => {
 		const { model, log, port } = await start();
-		const first = send(port, { token: TOKEN, body: BODY });
-		const second = send(port, { token: TOKEN, body: JSON.stringify({ tool_name: "Edit", tool_input: { file_path: "/a/b.txt" } }) });
+		const first = send(port, { token: TOKEN, body: BODY, headers: HOOK });
+		await waitFor(() => model.held.size === 1, "the first request to be held");
+		const second = send(port, { token: TOKEN, body: JSON.stringify({ session_id: MOD.sid, tool_name: "Edit", tool_input: { file_path: "/a/b.txt" } }), headers: HOOK });
 		await waitFor(() => model.held.size === 2, "both requests to be held");
 
 		first.req.destroy(); // like the hook's timeout
@@ -205,7 +219,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 
 	test("a held request outlives the server's header and request timeouts", async () => {
 		const { model, port } = await start({ http: { headersTimeout: 100, requestTimeout: 200, connectionsCheckingInterval: 20 } });
-		const { outcome } = send(port, { token: TOKEN, body: BODY });
+		const { outcome } = send(port, { token: TOKEN, body: BODY, headers: HOOK });
 		await waitFor(() => model.held.size === 1, "the request to be held");
 		await sleep(700);
 		assert.equal(model.held.size, 1, "still held");
@@ -215,7 +229,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 
 	test("stopping drops held requests: the client sees the connection go, never a decision", async () => {
 		const { model, port, server: bridge } = await start();
-		const { outcome } = send(port, { token: TOKEN, body: BODY });
+		const { outcome } = send(port, { token: TOKEN, body: BODY, headers: HOOK });
 		await waitFor(() => model.held.size === 1, "the request to be held");
 		await bridge.stop();
 		const result = await outcome;
@@ -228,16 +242,22 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 			permission: () => {
 				throw new Error("boom");
 			},
+			pretool: () => Promise.reject(new Error("bang")),
 			hello: () => ({ status: 200, body: { v: 1, ok: true } }),
 			events: () => ({ status: 204 }),
 			next: () => {},
 			result: () => ({ status: 204 }),
 		};
-		server = new BridgeServer({ port: 0, token: TOKEN, routes, log });
-		const port = await server.listen();
+		const bridge = new BridgeServer({ port: 0, token: TOKEN, routes, log });
+		server = bridge;
+		const port = await bridge.listen();
 		assert.equal(status(await send(port, { token: TOKEN, body: BODY }).outcome), 500);
+		const rejected = await send(port, { token: TOKEN, path: "/v1/pretool", body: BODY }).outcome;
+		assert.deepEqual([status(rejected), json(rejected)], [500, { error: "internal error" }], "a route's promise that rejects");
 		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: "{}" }).outcome), 200);
 		assert.ok(log.at("error").some((l) => l.includes("boom")));
+		assert.ok(log.at("error").some((l) => l.includes("bang")));
+		assert.equal(bridge.routed, 3, "each counts as routed once it's answered");
 	});
 
 	test("the token never reaches the log, whole or cut, even where a client puts it", async () => {
@@ -256,11 +276,18 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		// Part of the token on its own, as if a client had cut it.
 		await poll(`${"r".repeat(30)}${TOKEN.slice(0, 20)}`);
 		await send(port, { token: TOKEN, path: `/w/${TOKEN.slice(20, 40)}` }).outcome;
-		const held = send(port, { token: TOKEN, body: JSON.stringify({ tool_name: `${"t".repeat(90)}${TOKEN}`, session_id: TOKEN, tool_input: { command: TOKEN } }) });
+		// As a hook's session_id, which the log names when the registry doesn't confirm it. Answered at once, or the
+		// test fails rather than waits on a request held by mistake.
+		const unconfirmed = await within(send(port, { token: TOKEN, body: JSON.stringify({ tool_name: "Bash", session_id: TOKEN, tool_input: { command: "ls" } }), headers: HOOK }).outcome, 2000);
+		assert.deepEqual([status(unconfirmed), json(unconfirmed)], [200, {}]);
+		// In a held request's tool and input, which the log and a key show.
+		const held = send(port, { token: TOKEN, body: JSON.stringify({ tool_name: `${"t".repeat(90)}${TOKEN}`, session_id: MOD.sid, tool_input: { command: TOKEN } }), headers: HOOK });
 		await waitFor(() => model.held.size === 1, "the request to be held");
 		assert.ok(!model.held.oldest?.summary.includes(TOKEN.slice(0, SCRUB_RUN)), "nor a key");
 		model.held.press(1, "allow");
 		await held.outcome;
+		// And as a new instance's inst in a hello, which the log names as it replaces the current one.
+		await send(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, ...MOD, inst: `${"s".repeat(30)}${TOKEN}` }) }).outcome;
 		assert.ok(log.lines.length >= 5);
 		// No run of SCRUB_RUN of the token's characters anywhere.
 		for (const line of log.lines) {
@@ -268,9 +295,11 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		}
 		assert.ok(log.lines.some((l) => l.message.includes("/x/<token>")));
 		// The query was scrubbed before anything read it: the inst arrived whole as <token>, not cut and then redacted.
-		assert.ok(log.lines.some((l) => l.message.includes('RESTART local_test-server: mod instance "<token>" replaces "i1"')), log.at("info").join("\n"));
+		assert.ok(log.lines.some((l) => l.message.includes('POLL local_test-server from mod instance "<token>", not the current one')), log.at("debug").join("\n"));
 		assert.ok(log.lines.some((l) => l.message.includes(`mod instance "${"q".repeat(30)}<token>"`)));
 		assert.ok(log.lines.some((l) => l.message.includes('mod instance "p<token>"')));
+		assert.ok(log.lines.some((l) => l.message.includes('sid "<token>"')), "the hook's session_id");
+		assert.ok(log.lines.some((l) => l.message.includes(`RESTART local_test-server: mod instance "${"s".repeat(30)}<token>" replaces "i1"`)), log.at("info").join("\n"));
 	});
 
 	test("the token is taken out of a body's strings, not its numbers: a number holding a run of its digits still parses", async () => {
@@ -351,13 +380,141 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 			for (let i = 0; i < 1000; i++) s = i % 2 === 0 ? `[${s}]` : `{"n":${s}}`;
 			return s;
 		};
-		const { outcome } = send(port, { token: TOKEN, body: `{"tool_name":"Custom","tool_input":{"k${TOKEN.slice(0, SCRUB_RUN)}":1,"__proto__":"p${TOKEN}","z":${nest(`x${TOKEN}`)},"${TOKEN}":2}}` });
+		const { outcome } = send(port, { token: TOKEN, body: `{"session_id":"${MOD.sid}","tool_name":"Custom","tool_input":{"k${TOKEN.slice(0, SCRUB_RUN)}":1,"__proto__":"p${TOKEN}","z":${nest(`x${TOKEN}`)},"${TOKEN}":2}}`, headers: HOOK });
 		await waitFor(() => model.held.size === 1, "the request to be held");
 		// As JSON.parse makes it, "__proto__" is an own key here too, so the fingerprint counts it.
 		const expected: unknown = JSON.parse(`{"k<token>":1,"__proto__":"p<token>","z":${nest("x<token>")},"<token>":2}`);
 		assert.equal(model.held.oldest?.fp, fingerprint("Custom", expected));
 		model.held.press(1, "allow");
 		assert.equal(status(await outcome), 200);
+	});
+
+	test("POST /v1/pretool is answered at once: the allow for the deck's own mode change in flight, once, and {} for anything else", async () => {
+		const { model, log, port } = await start();
+		// Never held: a check not answered within 2 s fails the test rather than holding it up.
+		const check = (body: string, headers: Record<string, string> = HOOK) => within(send(port, { token: TOKEN, path: "/v1/pretool", body, headers }).outcome, 2000);
+		const none = await check(modeCheck("plan"));
+		assert.deepEqual([status(none), "body" in none && none.body], [200, "{}"], "nothing in flight");
+		// The mod says hello and takes the deck's mode command.
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, ...MOD, model: "m" }) }).outcome), 200);
+		const cmd = model.commands.queue(HOST, { t: "mode", mode: "plan" });
+		const taken = await send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=0` }).outcome;
+		assert.deepEqual(json(taken), { cmds: [{ id: cmd.id, t: "mode", mode: "plan" }] });
+		// Another mode, a process the registry doesn't confirm, or no host: no decision, and the allow stays unused.
+		for (const [body, headers] of [
+			[modeCheck("auto"), HOOK],
+			[modeCheck("plan", "sess-child"), HOOK],
+			[modeCheck("plan"), {}],
+		] as const) {
+			const answer = await check(body, headers);
+			assert.deepEqual([status(answer), "body" in answer && answer.body], [200, "{}"], `${body} ${JSON.stringify(headers)}`);
+		}
+		const allowed = await check(modeCheck("plan"));
+		assert.ok("status" in allowed);
+		assert.deepEqual([allowed.status, allowed.body, allowed.headers["content-type"]], [200, PRETOOL_ALLOW_JSON, "application/json"]);
+		const again = await check(modeCheck("plan"));
+		assert.deepEqual([status(again), "body" in again && again.body], [200, "{}"], "only the first check per command");
+		// Never held: nothing waits on the deck.
+		assert.equal(model.held.size, 0);
+		assert.ok(log.at("info").some((l) => l === `info ALLOWED the mode check for the change to "plan" for ${HOST}: the deck's own command ${cmd.id}`), log.at("info").join("\n"));
+		assert.ok(log.at("debug").some((l) => l === `debug PRETOOL ${HOST}: no decision: no mode command in flight for "plan" that hasn't had its check allowed`), log.at("debug").join("\n"));
+		assert.ok(!log.at("info").some((l) => l.includes("PRETOOL")), "no decision is logged at debug");
+	});
+
+	test("POST /v1/pretool has the Host and token checks of every route, and the transport's errors", async () => {
+		const { port } = await start();
+		const body = modeCheck("plan");
+		assert.equal(status(await send(port, { token: TOKEN, host: "evil.example", path: "/v1/pretool", body, headers: HOOK }).outcome), 403);
+		assert.equal(status(await send(port, { path: "/v1/pretool", body, headers: HOOK }).outcome), 401);
+		assert.equal(status(await send(port, { token: "0".repeat(64), path: "/v1/pretool", body, headers: HOOK }).outcome), 401);
+		const get = await send(port, { token: TOKEN, method: "GET", path: "/v1/pretool" }).outcome;
+		assert.equal(status(get), 405);
+		if ("headers" in get) assert.equal(get.headers.allow, "POST");
+		const garbled = await send(port, { token: TOKEN, path: "/v1/pretool", body: "not json", headers: HOOK }).outcome;
+		assert.deepEqual([status(garbled), json(garbled)], [400, { error: "Bad Request" }]);
+		// JSON that isn't a PreToolUse's input is still answered with no decision: a 2xx is one of the two bodies.
+		for (const odd of ["[1,2]", '"x"', "{}", '{"tool_name":7}']) {
+			const answer = await within(send(port, { token: TOKEN, path: "/v1/pretool", body: odd, headers: HOOK }).outcome, 2000);
+			assert.deepEqual([status(answer), "body" in answer && answer.body], [200, "{}"], odd);
+		}
+	});
+
+	test("a client refused again and again is logged quietly: the first per route and reason at info, then one line in 10 minutes with the count since, the rest at debug", async () => {
+		const clock = new FakeClock();
+		const { log, port } = await start({ clock });
+		const lines = (level: "info" | "debug", text: string): string[] => log.lines.filter((l) => l.level === level && l.message.includes(text)).map((l) => l.message);
+		const stale = (path = "/v1/hello") => send(port, { token: "0".repeat(64), path, body: "{}" }).outcome;
+		// A stale token, 211 times: once made 211 info lines.
+		for (let i = 0; i < 211; i++) assert.equal(status(await stale()), 401);
+		assert.deepEqual(lines("info", "wrong token"), ['REQ 401 POST "/v1/hello": wrong token']);
+		assert.equal(lines("debug", "wrong token").length, 210);
+		// Each route and each reason has its own first line at info.
+		await stale("/v1/events");
+		await send(port, { path: "/v1/hello", body: "{}" }).outcome;
+		await send(port, { token: TOKEN, host: "evil.example", path: "/v1/hello", body: "{}" }).outcome;
+		await send(port, { token: TOKEN, host: "evil.example", path: "/v1/hello", body: "{}" }).outcome;
+		// Every path that isn't a route counts as one, so a client can't make the keys many.
+		await send(port, { path: "/x" }).outcome;
+		await send(port, { path: "/y" }).outcome;
+		await send(port, { path: "/__proto__" }).outcome;
+		assert.deepEqual(lines("info", "REQ 40"), [
+			'REQ 401 POST "/v1/hello": wrong token',
+			'REQ 401 POST "/v1/events": wrong token',
+			'REQ 401 POST "/v1/hello": no token',
+			'REQ 403 POST "/v1/hello": Host "evil.example" isn\'t 127.0.0.1:' + port + " or localhost:" + port,
+			'REQ 401 POST "/x": no token',
+		]);
+		// Within 10 minutes of its last info line, at debug; from then, one line at info, with the count since.
+		clock.advance(QUIET_MS - 1);
+		await stale();
+		assert.equal(lines("info", "wrong token").length, 2, "one for each route so far");
+		clock.advance(1);
+		await stale();
+		await stale();
+		assert.deepEqual(lines("info", 'POST "/v1/hello": wrong token'), [
+			'REQ 401 POST "/v1/hello": wrong token',
+			'REQ 401 POST "/v1/hello": wrong token; 211 more like it, at debug, in the 10 min since the last at info',
+		]);
+		assert.equal(lines("debug", 'POST "/v1/hello": wrong token').length, 212);
+		// What isn't a refusal a client repeats is logged as before.
+		await send(port, { token: TOKEN, method: "GET", path: "/v1/nope" }).outcome;
+		await send(port, { token: TOKEN, method: "GET", path: "/v1/nope" }).outcome;
+		assert.equal(lines("info", "no such route").length, 2);
+	});
+
+	test("a deck restarted while a mod had no request open: the new deck answers its polls at once with none, as Identity says, and says so at info until its hello", async () => {
+		const { port, server: first, model: old } = await start();
+		const hello = JSON.stringify({ v: 1, ...MOD, cwd: "/x", plugin: "0.2.0", cc: "2.1.309" });
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: hello }).outcome), 200);
+		assert.equal(old.session(HOST)?.plugin, true);
+		// The mod waits out its second between polls, nothing open, so nothing of its fails as the deck restarts.
+		await first.stop();
+		old.dispose();
+		const log = new RecordingLog();
+		const restarted = new SessionModel({ log });
+		model = restarted;
+		restarted.setRegistry([LISTED]);
+		const again = new BridgeServer({ port, token: TOKEN, routes: restarted, log });
+		server = again;
+		assert.equal(await again.listen(), port);
+		const poll = () => within(send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` }).outcome, 2000);
+		for (let i = 0; i < 5; i++) {
+			const answer = await poll();
+			assert.deepEqual([status(answer), json(answer)], [200, { cmds: [] }], "answered at once, each time");
+		}
+		const events = JSON.stringify({ ...MOD, seq: 7, events: [{ t: "measure", context: { percent: 12, window: 200000 }, at: 1 }] });
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/events", body: events }).outcome), 204);
+		assert.deepEqual([restarted.session(HOST)?.plugin, restarted.session(HOST)?.context], [false, 12]);
+		assert.deepEqual(
+			log.at("info").filter((l) => l.includes("NO HELLO")),
+			[`info NO HELLO ${HOST}: mod instance "i1" polls, but no instance has said hello to this deck for the session, so it takes no prompts or mode changes until one does`],
+			log.at("debug").join("\n"),
+		);
+		// Its hello, once it says one: current again, its poll held.
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: hello }).outcome), 200);
+		const held = send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` }).outcome;
+		assert.deepEqual(await within(held, 200), { error: "pending" });
+		assert.equal(restarted.session(HOST)?.plugin, true);
 	});
 
 	test("a busy port: listen rejects; start logs, retries after 1 s, and listens once the port is free", async () => {

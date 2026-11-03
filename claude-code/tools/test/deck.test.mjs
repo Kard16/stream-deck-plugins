@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { BadRequest, FakeDeck } from '../lib/deck.mjs'
-import { ALLOW, DENY, MODE_TOOL, fingerprint } from '../lib/protocol.mjs'
+import { BadRequest, FakeDeck, NotThisSession } from '../lib/deck.mjs'
+import { ALLOW, DENY, MODE_TOOL, PRE_ALLOW, fingerprint } from '../lib/protocol.mjs'
 import { fakeTimers, responder } from './helpers.mjs'
 
 const A = { sid: 'sid-a', host: 'local_a', inst: 'ia', pid: 1 }
@@ -16,7 +16,7 @@ const ASK = { questions: [{ question: 'Red or blue?' }] }
 function setup() {
   const clock = fakeTimers()
   const log = []
-  const deck = new FakeDeck({ now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: (e) => log.push(e) })
+  const deck = new FakeDeck({ now: clock.wall, monoNow: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: (e) => log.push(e) })
   const seq = new Map()
   const reg = (...entries) => deck.applyRegistry(entries.map(([S, status, at = clock.now(), extra = {}]) => ({ pid: S.pid, sessionId: S.sid, hostSessionId: S.host, name: S.host, status, statusUpdatedAt: at, ...extra })))
   const hello = (S, extra = {}) => deck.hello({ v: 1, sid: S.sid, host: S.host, inst: S.inst, cwd: '/s', model: 'm1', plugin: '0.1.0', cc: '2.1.309', ...extra })
@@ -37,12 +37,26 @@ function setup() {
     })
     return { r, ...out }
   }
+  // A mode check, as the mode hook sends it: the app's mode tool for `self` and `mode`, unless `opts` says otherwise.
+  const pre = (S, mode, opts = {}) => {
+    const header = Object.hasOwn(opts, 'header') ? opts.header : S.host
+    const r = responder()
+    const out = deck.pretool({
+      body: {
+        session_id: S.sid, hook_event_name: 'PreToolUse', permission_mode: 'auto', effort: { level: 'high' },
+        tool_name: opts.tool ?? MODE_TOOL, tool_input: opts.input ?? { session_id: 'self', mode }, tool_use_id: 'toolu_plugin_0001', ...opts.extra,
+      },
+      hostHeader: header,
+      responder: r,
+    })
+    return { r, ...out }
+  }
   const poll = (S, wait = 20, inst = S.inst) => {
     const r = responder()
     const id = deck.poll({ sid: S.sid, host: S.host, inst, wait, responder: r })
     return { r, id }
   }
-  return { deck, clock, log, reg, hello, ev, perm, poll, view: () => deck.view() }
+  return { deck, clock, log, reg, hello, ev, perm, pre, poll, view: () => deck.view() }
 }
 
 test('deck: requests sort into tool, ask and mode; a mode command allows exactly the request it raises', () => {
@@ -69,6 +83,53 @@ test('deck: requests sort into tool, ask and mode; a mode command allows exactly
   assert.deepEqual(view().held.map((h) => [h.tool, h.kind]), [
     ['Write', 'tool'], ['AskUserQuestion', 'ask'], ['ExitPlanMode', 'ask'], [MODE_TOOL, 'tool'], [MODE_TOOL, 'tool'],
     [MODE_TOOL, 'tool'], [MODE_TOOL, 'tool'], [MODE_TOOL, 'tool'], [MODE_TOOL, 'tool'],
+  ])
+})
+
+test('deck: a mode check is allowed at once for a mode command in flight, the first per command, counted apart from kind mode\'s allowance', () => {
+  // PROTOCOL.md, "Mode checks": the PreToolUse allow takes the deck's own change past the auto-mode classifier.
+  const { deck, log, reg, hello, perm, pre, poll, view } = setup()
+  reg([A, 'busy'], [B, 'busy'])
+  hello(A)
+  hello(B)
+  const none = [{ status: 200, json: {} }]
+  const allow = [{ status: 200, json: PRE_ALLOW }]
+  assert.deepEqual(pre(A, 'default').r.sent, none, 'no command at all')
+  const c1 = deck.mode({ host: A.host, mode: 'default' }).cmd
+  assert.deepEqual(pre(A, 'default').r.sent, none, 'queued is not in flight')
+  poll(A)
+  assert.equal(view().cmds[c1], 'delivered')
+  assert.deepEqual(pre(A, 'plan').r.sent, none, 'another mode')
+  assert.deepEqual(pre(B, 'default').r.sent, none, 'another session')
+  assert.deepEqual(pre(A, 'default', { input: { session_id: A.host, mode: 'default' } }).r.sent, none, 'not self')
+  assert.deepEqual(pre(A, 'default', { input: { mode: 'default' } }).r.sent, none, 'no session_id in the input')
+  assert.deepEqual(pre(A, 'default', { tool: 'Bash', input: { command: 'ls', session_id: 'self', mode: 'default' } }).r.sent, none, 'another tool')
+  const q = pre(A, 'default')
+  assert.deepEqual([q.kind, q.cmd, q.r.sent], ['allow', c1, allow])
+  assert.deepEqual(pre(A, 'default').r.sent, none, 'one check allowed per command')
+  // Kind mode's allowance is counted apart: the raise's PermissionRequest still gets its own, once.
+  const p = perm(A, MODE_TOOL, { session_id: 'self', mode: 'default' })
+  assert.deepEqual([p.kind, p.r.sent], ['mode', [{ status: 200, json: ALLOW }]])
+  assert.equal(perm(A, MODE_TOOL, { session_id: 'self', mode: 'default' }).kind, 'tool', 'one request allowed per command')
+
+  // The other way round: a command whose PermissionRequest came first still has its check.
+  const c2 = deck.mode({ host: A.host, mode: 'plan' }).cmd
+  poll(A)
+  assert.equal(perm(A, MODE_TOOL, { session_id: 'self', mode: 'plan' }).kind, 'mode')
+  assert.deepEqual(pre(A, 'plan').r.sent, allow)
+  // A stray waiting keeps it in flight; a final result ends it.
+  const c3 = deck.mode({ host: A.host, mode: 'acceptEdits' }).cmd
+  poll(A)
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c3, state: 'waiting' })
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c2, state: 'done', detail: '' })
+  assert.deepEqual([pre(A, 'acceptEdits').r.sent, pre(A, 'plan').r.sent], [allow, none])
+
+  // A check is never held, and its body's mode and effort aren't the session's: only PermissionRequests' are.
+  assert.deepEqual(view().held.map((h) => h.tool), [MODE_TOOL])
+  assert.deepEqual(view().settings[A.host], { model: 'm1', effort: 'low', mode: 'default' })
+  assert.deepEqual(log.filter((e) => e.kind === 'mode-check' && e.allowed).map((e) => e.cmd), [c1, c2, c3])
+  assert.deepEqual(log.filter((e) => e.kind === 'mode-check' && !e.allowed).map((e) => e.why).slice(0, 3), [
+    'no mode command for "default" in flight whose check hasn\'t been allowed', 'no mode command for "default" in flight whose check hasn\'t been allowed', 'no mode command for "plan" in flight whose check hasn\'t been allowed',
   ])
 })
 
@@ -156,15 +217,17 @@ test('deck: release rule 2 waits for a reading of waiting after the request arri
   assert.equal(p1.r.sent.length, 0, 'the waiting it left may have been for something else')
 })
 
-test('deck: release rule 3, by what the bridge saw: a reading of idle after one of another status, never a first reading', () => {
+test('deck: release rule 3, by what the bridge saw: a reading of idle after one of another status', () => {
   const { clock, reg, perm } = setup()
-  // Held before the session's first reading, which shows it idle: the deck saw no change, whatever the time says.
+  // Held while the session's first reading showed it idle: the deck has seen no change, whatever the times say. A
+  // request is held only for a session the registry lists ("Desktop sessions only"), so it's never held before one.
+  reg([A, 'idle', clock.now() + 60_000])
   const p1 = perm(A, 'Write', W1)
   clock.advance(500)
-  reg([A, 'idle', clock.now()])
-  assert.equal(p1.r.sent.length, 0, 'a first reading is no change')
+  reg([A, 'idle', clock.now() + 60_000])
+  assert.equal(p1.r.sent.length, 0, 'idle again is no change, though its statusUpdatedAt is after the request came')
   reg([A, 'idle', null])
-  assert.equal(p1.r.sent.length, 0, 'idle again is no change either')
+  assert.equal(p1.r.sent.length, 0, 'nor is idle without statusUpdatedAt')
   reg([A, 'busy', null])
   reg([A, 'idle', clock.now() - 60_000])
   assert.deepEqual(p1.r.sent, [{ status: 200, json: {} }], 'it saw the change, whatever statusUpdatedAt says')
@@ -178,13 +241,18 @@ test('deck: release rule 3, by what the bridge saw: a reading of idle after one 
   reg([A, 'idle', null])
   assert.deepEqual([p2.r.sent, p3.r.sent], [[{ status: 200, json: {} }], [{ status: 200, json: {} }]], 'the change came after both')
 
-  // A session that left the registry and came back is read for the first time again.
-  const p4 = perm(B, 'Write', W1)
+  // A session that left the registry took its requests with it (rule 4). Back, it's read for the first time again,
+  // and a request held since waits for a change the deck sees.
   reg([A, 'idle'], [B, 'busy'])
+  const p4 = perm(B, 'Write', W1)
   reg([A, 'idle'])
-  const p5 = perm(B, 'Write', W1, { header: B.host })
+  reg([A, 'idle'], [B, 'idle'])
+  const p5 = perm(B, 'Write', W1)
   reg([A, 'idle'], [B, 'idle'])
   assert.deepEqual([p4.r.sent, p5.r.sent], [[{ status: 200, json: {} }], []], 'p4 by rule 4; p5 waits for a change')
+  reg([A, 'idle'], [B, 'busy'])
+  reg([A, 'idle'], [B, 'idle'])
+  assert.deepEqual(p5.r.sent, [{ status: 200, json: {} }])
 })
 
 test('deck: release rules 4 and 5: the registry file disappears, or the client closes', () => {
@@ -210,39 +278,234 @@ test('deck: nothing else answers a held request: no timeout, no default', () => 
   assert.equal(view().held.length, 1)
 })
 
-test('deck: the host comes from X-Deck-Host, else the sid in the registry; one that isn\'t a local_ id is missing', () => {
-  const { reg, perm, view } = setup()
-  reg([A, 'busy'])
-  const missing = [undefined, '', '$CLAUDE_CODE_HOST_SESSION_ID', 'not-local', 'local_', `local_${'x'.repeat(65)}`, 'local_a/b', ' local_a', 'local_a\n']
-  for (const header of missing) perm(A, 'Write', W1, { header })
-  assert.deepEqual(view().held.map((h) => h.host), missing.map(() => A.host), 'each placed by its sid')
-  perm(A, 'Write', W1, { header: `local_${'x'.repeat(64)}` })
-  assert.equal(view().held.at(-1).host, `local_${'x'.repeat(64)}`, '64 characters after local_ is still a host')
-  perm(B, 'Write', W1, { header: 'remote_b' })
-  assert.equal(view().held.at(-1).host, null, 'an unknown sid has no host yet')
-  reg([A, 'busy'], [B, 'busy'])
-  assert.equal(view().held.at(-1).host, B.host, 'filled in once the registry knows the sid')
+test('deck: a hook\'s request is taken only from a session the registry lists under its X-Deck-Host with its session_id; any other gets {} at once, and nothing is held or changed', () => {
+  // PROTOCOL.md, "Desktop sessions only": every Claude Code process that reads ~/.claude/settings.json runs the hooks.
+  const { deck, log, reg, hello, perm, pre, view } = setup()
+  const LONG = { sid: 'sid-long', host: `local_${'x'.repeat(64)}`, pid: 5 }
+  reg([A, 'busy'], [B, 'busy', undefined, { sessionId: undefined }], [LONG, 'busy'])
+  hello(A)
+  const none = [{ status: 200, json: {} }]
+  const cases = [
+    // A terminal or VS Code session, or a `claude -p` run: no host. Or a header Claude Code didn't fill in.
+    ...[undefined, '', '$CLAUDE_CODE_HOST_SESSION_ID', 'not-local', 'local_', `local_${'x'.repeat(65)}`, 'local_a/b', ' local_a', 'local_a\n'].map((header) => [A, { header }, 'no host: X-Deck-Host is missing or not a local_ id']),
+    // A `claude` started inside A: A's host, with its own session id.
+    [{ ...A, sid: 'sid-child' }, {}, 'the registry lists local_a under another sessionId'],
+    // A host the registry doesn't list, as a pre-warmed spare's before it's claimed.
+    [{ sid: 'sid-spare', host: 'local_spare' }, {}, "the registry doesn't list local_spare"],
+    // No session_id, and a listed host with no sessionId to compare it with.
+    [A, { extra: { session_id: undefined } }, 'no session_id'],
+    [B, {}, 'the registry lists local_b without a sessionId'],
+  ]
+  for (const [S, opts, why] of cases) {
+    const p = perm(S, 'Write', W1, opts)
+    const q = pre(S, 'default', opts)
+    const what = `${S.sid} with ${JSON.stringify(opts)}`
+    assert.deepEqual([p.kind, p.r.sent, q.kind, q.r.sent], ['unconfirmed', none, 'unconfirmed', none], what)
+    assert.deepEqual(log.filter((e) => e.kind === 'unconfirmed').slice(-2).map((e) => [e.route, e.why]), [['permission', why], ['pretool', why]], what)
+  }
+  assert.deepEqual(view().held, [], 'nothing held')
+  assert.deepEqual(Object.keys(deck.state().sessions), [A.host], 'no session made of them')
+  assert.deepEqual(view().settings[A.host], { model: 'm1', effort: null, mode: null }, 'nor their mode or effort taken')
+  assert.throws(() => deck.events({ sid: 'sid-child', host: '', inst: 'ichild', seq: 1, events: [] }), BadRequest, 'nor their session ids kept as pairs')
+
+  // Whether bridge.mjs reads the registry once more first: only when another reading could confirm it.
+  const needs = (header, body) => deck.hookNeedsReading(header, body)
+  assert.deepEqual(
+    [needs(A.host, { session_id: A.sid }), needs(undefined, { session_id: A.sid }), needs('not-local', { session_id: A.sid }), needs(A.host, {}), needs(A.host, { session_id: 'sid-child' }), needs('local_spare', { session_id: 'sid-spare' })],
+    [false, false, false, false, true, true],
+  )
+
+  // The session's own, with a host of up to 64 characters after local_, are taken.
+  const own = perm(A, 'Write', W1)
+  assert.deepEqual([own.kind, own.r.sent], ['tool', []], 'held')
+  assert.deepEqual(view().settings[A.host], { model: 'm1', effort: 'low', mode: 'default' }, 'its mode and effort taken')
+  assert.equal(perm(LONG, 'Write', W1).kind, 'tool')
+  assert.deepEqual(view().held.map((h) => h.host), [A.host, LONG.host])
+  assert.deepEqual(pre(A, 'default').r.sent, none, 'a mode check from it with no command in flight: no decision')
 })
 
-test('deck: the host fallback takes every sid and host pair seen from mods and hooks, and places a request held without a host by one later', () => {
+test('deck: a hook\'s request is confirmed by the pair, its X-Deck-Host listed with its session_id: a host and a session id the registry lists apart, each with another session, confirm nothing', () => {
+  // PROTOCOL.md, "Desktop sessions only": "a confirmed session is one the registry lists under the request's
+  // X-Deck-Host, with a sessionId equal to the request's session_id". Neither half alone will do: a host listed under
+  // another session, or a session id listed under another host or with a host the registry doesn't list.
+  const { deck, log, reg, hello, perm, pre, poll, view } = setup()
+  reg([A, 'busy'], [B, 'busy'])
+  hello(A)
+  hello(B)
+  // Each session has a mode command in flight for default, so a request taken as either's would be allowed at once.
+  const ca = deck.mode({ host: A.host, mode: 'default' }).cmd
+  const cb = deck.mode({ host: B.host, mode: 'default' }).cmd
+  poll(A)
+  poll(B)
+  assert.deepEqual([view().cmds[ca], view().cmds[cb]], ['delivered', 'delivered'])
+  const none = [{ status: 200, json: {} }]
+  const mode = { session_id: 'self', mode: 'default' }
+  const cases = [
+    // A listed host with another listed session's id.
+    [{ ...A, host: B.host }, 'the registry lists local_b under another sessionId'],
+    [{ ...B, host: A.host }, 'the registry lists local_a under another sessionId'],
+    // A host the registry doesn't list, as a pre-warmed spare's, with a listed session's id.
+    [{ ...A, host: 'local_spare' }, "the registry doesn't list local_spare"],
+    [{ ...B, host: 'local_spare' }, "the registry doesn't list local_spare"],
+  ]
+  for (const [S, why] of cases) {
+    const what = `X-Deck-Host ${S.host} with session_id ${S.sid}`
+    const raise = perm(S, MODE_TOOL, mode)
+    const write = perm(S, 'Write', W1)
+    const check = pre(S, 'default')
+    assert.deepEqual(
+      [raise.kind, raise.r.sent, write.kind, write.r.sent, check.kind, check.r.sent],
+      ['unconfirmed', none, 'unconfirmed', none, 'unconfirmed', none],
+      what,
+    )
+    assert.deepEqual(log.filter((e) => e.kind === 'unconfirmed').slice(-3).map((e) => [e.route, e.host, e.sid, e.why]), [
+      ['permission', S.host, S.sid, why], ['permission', S.host, S.sid, why], ['pretool', S.host, S.sid, why],
+    ], what)
+    assert.equal(deck.hookNeedsReading(S.host, { session_id: S.sid }), true, `${what}: the registry is read once more first`)
+  }
+  assert.deepEqual(view().held, [], 'nothing held')
+  assert.deepEqual(Object.keys(deck.state().sessions).toSorted(), [A.host, B.host], 'no session made of them')
+  assert.deepEqual([A, B].map((S) => view().settings[S.host]), [A, B].map(() => ({ model: 'm1', effort: null, mode: null })), 'nor their mode or effort taken')
+  // Each session's own check and raise still get their allowances: none went to a request from another.
+  for (const S of [A, B]) {
+    assert.deepEqual(pre(S, 'default').r.sent, [{ status: 200, json: PRE_ALLOW }], `${S.host}'s own mode check`)
+    assert.deepEqual(perm(S, MODE_TOOL, mode).r.sent, [{ status: 200, json: ALLOW }], `${S.host}'s own raise`)
+  }
+})
+
+test('deck: the host fallback places a mod\'s request by its sid, in the registry, then among the sid and host pairs seen from mods, never from hooks', () => {
   const { deck, reg, hello, perm, view } = setup()
+  const measure = (sid, host, inst, seq, percent) => deck.events({ sid, host, inst, seq, events: [{ t: 'measure', context: { percent, window: 10 }, at: 1 }] })
   reg([A, 'busy'])
-  // Neither session is in the registry. C's sid changes (a /clear, say), and its hook brings the new pair.
+  // The registry places a mod's request by its sid, whatever its host says.
+  measure(A.sid, 'not-local', A.inst, 1, 7)
+  assert.equal(view().context[A.host], 7)
+  // C isn't in the registry. Its sid changes (a /clear, say), and its mod's next hello brings the new pair.
   const C = { sid: 'sid-c1', host: 'local_c', inst: 'ic', pid: 3 }
-  const D = { sid: 'sid-d', host: 'local_d', inst: 'id', pid: 4 }
   hello(C)
-  perm({ ...C, sid: 'sid-c2' }, 'Write', W1)
-  // A late mod request on the first sid, and a hook's on the second, both without a host: each pair places its own.
-  deck.events({ sid: 'sid-c1', host: '', inst: 'ic', seq: 1, events: [{ t: 'measure', context: { percent: 9, window: 10 }, at: 1 }] })
+  hello({ ...C, sid: 'sid-c2' })
+  // A late request on the first sid and one on the second, both without a host: each pair places its own.
+  measure('sid-c1', '', C.inst, 1, 9)
   assert.equal(view().context[C.host], 9)
-  perm({ ...C, sid: 'sid-c2' }, 'Bash', { command: 'ls' }, { header: undefined })
-  assert.equal(view().held.at(-1).host, C.host)
-  // A request held without a host: a pair seen after it came places it at the next registry reading.
-  perm(D, 'Write', W1, { header: undefined })
-  assert.equal(view().held.at(-1).host, null)
-  hello(D)
-  reg([A, 'busy'])
-  assert.equal(view().held.at(-1).host, D.host)
+  measure('sid-c2', '', C.inst, 2, 10)
+  assert.equal(view().context[C.host], 10)
+
+  // A hook's session_id is no pair. D's PermissionRequest is confirmed and held; then the registry lists D under a
+  // new sessionId, and a mod request with no host and D's old sid can't be placed.
+  const D = { sid: 'sid-d', host: 'local_d', inst: 'id', pid: 4 }
+  reg([A, 'busy'], [D, 'busy'])
+  assert.equal(perm(D, 'Write', W1).kind, 'tool')
+  reg([A, 'busy'], [{ ...D, sid: 'sid-d2' }, 'busy'])
+  assert.throws(() => measure('sid-d', '', D.inst, 1, 5), BadRequest)
+  assert.equal(view().context[D.host], null)
+})
+
+test('deck: a hello from a host the registry lists under another sessionId is refused, and nothing of it is kept', () => {
+  const { deck, log, reg, hello, poll, view } = setup()
+  reg([A, 'idle'])
+  hello(A)
+  const n1 = poll(A)
+  // A `claude` started inside A, whose mod runs under A's host: the engine's test can't tell, so the bridge does.
+  const child = { ...A, sid: 'sid-child', inst: 'ichild' }
+  assert.throws(() => hello(child, { model: 'child-model', mode: 'plan' }), (err) => err instanceof NotThisSession && err.message === 'not this session')
+  assert.equal(n1.r.sent.length, 0, 'the session\'s open poll is left alone: no restart')
+  const s = deck.state().sessions[A.host]
+  assert.deepEqual([s.inst, s.insts, s.hello.inst], ['ia', ['ia'], 'ia'], 'nor is its inst current, or known')
+  assert.deepEqual(view().settings[A.host], { model: 'm1', effort: null, mode: null }, 'nor its model or mode taken')
+  assert.throws(() => deck.events({ sid: 'sid-child', host: '', inst: 'ichild', seq: 1, events: [] }), BadRequest, 'nor its sid a pair')
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 0)
+  assert.deepEqual(log.filter((e) => e.kind === 'hello' && e.status === 409).map((e) => [e.host, e.inst, e.sid, e.listedSid]), [[A.host, 'ichild', 'sid-child', A.sid]])
+  // A hello with no sid isn't the listed session's either; one on another version is refused for that first.
+  assert.throws(() => hello(A, { sid: undefined, inst: 'inosid' }), NotThisSession)
+  assert.deepEqual(hello(child, { v: 2 }), { v: 1, ok: false, error: 'version' })
+  // Whether bridge.mjs reads the registry once more first: only for a hello it would refuse.
+  const body = (S, extra = {}) => ({ v: 1, sid: S.sid, host: S.host, inst: S.inst, ...extra })
+  assert.deepEqual([deck.helloNeedsReading(body(child)), deck.helloNeedsReading(body(A)), deck.helloNeedsReading(body(child, { v: 2 })), deck.helloNeedsReading(body(B))], [true, false, false, false])
+
+  // A listed entry with no sessionId refuses nothing: only another sessionId does.
+  reg([A, 'idle'], [B, 'idle', undefined, { sessionId: undefined }])
+  assert.deepEqual(hello({ ...B, sid: 'sid-whatever' }), { v: 1, ok: true })
+})
+
+test('deck: a hello from a host the registry doesn\'t list yet, as from a pre-warmed spare, is taken, and the deck lists the session once the registry does', () => {
+  const { deck, reg, hello, poll, view } = setup()
+  const SPARE = { sid: 'sid-spare', host: 'local_spare', inst: 'isp', pid: 9 }
+  reg([A, 'idle'])
+  assert.deepEqual(hello(SPARE), { v: 1, ok: true })
+  assert.deepEqual([view().sessions, deck.state().sessions[SPARE.host].inst], [[A.host], 'isp'], 'unlisted, its inst current')
+  assert.match(deck.prompt({ host: SPARE.host, text: 'Hi.' }).error, /isn't running: the registry doesn't list it/)
+  assert.match(deck.mode({ host: SPARE.host, mode: 'plan' }).error, /isn't running: the registry doesn't list it/)
+  const n1 = poll(SPARE)
+  assert.equal(n1.r.sent.length, 0, 'its poll is held: it said hello')
+  // Claimed: the registry lists it, under the spare's session id.
+  reg([A, 'idle'], [SPARE, 'idle'])
+  assert.deepEqual(view().sessions.toSorted(), [A.host, SPARE.host])
+  const c = deck.prompt({ host: SPARE.host, text: 'Hi.' }).cmd
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Hi.' }] } }])
+})
+
+test('deck: only a hello makes an inst current: one that hasn\'t said hello has its events taken, its polls answered at once with none, and never takes the session over', () => {
+  // PROTOCOL.md, Identity: after a deck restart, a replaced instance's late request could take over a session's polls.
+  const { deck, log, reg, hello, ev, poll, view } = setup()
+  reg([A, 'idle'])
+  const OLD = { ...A, inst: 'iold' }
+  // Before any hello, as just after a deck restart: the replaced instance's late poll, and one with no inst.
+  const stray1 = poll(OLD)
+  const stray2 = poll(A, 20, null)
+  assert.deepEqual([stray1.r.sent, stray2.r.sent], [[{ status: 200, json: { cmds: [] } }], [{ status: 200, json: { cmds: [] } }]], 'answered at once')
+  assert.equal(deck.state().sessions[A.host].inst, null, 'neither made current')
+  // The live instance's hello, then its poll.
+  hello(A)
+  const n1 = poll(A)
+  assert.equal(n1.r.sent.length, 0, 'held')
+  // More from the old instance: its events are taken, its polls answered at once, and the live one's poll stays.
+  ev(OLD, { t: 'measure', context: { percent: 42, window: 10 } })
+  assert.equal(view().context[A.host], 42)
+  const stray3 = poll(OLD)
+  assert.deepEqual([stray3.r.sent, n1.r.sent], [[{ status: 200, json: { cmds: [] } }], []])
+  const c = deck.prompt({ host: A.host, text: 'x' }).cmd
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'x' }] } }], 'the current instance takes the command')
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 0, 'none of it is a restart')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-stale').map((e) => [e.poll, e.inst, e.current]), [[stray1.id, 'iold', null], [stray2.id, null, null], [stray3.id, 'iold', 'ia']])
+})
+
+test('deck: the deck remembers at least the last 8 insts that said hello for a session: none of them counts again', () => {
+  const { deck, log, reg, hello, poll } = setup()
+  reg([A, 'idle'])
+  const insts = Array.from({ length: 9 }, (_, i) => `i${i + 1}`)
+  for (const inst of insts) hello({ ...A, inst })
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 8)
+  const n = poll({ ...A, inst: 'i9' })
+  // The oldest eight say hello again, as after a failed request: none is a restart, and the current one's poll stays.
+  for (const inst of insts.slice(0, 8)) assert.deepEqual(hello({ ...A, inst }), { v: 1, ok: true })
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 8)
+  assert.deepEqual([deck.state().sessions[A.host].inst, n.r.sent], ['i9', []])
+  // Its fields are taken all the same, as an event's would be.
+  hello({ ...A, inst: 'i1' }, { model: 'm2', mode: 'plan' })
+  assert.deepEqual(deck.view().settings[A.host], { model: 'm2', effort: null, mode: 'plan' })
+  assert.equal(deck.state().sessions[A.host].inst, 'i9')
+})
+
+test('deck: a result is taken only from the inst its command was delivered to', () => {
+  // PROTOCOL.md, "Commands": one from another inst is ignored, as the deck ignores it.
+  const { deck, log, reg, hello, poll, view } = setup()
+  reg([A, 'idle'])
+  hello(A)
+  hello({ ...A, inst: 'ia2' })
+  const c = deck.prompt({ host: A.host, text: 'x' }).cmd
+  poll({ ...A, inst: 'ia2' })
+  const result = (inst, state) => deck.result({ sid: A.sid, host: A.host, ...(inst === undefined ? {} : { inst }), id: c, state })
+  // From the instance it replaced, from one that never said hello, and with no inst at all.
+  for (const inst of ['ia', 'izz', undefined]) result(inst, 'waiting')
+  assert.equal(view().cmds[c], 'delivered')
+  assert.deepEqual(log.filter((e) => e.kind === 'result-ignored').map((e) => e.why), [
+    'it came from inst "ia", and was delivered to ia2', 'it came from inst "izz", and was delivered to ia2', 'it came from inst (none), and was delivered to ia2',
+  ])
+  result('ia2', 'waiting')
+  result('ia', 'done')
+  assert.equal(view().cmds[c], 'waiting')
+  result('ia2', 'done')
+  assert.equal(view().cmds[c], 'done')
 })
 
 test('deck: a mod request it can\'t place is refused, so the bridge answers 400', () => {
@@ -341,6 +604,25 @@ test('deck: a prompt\'s waiting stops its 60 s; it fails only once its session h
   assert.deepEqual([view().cmds[m], error(m)], ['failed', 'no result'])
 })
 
+test('deck: a poll answered at once, with wait 0 or with commands queued, starts a waiting prompt\'s 60 s without a poll again', () => {
+  // README, "Where PROTOCOL.md leaves room": it shows the mod is there.
+  const { deck, clock, reg, hello, poll, view } = setup()
+  reg([A, 'idle'])
+  hello(A)
+  const c1 = deck.prompt({ host: A.host, text: 'one' }).cmd
+  poll(A)
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c1, state: 'waiting' })
+  clock.advance(50_000)
+  assert.deepEqual(poll(A, 0).r.sent, [{ status: 200, json: { cmds: [] } }], 'wait 0')
+  clock.advance(50_000)
+  const c2 = deck.mode({ host: A.host, mode: 'plan' }).cmd
+  assert.deepEqual(poll(A).r.sent[0].json.cmds.map((c) => c.id), [c2], 'one that takes a command')
+  clock.advance(59_999)
+  assert.equal(view().cmds[c1], 'waiting', '159.999 s since it went waiting, 59.999 s since the last poll\'s answer')
+  clock.advance(1)
+  assert.deepEqual([view().cmds[c1], deck.state().commands.find((c) => c.id === c1).error], ['failed', 'no result'])
+})
+
 test('deck: release rule 4 fails all the session\'s commands, answers its open poll and forgets the session', () => {
   const { deck, clock, reg, hello, ev, perm, poll, view } = setup()
   reg([A, 'busy'], [B, 'busy'])
@@ -372,6 +654,13 @@ test('deck: release rule 4 fails all the session\'s commands, answers its open p
   reg()
   assert.deepEqual(nB.r.sent, [{ status: 200, json: { cmds: [] } }], 'its open poll is answered')
   assert.equal(clock.pending, 0, 'no timers left behind')
+
+  // A later request from the session's mod starts afresh: its seqs are forgotten with its insts, so the same inst's
+  // seq 1 is taken, not dropped as a retry.
+  reg([A, 'busy'])
+  deck.events({ sid: A.sid, host: A.host, inst: A.inst, seq: 1, events: [{ t: 'measure', context: { percent: 60, window: 10 }, at: 1 }] })
+  assert.equal(view().context[A.host], 60)
+  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts], [null, []], 'and no inst current until its next hello')
 })
 
 test('deck: long polls: wait, one open poll per session, answered as soon as a command is queued', () => {
@@ -665,7 +954,66 @@ test('deck: a main-loop turn.start ends the polls answered at once after the tur
   assert.equal(atOnce(log).length, 3)
 })
 
-test('deck: the polls after the main loop\'s turn end are answered at once for less than 60 s after it, by the bridge\'s clock', () => {
+test('deck: the 60 s of polls answered at once after a turn end run on the monotonic clock: the wall clock jumping either way moves them not at all', () => {
+  // As the deck times them. A time sync after wake moves the wall clock, and so does a fixture runner's clock that
+  // follows the registry's times (PROTOCOL.md, "Fixtures").
+  const { clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  clock.jumpWall(120_000)
+  clock.advance(1_000)
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }], 'at once: the wall clock says 121 s, the monotonic 1 s')
+  clock.jumpWall(-600_000)
+  clock.advance(58_999)
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }], 'at once: 59.999 s, though the wall clock went back')
+  clock.advance(1)
+  const held = poll(A)
+  assert.equal(held.r.sent.length, 0, 'held from 60 s on')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-at-once').map((e) => e.sinceTurnEndMs), [1_000, 59_999])
+})
+
+test('deck: a session\'s time without an open poll runs on the monotonic clock too: a wall clock that jumps fails no waiting prompt early', () => {
+  const { deck, clock, reg, hello, poll, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const result = (id) => deck.result({ sid: A.sid, host: A.host, inst: A.inst, id, state: 'waiting' })
+  const c1 = deck.prompt({ host: A.host, text: 'one' }).cmd
+  const c2 = deck.prompt({ host: A.host, text: 'two' }).cmd
+  poll(A)
+  result(c1)
+  // The wall clock jumps 2 minutes on before the second prompt's waiting comes, which looks at the time without a poll again.
+  clock.jumpWall(120_000)
+  clock.advance(1_000)
+  result(c2)
+  assert.deepEqual([view().cmds[c1], view().cmds[c2]], ['waiting', 'waiting'])
+  clock.advance(58_999)
+  assert.deepEqual([view().cmds[c1], view().cmds[c2]], ['waiting', 'waiting'], '59.999 s without a poll')
+  clock.advance(1)
+  assert.deepEqual([view().cmds[c1], view().cmds[c2]], ['failed', 'failed'], '60 s')
+})
+
+test('deck: a poll answered at once after the main loop\'s turn end counts as the mod polling, for a waiting prompt\'s clock', () => {
+  // README, "Where PROTOCOL.md leaves room": such a poll counts as answered like any poll answered at once.
+  const { deck, clock, reg, hello, ev, poll, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const c = deck.prompt({ host: A.host, text: 'Next.' }).cmd
+  poll(A)
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c, state: 'waiting' })
+  const n1 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }], 'the open poll, at the turn end')
+  // 50 s on, the mod's next poll, answered at once as the registry still says busy; then nothing.
+  clock.advance(50_000)
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }])
+  clock.advance(59_999)
+  assert.equal(view().cmds[c], 'waiting', '60 s run from that poll\'s answer, not from the turn end')
+  clock.advance(1)
+  assert.deepEqual([view().cmds[c], deck.state().commands.find((x) => x.id === c).error], ['failed', 'no result'])
+})
+
+test('deck: the polls after the main loop\'s turn end are answered at once for less than 60 s after it, by the bridge\'s monotonic clock', () => {
   const { deck, clock, log, reg, hello, ev, poll } = setup()
   reg([A, 'busy'])
   hello(A)
@@ -1427,8 +1775,8 @@ test('deck: answer refuses an ask request, which the deck never answers: a press
   assert.equal(deck.press('approve').jumped, A.host)
 })
 
-test('deck: reset and close answer held requests with {} and open polls with no commands', () => {
-  const { deck, clock, reg, hello, perm, poll, view } = setup()
+test('deck: a reset answers held requests with {} and cuts open polls off with no answer, so their mods say hello again; close answers polls with no commands', () => {
+  const { deck, clock, log, reg, hello, perm, poll, view } = setup()
   reg([A, 'busy'])
   hello(A)
   const p1 = perm(A, 'Write', W1)
@@ -1438,10 +1786,29 @@ test('deck: reset and close answer held requests with {} and open polls with no 
   deck.reset()
   assert.deepEqual(p1.r.sent, [{ status: 200, json: {} }])
   assert.deepEqual(n1.r.sent[0].json.cmds.length, 1)
-  assert.equal(n2.r.sent.length, 1)
+  // A poll answered with none would go through: the mod, which says hello again only after a failed request, would
+  // poll on with an inst the reset forgot, its polls answered at once for good.
+  assert.deepEqual([n2.r.sent, n2.r.wasCut], [[], true], 'the open poll is cut off, so the mod\'s fetch fails')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-cut').map((e) => [e.host, e.poll, e.inst]), [[A.host, n2.id, A.inst]])
   assert.deepEqual([view().sessions, view().held, view().cmds], [[], [], {}])
   assert.equal(clock.pending, 0, 'no timers left behind')
+  // Until it says hello again, the reset having forgotten its inst, its polls are answered at once with none: as a mod
+  // with no poll open at the reset, waiting out its second after a poll answered at once, finds them.
   reg([A, 'busy'])
+  const stale = poll(A)
+  assert.deepEqual(stale.r.sent, [{ status: 200, json: { cmds: [] } }])
+  // Its fetch failed, so the mod says hello again, with the same inst: current again, its next poll is held and takes
+  // the next command.
   hello(A)
-  assert.equal(deck.prompt({ host: A.host, text: 'y' }).cmd, 'cmd-2', 'command ids stay unique for the run')
+  const n3 = poll(A)
+  assert.equal(n3.r.sent.length, 0, 'held')
+  const c = deck.prompt({ host: A.host, text: 'y' }).cmd
+  assert.equal(c, 'cmd-2', 'command ids stay unique for the run')
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'y' }] } }])
+  // Closing: nothing serves the mod's next request, so open polls are answered with no commands.
+  const p2 = perm(A, 'Write', W1)
+  const n4 = poll(A)
+  deck.close()
+  assert.deepEqual([p2.r.sent, n4.r.sent, n4.r.wasCut], [[{ status: 200, json: {} }], [{ status: 200, json: { cmds: [] } }], false])
+  assert.equal(clock.pending, 0, 'no timers left behind')
 })

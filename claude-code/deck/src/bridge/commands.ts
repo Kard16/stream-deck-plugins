@@ -14,6 +14,12 @@ export const FINAL_STATES: ReadonlySet<CommandState> = new Set(["done", "refused
 
 export type CommandSpec = { t: "prompt"; text: string } | { t: "mode"; mode: Mode };
 
+/**
+ * The two hooks that can ask about a mode command's change, each of which the bridge allows once per command
+ * without a press: the mode check (`POST /v1/pretool`) and kind mode's PermissionRequest (`POST /v1/permission`).
+ */
+export type ModeHook = "pretool" | "permission";
+
 export type Command = CommandSpec & {
 	/** "c1", "c2"… unique within the bridge's run. */
 	readonly id: string;
@@ -25,8 +31,8 @@ export type Command = CommandSpec & {
 	/** `error` from a refused or failed result, or why the deck gave up on it. */
 	error: string | null;
 	detail: string | null;
-	/** A mode command's PermissionRequest was allowed (kind mode): one allow per command. */
-	allowed: boolean;
+	/** Which hooks have had their allow for this mode command: one each, counted apart (PROTOCOL.md, Mode checks). */
+	allowed: Record<ModeHook, boolean>;
 };
 
 /** A held HTTP request the queue can also be told closed early. */
@@ -96,7 +102,7 @@ export class CommandQueue {
 
 	/** Queues a command for a session and hands it to its open poll, if there is one. */
 	queue(host: string, spec: CommandSpec): Command {
-		const cmd: Command = { ...spec, id: `c${this.#nextId++}`, host, state: "queued", inst: null, deliveredAt: null, error: null, detail: null, allowed: false };
+		const cmd: Command = { ...spec, id: `c${this.#nextId++}`, host, state: "queued", inst: null, deliveredAt: null, error: null, detail: null, allowed: { pretool: false, permission: false } };
 		this.#commands.set(cmd.id, cmd);
 		this.#log.info(`QUEUED ${cmd.id} ${describe(cmd)} for ${host}`);
 		this.#prune();
@@ -176,10 +182,13 @@ export class CommandQueue {
 		return true;
 	}
 
-	/** The session's mode command in flight for `mode` that hasn't had its PermissionRequest allowed yet. */
-	inFlightMode(host: string, mode: unknown): Command | null {
+	/**
+	 * The session's mode command in flight (delivered, or a stray waiting) for `mode` that `hook` hasn't had its
+	 * allow for yet; the caller marks it allowed. Each hook gets one allow per command, whatever the other got.
+	 */
+	inFlightMode(host: string, mode: unknown, hook: ModeHook): Command | null {
 		for (const cmd of this.#commands.values()) {
-			if (cmd.host !== host || cmd.t !== "mode" || cmd.mode !== mode || cmd.allowed) continue;
+			if (cmd.host !== host || cmd.t !== "mode" || cmd.mode !== mode || cmd.allowed[hook]) continue;
 			if (cmd.state === "delivered" || cmd.state === "waiting") return cmd;
 		}
 		return null;

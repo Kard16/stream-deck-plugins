@@ -1,6 +1,9 @@
 // streamdeck-bridge: the mod, one instance per session (PROTOCOL.md, "Parties"). It says hello to the Stream Deck
-// bridge, reports the session's events, and fetches and runs the deck's commands. The PermissionRequest hook in
-// hooks.json is the plugin's other half.
+// bridge, reports the session's events, and fetches and runs the deck's commands. The hooks in hooks.json are the
+// plugin's other half: the PermissionRequest hook, and the mode hook, a PreToolUse hook on the app's mode tool alone.
+//
+// Every Claude Code process that reads ~/.claude/settings.json loads this mod, but it talks to the bridge only in a
+// desktop session of its own (desktop.ts). Anywhere else it sends nothing, logs once why, and its hooks pass through.
 //
 // Every hook hands its news to the bridge and returns next(e)'s own result: nothing waits on the deck, nothing is
 // rewritten, and no error of this plugin reaches the session (a gating hook's .catch passes the call on, as if
@@ -20,7 +23,7 @@ type Dollar = EngineInterface
 
 let bridge: Bridge | undefined
 
-/** Every call this plugin makes on the engine. `$.env.get` takes string literals only. */
+/** Every call this plugin makes on the engine. `$.env.get` takes string literals only: one closure per variable. */
 function adapter($: Dollar): BridgeHost & CommandHost {
   return {
     fetch: (url, init) => $.http.fetch(url, init),
@@ -28,6 +31,10 @@ function adapter($: Dollar): BridgeHost & CommandHost {
     log: text => $.ui.log(text, { to: 'debug' }),
     token: () => $.env.get('DECK_TOKEN'),
     hostId: () => $.env.get('CLAUDE_CODE_HOST_SESSION_ID'),
+    entrypoint: () => $.env.get('CLAUDE_CODE_ENTRYPOINT'),
+    claudeCode: () => $.env.get('CLAUDECODE'),
+    childSession: () => $.env.get('CLAUDE_CODE_CHILD_SESSION'),
+    tags: () => $.env.get('CLAUDE_CODE_TAGS'),
     sid: () => $.session.id(),
     cwd: () => $.session.cwd(),
     model: () => $.session.model(),

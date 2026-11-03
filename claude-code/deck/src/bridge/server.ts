@@ -2,25 +2,34 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 
 import { isObj, type Obj, ROUTES } from "../protocol/wire.js";
+import { type Clock, realClock } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote, redacting, Scrubber } from "../util/log.js";
+import { QuietLog } from "../util/quiet-log.js";
 import type { PollReply } from "./commands.js";
 import { allowedHosts, BRIDGE_HOST, MAX_BODY_BYTES } from "./config.js";
 import { checkBearer } from "./token.js";
 
 export type BridgeState = "starting" | "listening" | "retrying" | "stopped";
 
-/** A route's answer: a status, and a JSON body unless the status is 204. */
-export type RouteAnswer = { status: number; body?: unknown };
+/**
+ * A route's answer: a status, and a JSON body unless the status is 204. `logged`: the route has logged a refusal
+ * itself, quietly (a 409 hello, say), so the bridge's own line for it goes at debug.
+ */
+export type RouteAnswer = { status: number; body?: unknown; logged?: boolean };
 
 /**
  * What the bridge does with each route, once the Host, the token, the method and the body have passed.
  * The deck's session model implements it (src/model/sessions.ts). `permission` and `next` may hold their
- * request; the others answer at once.
+ * request; the others answer at once. `permission`, `pretool` and `hello` may first read the registry once more
+ * (PROTOCOL.md, Desktop sessions only), and then return a promise that settles once they have answered or held
+ * the request.
  */
 export interface BridgeRoutes {
 	/** `POST /v1/permission`: the hook's input, and the `X-Deck-Host` header as sent. */
-	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void;
-	hello(body: Obj): RouteAnswer;
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void>;
+	/** `POST /v1/pretool`: the mode hook's input, and the `X-Deck-Host` header as sent. Answered, never held. */
+	pretool(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void>;
+	hello(body: Obj): RouteAnswer | Promise<RouteAnswer>;
 	events(body: Obj): RouteAnswer;
 	next(query: URLSearchParams, reply: PollReply): void;
 	result(body: Obj): RouteAnswer;
@@ -36,6 +45,8 @@ export type BridgeOptions = {
 	maxBodyBytes?: number;
 	/** Node's server options, for tests that shorten its timeouts. */
 	http?: http.ServerOptions;
+	/** Times the quiet logging of refused requests; a fake one in tests. */
+	clock?: Clock;
 };
 
 /** Listen retries back off from 1 s to 30 s: the port may be busy, and macOS 26 can refuse loopback for a while after boot. */
@@ -46,6 +57,7 @@ const CLIENT_ERRORS: Record<string, number> = { HPE_HEADER_OVERFLOW: 431, HPE_CH
 
 const METHODS: Record<string, "GET" | "POST"> = {
 	[ROUTES.permission]: "POST",
+	[ROUTES.pretool]: "POST",
 	[ROUTES.hello]: "POST",
 	[ROUTES.events]: "POST",
 	[ROUTES.next]: "GET",
@@ -56,12 +68,16 @@ const METHODS: Record<string, "GET" | "POST"> = {
  * The bridge: HTTP/1.1 on 127.0.0.1 (PROTOCOL.md, Transport). In order: a Host other than 127.0.0.1:<port> or
  * localhost:<port> gets 403; a missing or wrong bearer token 401; an unknown route 404; a wrong method 405; a
  * body over the limit 413; a body that isn't JSON 400. Error answers are `{"error": "<reason>"}`. No CORS
- * headers. The token is never logged, nor is any header that might hold it.
+ * headers. The token is never logged, nor is any header that might hold it. A 403 or 401 is logged quietly,
+ * since a client with a stale token keeps trying: the first per route and reason at info, then at most one
+ * info line in 10 minutes, with the count since, and the rest at debug.
  */
 export class BridgeServer {
-	readonly #opts: Required<Omit<BridgeOptions, "http">> & { http: http.ServerOptions };
+	readonly #opts: Required<Omit<BridgeOptions, "http" | "clock">> & { http: http.ServerOptions };
 	/** Takes the token out of what clients send, and out of the log. */
 	readonly #scrubber: Scrubber;
+	/** The 403s and 401s, keyed by route and reason. */
+	readonly #refusals: QuietLog;
 	readonly #listeners = new Set<(state: BridgeState) => void>();
 	#server: http.Server | null = null;
 	#state: BridgeState = "stopped";
@@ -82,6 +98,7 @@ export class BridgeServer {
 			maxBodyBytes: opts.maxBodyBytes ?? MAX_BODY_BYTES,
 			http: opts.http ?? {},
 		};
+		this.#refusals = new QuietLog(this.#opts.log, { clock: opts.clock ?? realClock });
 	}
 
 	get state(): BridgeState {
@@ -93,7 +110,10 @@ export class BridgeServer {
 		return this.#port;
 	}
 
-	/** How many requests reached a route so far. The fixture runner waits on it to keep requests in order. */
+	/**
+	 * How many requests a route has taken so far: answered, or held for an answer later, after any second reading
+	 * of the registry it made first. The fixture runner waits on it to keep requests in order.
+	 */
 	get routed(): number {
 		return this.#routed;
 	}
@@ -215,8 +235,13 @@ export class BridgeServer {
 		const target = q < 0 ? url : url.slice(0, q);
 		const queryString = q < 0 ? "" : url.slice(q + 1);
 		const what = `${method} ${this.#show(target)}`;
-		const refuse = (status: number, why: string, headers: Record<string, string> = {}): void => {
-			log.info(`REQ ${status} ${what}: ${why}`);
+		const allowed = methodFor(target);
+		/** `quiet`: the reason's name, when the client is apt to repeat it; the line is then logged quietly. */
+		const refuse = (status: number, why: string, headers: Record<string, string> = {}, quiet?: string): void => {
+			const line = `REQ ${status} ${what}: ${why}`;
+			// Keyed by route and reason. Every path that isn't a route shares one key, so no client can make many.
+			if (quiet === undefined) log.info(line);
+			else this.#refusals.note(`${allowed === undefined ? "another path" : target} ${quiet}`, line);
 			// The reason stays in the log: the answer names only the status, never echoing what the client sent.
 			reply(res, status, { error: http.STATUS_CODES[status] ?? "error" }, headers);
 			// Drop the rest of any body without reading it.
@@ -226,15 +251,15 @@ export class BridgeServer {
 		const host = req.headers.host;
 		const port = this.#port ?? this.#opts.port;
 		if (host === undefined || !allowedHosts(port).includes(host.toLowerCase())) {
-			refuse(403, `Host ${this.#show(host)} isn't 127.0.0.1:${port} or localhost:${port}`);
+			refuse(403, `Host ${this.#show(host)} isn't 127.0.0.1:${port} or localhost:${port}`, {}, "bad Host");
 			return;
 		}
 		const auth = checkBearer(req.headers.authorization, token);
 		if (auth !== "ok") {
-			refuse(401, auth === "missing" ? "no token" : "wrong token", { "www-authenticate": 'Bearer realm="streamdeck"' });
+			const why = auth === "missing" ? "no token" : "wrong token";
+			refuse(401, why, { "www-authenticate": 'Bearer realm="streamdeck"' }, why);
 			return;
 		}
-		const allowed = METHODS[target];
 		if (allowed === undefined) {
 			refuse(404, "no such route");
 			return;
@@ -250,7 +275,6 @@ export class BridgeServer {
 			// (the mod's inst in a log line, say) can carry part of it.
 			const query = new URLSearchParams();
 			for (const [name, value] of new URLSearchParams(queryString)) query.append(this.#scrubber.scrub(name), this.#scrubber.scrub(value));
-			this.#routed++;
 			this.#guard(what, res, () => routes.next(query, this.#heldReply(req, res)));
 			return;
 		}
@@ -264,6 +288,12 @@ export class BridgeServer {
 					refuse(400, `the body isn't JSON (${Buffer.byteLength(text)} bytes)`);
 					return;
 				}
+				const hook = target === ROUTES.permission || target === ROUTES.pretool;
+				// A hook's body is Claude Code's, and its route answers whatever it is; the mod's are objects.
+				if (!hook && !isObj(parsed)) {
+					refuse(400, "the body isn't a JSON object");
+					return;
+				}
 				this.#guard(what, res, () => {
 					// With the token taken out of every string first, nothing cut from the body later (a tool's summary
 					// on a key, a line in the log) can carry part of it. It's taken out after parsing, since a run of the
@@ -271,21 +301,16 @@ export class BridgeServer {
 					// however long its strings or deep its nesting, so a valid body never gets 400 for it; were it to
 					// throw all the same, the guard answers 500 and the bridge carries on.
 					const body = scrubJson(parsed, this.#scrubber);
-					if (target === ROUTES.permission) {
-						const deckHost = req.headers["x-deck-host"];
-						this.#routed++;
-						routes.permission(body, typeof deckHost === "string" ? deckHost : undefined, this.#heldReply(req, res));
-						return;
+					if (hook) {
+						const header = req.headers["x-deck-host"];
+						const deckHost = typeof header === "string" ? header : undefined;
+						const held = this.#heldReply(req, res);
+						return target === ROUTES.permission ? routes.permission(body, deckHost, held) : routes.pretool(body, deckHost, held);
 					}
-					if (!isObj(body)) {
-						refuse(400, "the body isn't a JSON object");
-						return;
-					}
-					this.#routed++;
-					const answer = target === ROUTES.hello ? routes.hello(body) : target === ROUTES.events ? routes.events(body) : routes.result(body);
-					if (answer.status >= 400) log.info(`REQ ${answer.status} ${what}: ${JSON.stringify(answer.body ?? null)}`);
-					else log.debug(`REQ ${answer.status} ${what}`);
-					reply(res, answer.status, answer.body, {});
+					const obj = body as Obj;
+					const answer = target === ROUTES.hello ? routes.hello(obj) : target === ROUTES.events ? routes.events(obj) : routes.result(obj);
+					if (answer instanceof Promise) return answer.then((a) => this.#answer(what, res, a));
+					this.#answer(what, res, answer);
 				});
 			},
 			(err: unknown) => {
@@ -295,17 +320,46 @@ export class BridgeServer {
 		);
 	}
 
+	/** Sends a route's answer, with a log line: at info for an error, unless the route has logged it already. */
+	#answer(what: string, res: ServerResponse, answer: RouteAnswer): void {
+		const line = `REQ ${answer.status} ${what}`;
+		if (answer.status < 400) this.#opts.log.debug(line);
+		else if (answer.logged) this.#opts.log.debug(`${line}: ${JSON.stringify(answer.body ?? null)}`);
+		else this.#opts.log.info(`${line}: ${JSON.stringify(answer.body ?? null)}`);
+		reply(res, answer.status, answer.body, {});
+	}
+
 	/**
-	 * Runs a route, with the scrubbing of its body; whatever throws there gets a 500 for its client and a log
-	 * line, and the bridge carries on.
+	 * Runs a route, with the scrubbing of its body, and counts the request as routed once the route has answered or
+	 * held it, which may come after a promise. Whatever throws there, or rejects, gets a 500 for its client and a
+	 * log line, and the bridge carries on.
 	 */
-	#guard(what: string, res: ServerResponse, run: () => void): void {
-		try {
-			run();
-		} catch (err) {
+	#guard(what: string, res: ServerResponse, run: () => void | Promise<void>): void {
+		const failed = (err: unknown): void => {
 			this.#opts.log.error(`${what} failed: ${describeError(err)}`);
 			reply(res, 500, { error: "internal error" }, {});
+		};
+		let taking: void | Promise<void>;
+		try {
+			taking = run();
+		} catch (err) {
+			failed(err);
+			this.#routed++;
+			return;
 		}
+		if (!(taking instanceof Promise)) {
+			this.#routed++;
+			return;
+		}
+		taking.then(
+			() => {
+				this.#routed++;
+			},
+			(err: unknown) => {
+				failed(err);
+				this.#routed++;
+			},
+		);
 	}
 
 	/** The answer handle for a request a route may hold. */
@@ -341,6 +395,11 @@ export class BridgeServer {
 }
 
 class TooLarge extends Error {}
+
+/** The method a route takes; undefined for a path that isn't one, such as "__proto__". */
+function methodFor(target: string): "GET" | "POST" | undefined {
+	return Object.hasOwn(METHODS, target) ? METHODS[target] : undefined;
+}
 
 /**
  * A parsed body with the token taken out of every string in it, names included (see Scrubber). The body is

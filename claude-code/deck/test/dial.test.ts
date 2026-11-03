@@ -54,7 +54,7 @@ const shown = (dials: SessionsDials): unknown => {
 describe("Sessions dial", () => {
 	test("shows one session in the layout's own keys: title, status, context, model and effort, position", () => {
 		const { clock, model, dials, sent } = setup([session("1", { name: "Fix the build", status: "busy" }), session("2")]);
-		model.hello({ v: 1, host: "local_1", inst: "i", model: "claude-haiku-5-5", effort: "low" });
+		model.hello({ v: 1, sid: "uuid-1", host: "local_1", inst: "i", model: "claude-haiku-5-5", effort: "low" });
 		model.events({ host: "local_1", inst: "i", seq: 1, events: [{ t: "tool.start", tool: "Read", use: "u", summary: "notes.md", fp: "1" }, { t: "measure", context: { percent: 12 } }] });
 		clock.advance(200);
 		const p = dials.painted("d1") as Record<string, { value: unknown }>;
@@ -172,7 +172,7 @@ describe("Mode dial", () => {
 		const model = new SessionModel({ clock, log, wallNow: () => 5000 });
 		model.setRegistry([session("1"), session("2")]);
 		model.setBridgeState("listening");
-		model.hello({ v: 1, host: "local_1", inst: "i", model: "claude-haiku-5-5", mode: "default", effort: "low" });
+		model.hello({ v: 1, sid: "uuid-1", host: "local_1", inst: "i", model: "claude-haiku-5-5", mode: "default", effort: "low" });
 		const poll = new FakeReply();
 		model.next(new URLSearchParams({ host: "local_1", inst: "i" }), poll);
 		model.pick("local_1");

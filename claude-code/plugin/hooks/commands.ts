@@ -3,9 +3,13 @@
 // - prompt: submitted as the user's own words. It reports `waiting` once the engine has it, which holds it until
 //   the session is idle (S3), then `done` when it entered, or `refused` with the engine's reason when it was
 //   dropped, as after the user pressed Esc (S2).
-// - mode: the app's own mode tool for this session. `done` carries the app's text, and the deck then hears the new
-//   mode as a settings event; `refused` carries the tool's text. Raising the mode makes the app ask permission,
-//   which the bridge grants because this change is in flight (S4).
+// - mode: the app's own mode tool for this session. Before the call runs, the mode hook (PreToolUse, hooks.json)
+//   asks the bridge, which allows it because this change is in flight, so the auto-mode classifier never judges it
+//   (PROTOCOL.md, "Mode checks"). A raise then brings up the app's approval as a PermissionRequest, which the bridge
+//   allows as kind mode (S4); a change that doesn't raise brings none. `done` carries the app's text, and the deck
+//   then hears the new mode as a settings event; `refused` carries the tool's text. A session started before its
+//   plugin had the mode hook doesn't get it from a hot reload: there a change from Auto is refused or never
+//   answered, and the deck fails it after 60 s.
 //
 // A call that throws is `failed`, with its message, as is a command this plugin won't run: an unknown type, a
 // prompt with no text, or a mode outside the four the deck may set.

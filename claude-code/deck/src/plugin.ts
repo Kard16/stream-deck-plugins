@@ -69,10 +69,11 @@ const openSession = (host: string): void => {
 	});
 };
 
-// The session model: the registry, the app's records and the bridge, merged by the app's local_ id.
-const model = new SessionModel({ log: scope("Sessions") });
+// The session model: the registry, the app's records and the bridge, merged by the app's local_ id. A hook's request
+// or a hello that the latest reading doesn't confirm has the registry read once more at once, not at the next scan.
 const registryLog = scope("Registry");
 const registry = new RegistryWatcher(new RegistryReader(REGISTRY_DIR, { log: registryLog }), { log: registryLog });
+const model = new SessionModel({ log: scope("Sessions"), rescan: () => registry.scanNow() });
 const recordsLog = scope("Records");
 const records = new RecordsWatcher(new RecordsReader(RECORDS_DIR, { log: recordsLog }), { log: recordsLog });
 registry.onChange((sessions) => {

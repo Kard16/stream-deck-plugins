@@ -69,26 +69,45 @@ export function runLog(env) {
   return fs.readFileSync(path.join(env.runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
 }
 
-/** A responder that records what it's sent; set `open = false` to play a client that went away. */
+/**
+ * A responder that records what it's sent, and `wasCut` when its connection was cut off with no answer; set
+ * `open = false` to play a client that went away.
+ */
 export function responder() {
   return {
     open: true,
     sent: [],
+    wasCut: false,
     send(status, json) {
       if (!this.open) throw new Error('sent on a closed responder')
       this.open = false
       this.sent.push({ status, json })
     },
+    cut() {
+      if (!this.open) throw new Error('cut on a closed responder')
+      this.open = false
+      this.wasCut = true
+      return true
+    },
   }
 }
 
-/** A clock and timers the test moves by hand. */
+/**
+ * Clocks and timers the test moves by hand. `now` is the monotonic clock, which `advance(ms)` moves, firing the
+ * timers due. `wall` is the wall clock: it moves with `now`, and `jumpWall(ms)` moves it alone, as a time sync after
+ * wake can, or a fixture runner's clock that follows the registry's times.
+ */
 export function fakeTimers(start = 1_800_000_000_000) {
   let now = start
+  let wallOffset = 0
   let seq = 0
   const timers = new Map()
   return {
     now: () => now,
+    wall: () => now + wallOffset,
+    jumpWall(ms) {
+      wallOffset += ms
+    },
     setTimer: (fn, ms) => {
       const id = ++seq
       timers.set(id, { at: now + ms, fn })
