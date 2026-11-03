@@ -869,6 +869,13 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - re-applying the shown mode fails the new test;
     - alerting on an unturned press fails both.
   - `claude-code/README.md`'s Mode dial bullet says so.
+  - **Committed** as cdef222. Only the Claude deck plugin was restarted, on 0.3.3, at 14:18:57Z. Both running sessions said hello with plugin 0.2.1 within 22 ms.
+- 2026-11-03, **the user's checks so far, by the deck's log** (the user hasn't reported yet):
+  - Item 2: the Claude app was restarted. The registry lists 2 sessions, and T2–T4 aren't running.
+  - Item 3, at 14:13 on the session "Stream Deck Claude Code plugin":
+    - Auto to Manual: one command, done.
+    - Back to Auto: the mode check and kind mode's PermissionRequest were both allowed for the same command, and it was done in 0.2 s.
+    - Whether the app's card stayed up is the user's to say.
 
 ## Progress
 
