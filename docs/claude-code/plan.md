@@ -663,9 +663,14 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - A short turn on T2 ended at 04:07:04.170Z. The registry went idle 6 ms later, and the deck showed done 0.83 s after the end.
     - A count turn, with its `measure` after the `turn.end`, ended at 04:07:20.699Z. The registry went idle 5 ms later, and the deck showed done 0.33 s after.
     - Once the registry said idle, the mod's next poll was held as usual.
+  - **Step 9's prompt half passed** at 03:37Z, while the prototype ran:
+    - The user picked T3 and pressed Saved Prompt. The key showed refused 7 ms after the press: "dropped: the session was stopped and nobody has sent input since".
+    - The user typed in T3. A second press during that turn waited, then went out as the turn ended (sent at 03:37:31.029Z), and T3 answered "ok".
+  - **Step 8 passed, by the log:** at 03:37:51.304Z the Session key opened T3, and the app reported T3 on screen (`attach`) 133 ms after the press. T3 had left the screen at 03:37:39Z.
   - **Next:**
-    1. The user finishes step 9 on T3 (Saved Prompt refused; type in T3; Saved Prompt sent), picking T3 again after the restart.
-    2. Step 8's answer, step 11, then the decision on mode changes from Auto.
+    1. Step 11, at the user's choice, with the Claude app restart last.
+    2. The decision on mode changes from Auto, which the classifier refuses.
+    3. Then Phase 5, when the user says so.
 
 ## Progress
 
@@ -681,8 +686,8 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Steps 5 and 7, going by the log: the pick and the jumps took about 60 ms, and each mode change took about 30 ms. The user reported no problem with either.
   - Mode from Auto: refused by the classifier, so it needs a design choice.
   - Step 6: passed, 2026-11-03.
-  - Step 8: waits on the user's answer.
-  - Step 9: the Esc half passed, 2026-11-03; the prompt half is pending.
+  - Step 8: passed by the log, 2026-11-03: the Session key opened T3, on screen 133 ms later.
+  - Step 9: passed, 2026-11-03.
   - Done lag: fixed, 2026-11-03. Live, the registry goes idle 5–6 ms after a turn ends, and the deck shows done within a second.
   - Step 10: dropped.
   - Step 11: later.
