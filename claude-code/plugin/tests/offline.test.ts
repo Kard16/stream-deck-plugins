@@ -1,10 +1,11 @@
 // The mod with the bridge down, gone, stuck or on another version (PROTOCOL.md, "Failure and recovery"): a fetch
-// that rejects is followed 100 ms later by a quick hello, quietly, and a failed request backs off 1, 2, 5, 10 and
-// 30 s, then every 30 s, with a hello each time, until the request that failed goes through; it logs once per
-// outage, and never holds up the session. The clock is the kit's mock, so the waits are exact.
+// that rejects, or a poll answered 409 hello first, is followed 100 ms later by a quick hello, quietly, and a failed
+// request backs off 1, 2, 5, 10 and 30 s, then every 30 s, with a hello each time, until the request that failed
+// goes through; it logs once per outage, and never holds up the session. The clock is the kit's mock, so the waits
+// are exact.
 
 import { expect, test } from 'claude-code/testing'
-import { HOST, MODEL, START, TOKEN, world } from './world'
+import { HELLO_FIRST, HOST, MODEL, START, TOKEN, world, type Reply } from './world'
 
 const READ = { tool: 'Read', tool_use_id: 'u1', file_path: '/sandbox/notes.md' } as const
 
@@ -215,6 +216,150 @@ test('a poll dropped as `streamdeck restart` stops the deck, with the new deck u
   expect(w.sent.slice(again).map(r => [r.route, r.at])).toEqual([['/v1/hello', 20_200]])
   expect(w.logs).toHaveLength(1)
   expect(w.logs[0]).toMatch(/protocol version 2/)
+})
+
+test("a deck that restarted, or forgot the session, while the mod had nothing open answers its next poll 409 hello first: a quick hello 100 ms later, quietly, then the poll, and the commands the deck hands out after it run, though their ids came before", async ($, on) => {
+  const submitted: string[] = []
+  const w = world(on, {
+    submit: text => {
+      submitted.push(text)
+      return undefined
+    },
+  })
+  await $.session.start(START)
+  await w.settle()
+  w.deliver([{ id: 'c1', t: 'prompt', text: 'One.' }])
+  await w.settle()
+  // The turn the prompt started ends 500 ms on: the deck answers the poll empty, and the mod waits out the rest of
+  // that poll's second with no request open. In that second the deck restarts, or a registry reading misses the
+  // session (release rule 4): either way it has had no hello from this instance, and no request of the mod fails.
+  await w.clock.advance(500)
+  w.deliver([])
+  await w.settle()
+  w.forget()
+  await w.clock.advance(500)
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 0, 1000])
+  await w.clock.advance(99)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0])
+  expect(w.logs).toEqual([])
+  await w.clock.advance(1)
+  // The same hello, first, then the poll, which the deck holds again.
+  expect(w.sent.filter(r => r.at === 1100).map(r => r.route)).toEqual(['/v1/hello', '/v1/next'])
+  const hellos = w.to('/v1/hello')
+  expect(hellos[1]?.body).toEqual(hellos[0]?.body)
+  expect(w.logs).toEqual([])
+
+  // A deck that restarted hands out its command ids again, and the hello cleared the ones that ran: c1 runs.
+  w.deliver([{ id: 'c1', t: 'prompt', text: 'Two.' }])
+  await w.settle()
+  expect(submitted).toEqual(['One.', 'Two.'])
+  expect(w.results()).toEqual([
+    { id: 'c1', state: 'waiting' },
+    { id: 'c1', state: 'done' },
+    { id: 'c1', state: 'waiting' },
+    { id: 'c1', state: 'done' },
+  ])
+  expect(w.logs).toEqual([])
+})
+
+test('a second 409 hello first before a poll goes through is a failed request: the outage begins, with its one log line, and hello backs off 1, 2, 5 and 10 s; a poll held and answered at last ends it, so the next 409 has a quick hello again', async ($, on) => {
+  const w = world(on)
+  // A deck that asks each poll for a hello, and takes none of them.
+  w.bridge.poll = HELLO_FIRST
+  await $.session.start(START)
+  await w.clock.advance(99)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0])
+  expect(w.logs).toEqual([])
+  // The quick hello is answered, and the poll after it is answered 409 again: the second failure.
+  await w.clock.advance(1)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100])
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/isn't answering \(a poll was answered 409 hello first\)/)
+  await w.clock.advance(999)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+  await w.clock.advance(7001)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1100, 3100, 8100])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100, 1100, 3100, 8100])
+  expect(w.logs).toHaveLength(1)
+
+  // The deck takes the hello 10 s on: the poll after it is held its 20 s and answered, which ends the outage.
+  w.bridge.poll = undefined
+  await w.clock.advance(30_000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1100, 3100, 8100, 18_100])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100, 1100, 3100, 8100, 18_100, 38_100])
+  // So a 409 now is the first again: the deck forgets the session, answering the open poll, and the poll after the
+  // rest of that second is answered 409: a quick hello 100 ms on, with no line.
+  w.forget()
+  await w.clock.advance(1100)
+  expect(w.to('/v1/hello').map(r => r.at).slice(6)).toEqual([39_200])
+  expect(w.to('/v1/next').map(r => r.at).slice(7)).toEqual([39_100, 39_200])
+  expect(w.logs).toHaveLength(1)
+})
+
+/** Poll answers that aren't 409 hello first: each is a failed poll, as any other answer that isn't 2xx. */
+const NOT_HELLO_FIRST: readonly { what: string; reply: Reply; status: number }[] = [
+  { what: '409 with another error', reply: { status: 409, body: { error: 'not this session' } }, status: 409 },
+  { what: '409 with no body', reply: { status: 409 }, status: 409 },
+  { what: '409 with the error in another case', reply: { status: 409, body: { error: 'Hello first' } }, status: 409 },
+  { what: '409 with the words alone for a body', reply: { status: 409, body: 'hello first' }, status: 409 },
+  { what: '400 with the error hello first', reply: { status: 400, body: { error: 'hello first' } }, status: 400 },
+  { what: '503 with the error hello first', reply: { status: 503, body: { error: 'hello first' } }, status: 503 },
+]
+
+for (const c of NOT_HELLO_FIRST) {
+  test(`a poll answered ${c.what} is a failed poll, as before: no quick hello, but the outage at once, with its log line and hello 1 s later`, async ($, on) => {
+    const w = world(on)
+    w.bridge.poll = c.reply
+    await $.session.start(START)
+    await w.settle()
+    expect(w.logs).toHaveLength(1)
+    expect(w.logs[0]).toContain(`isn't answering (a poll was answered ${c.status});`)
+    await w.clock.advance(999)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0])
+    await w.clock.advance(1)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000])
+    expect(w.logs).toHaveLength(1)
+  })
+}
+
+test("a poll answered 409 hello first during an outage is one more failure in it: no quick hello and no line of its own, and the outage's waits go on until the request that began it goes through; after that, a 409 has its quick hello again", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // An event answered 503 begins an outage, with its line and hello 1 s later.
+  w.bridge.events = 503
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.settle()
+  expect(w.logs).toHaveLength(1)
+  // The deck answers each hello, but takes the event and leaves it unanswered, and asks each poll for a hello.
+  w.bridge.events = 'hang'
+  w.bridge.poll = HELLO_FIRST
+  await w.clock.advance(3000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000, 3000])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 1000, 3000])
+  await w.clock.advance(4999)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000, 3000])
+  expect(w.logs).toHaveLength(1)
+
+  // The deck answers the event and holds polls again: after the hello 5 s on, the event goes through, which ends the
+  // outage.
+  w.bridge.events = 204
+  w.bridge.poll = undefined
+  await w.clock.advance(1)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000, 3000, 8000])
+  expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+    [1, 0],
+    [1, 1000],
+    [1, 3000],
+    [1, 8000],
+  ])
+  // So a 409 now has its quick hello, with no line: the deck forgets the session, answering the open poll, and the
+  // poll after the rest of that second is answered 409.
+  w.forget()
+  await w.clock.advance(1100)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 1000, 3000, 8000, 9100])
+  expect(w.logs).toHaveLength(1)
 })
 
 test('what ladder step 4 saw: a deck Deny interrupts the turn, and the engine abandons the open poll and the tool.end on its way at the same moment; one quick hello 100 ms later, then a poll and the tool.end again under its seq, with no log line', async ($, on) => {

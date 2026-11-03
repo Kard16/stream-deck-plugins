@@ -112,7 +112,7 @@ describe("command queue and long poll", () => {
 		assert.equal(queue.result("local_a", "ia", "c999", "done", null, null), false, "an unknown one");
 	});
 
-	test("results from another session or mod instance, or for a command not yet delivered, are ignored", () => {
+	test("results from another session or mod instance, with no instance, or for a command not yet delivered, are ignored", () => {
 		const { queue } = setup();
 		const queued = queue.queue("local_b", { t: "prompt", text: "not delivered" });
 		assert.equal(queue.result("local_b", "ib", queued.id, "done", null, null), false);
@@ -120,8 +120,11 @@ describe("command queue and long poll", () => {
 		queue.poll("local_a", "ia", 20, new FakePoll());
 		assert.equal(queue.result("local_b", "ib", cmd.id, "done", null, null), false);
 		assert.equal(queue.result("local_a", "ia-2", cmd.id, "done", null, null), false);
+		assert.equal(queue.result("local_a", null, cmd.id, "waiting", null, null), false, "a result with no inst");
+		assert.equal(queue.result("local_a", null, cmd.id, "done", null, null), false, "a final one with no inst");
 		assert.equal(queue.result("local_a", "ia", cmd.id, "sideways", null, null), false);
 		assert.equal(cmd.state, "delivered");
+		assert.equal(queue.result("local_a", "ia", cmd.id, "done", null, null), true, "from the instance it went to");
 	});
 
 	test("a delivered command with no result fails after 60 s, with 'no result'", () => {

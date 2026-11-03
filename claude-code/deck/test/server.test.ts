@@ -10,7 +10,7 @@ import type { RegistrySession } from "../src/registry/registry.js";
 import { SCRUB_RUN, Scrubber } from "../src/util/log.js";
 import { QUIET_MS } from "../src/util/quiet-log.js";
 import { FakeClock } from "./helpers/fake-clock.js";
-import { type Outcome, send, sendRaw, sleep, waitFor, within } from "./helpers/http.js";
+import { type Outcome, type RequestOptions, send, sendRaw, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
@@ -33,6 +33,14 @@ function status(outcome: Outcome): number | string {
 
 function json(outcome: Outcome): unknown {
 	return "status" in outcome && outcome.body !== "" ? JSON.parse(outcome.body) : null;
+}
+
+/**
+ * The answer to a request the bridge answers at once, or `{error: "pending"}` if none has come within 2 s: an answer
+ * that never comes fails the test there and then, rather than holding it up to npm test's deadline for each test.
+ */
+function atOnce(port: number, opts: RequestOptions): Promise<Outcome> {
+	return within(send(port, opts).outcome, 2000);
 }
 
 describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
@@ -482,10 +490,10 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.equal(lines("info", "no such route").length, 2);
 	});
 
-	test("a deck restarted while a mod had no request open: the new deck answers its polls at once with none, as Identity says, and says so at info until its hello", async () => {
+	test("a deck restarted while a mod had no request open: the new deck answers its polls at once with 409 hello first, says so at info once, and holds its poll after its hello", async () => {
 		const { port, server: first, model: old } = await start();
 		const hello = JSON.stringify({ v: 1, ...MOD, cwd: "/x", plugin: "0.2.0", cc: "2.1.309" });
-		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: hello }).outcome), 200);
+		assert.equal(status(await atOnce(port, { token: TOKEN, path: "/v1/hello", body: hello })), 200);
 		assert.equal(old.session(HOST)?.plugin, true);
 		// The mod waits out its second between polls, nothing open, so nothing of its fails as the deck restarts.
 		await first.stop();
@@ -497,24 +505,66 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		const again = new BridgeServer({ port, token: TOKEN, routes: restarted, log });
 		server = again;
 		assert.equal(await again.listen(), port);
-		const poll = () => within(send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` }).outcome, 2000);
-		for (let i = 0; i < 5; i++) {
+		const poll = () => atOnce(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` });
+		for (let i = 0; i < 3; i++) {
 			const answer = await poll();
-			assert.deepEqual([status(answer), json(answer)], [200, { cmds: [] }], "answered at once, each time");
+			assert.deepEqual([status(answer), json(answer)], [409, { error: "hello first" }], "answered at once, each time");
+			if ("headers" in answer) assert.equal(answer.headers["content-type"], "application/json");
 		}
 		const events = JSON.stringify({ ...MOD, seq: 7, events: [{ t: "measure", context: { percent: 12, window: 200000 }, at: 1 }] });
-		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/events", body: events }).outcome), 204);
+		assert.equal(status(await atOnce(port, { token: TOKEN, path: "/v1/events", body: events })), 204);
 		assert.deepEqual([restarted.session(HOST)?.plugin, restarted.session(HOST)?.context], [false, 12]);
 		assert.deepEqual(
-			log.at("info").filter((l) => l.includes("NO HELLO")),
-			[`info NO HELLO ${HOST}: mod instance "i1" polls, but no instance has said hello to this deck for the session, so it takes no prompts or mode changes until one does`],
+			log.at("info").filter((l) => l.includes("HELLO FIRST") || l.includes("NO HELLO")),
+			[`info HELLO FIRST ${HOST}: mod instance "i1" polls, but no instance has said hello to this deck for the session, so the deck answers 409 to ask for one`],
 			log.at("debug").join("\n"),
 		);
-		// Its hello, once it says one: current again, its poll held.
-		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: hello }).outcome), 200);
+		// The mod's quiet hello, about 100 ms later: current again, its poll held.
+		assert.equal(status(await atOnce(port, { token: TOKEN, path: "/v1/hello", body: hello })), 200);
 		const held = send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` }).outcome;
 		assert.deepEqual(await within(held, 200), { error: "pending" });
 		assert.equal(restarted.session(HOST)?.plugin, true);
+	});
+
+	test("a 409 through the bridge is logged at info once, then at debug: a refused hello's, its REQ lines included, and a poll's that asks for a hello", async () => {
+		const { log, port } = await start();
+		// A claude started inside the session, with the session's host and its own session id.
+		const child = JSON.stringify({ v: 1, sid: "sess-child", host: HOST, inst: "ichild", model: "m", plugin: "0.2.0", cc: "2.1.309" });
+		for (let i = 0; i < 5; i++) {
+			const answer = await atOnce(port, { token: TOKEN, path: "/v1/hello", body: child });
+			assert.deepEqual([status(answer), json(answer)], [409, { error: "not this session" }]);
+		}
+		// The session's own mod polls a deck it hasn't said hello to.
+		for (let i = 0; i < 5; i++) {
+			const answer = await atOnce(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=20` });
+			assert.deepEqual([status(answer), json(answer)], [409, { error: "hello first" }]);
+		}
+		assert.deepEqual(log.at("info").filter((l) => l.includes("409")), [
+			`info HELLO refused with 409 for ${HOST} inst "ichild" sid "sess-child": the registry lists that host under another session id`,
+			`info HELLO FIRST ${HOST}: mod instance "i1" polls, but no instance has said hello to this deck for the session, so the deck answers 409 to ask for one`,
+		]);
+		const debug = (text: string): number => log.lines.filter((l) => l.level === "debug" && l.message.includes(text)).length;
+		assert.deepEqual(
+			[debug('REQ 409 POST "/v1/hello": {"error":"not this session"}'), debug("HELLO refused with 409"), debug(`HELLO FIRST ${HOST}`)],
+			[5, 4, 4],
+			"the bridge's own line for each refused hello, and the rest of the route's",
+		);
+	});
+
+	test("a refusal's quiet key doesn't grow with what the client sends: many bad Hosts, one line at info; many wrong tokens, one", async () => {
+		const { log, port } = await start();
+		for (let i = 0; i < 20; i++) {
+			assert.equal(status(await atOnce(port, { token: TOKEN, host: `rebind-${i}.example:${port}`, path: "/v1/hello", body: "{}" })), 403);
+			assert.equal(status(await atOnce(port, { token: randomBytes(32).toString("hex"), path: "/v1/hello", body: "{}" })), 401);
+		}
+		assert.deepEqual(log.at("info").filter((l) => l.startsWith("info REQ 4")), [
+			`info REQ 403 POST "/v1/hello": Host "rebind-0.example:${port}" isn't 127.0.0.1:${port} or localhost:${port}`,
+			'info REQ 401 POST "/v1/hello": wrong token',
+		]);
+		assert.deepEqual(
+			[log.lines.filter((l) => l.level === "debug" && l.message.startsWith("REQ 403")).length, log.lines.filter((l) => l.level === "debug" && l.message.startsWith("REQ 401")).length],
+			[19, 19],
+		);
 	});
 
 	test("a busy port: listen rejects; start logs, retries after 1 s, and listens once the port is free", async () => {

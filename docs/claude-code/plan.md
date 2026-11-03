@@ -716,6 +716,41 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Before the build:** the deck failed 6 checks, the tools 11 and the plugin 2.
   - **Also committed tonight:** `claude-code/tools/recheck.mjs` (5ccf1c2) re-checks the app internals after an update. 18 tests pass, and on this Mac it reports 29 ok, 0 warn, 0 fail.
   - **Building:** workflow `wf_614315da-297` covers deck, plugin and tools, each built, reviewed adversarially, then refixed. An agent writes `claude-code/install/deck-install.mjs` (status, release, install, undo).
+- 2026-11-03, **the round is built and committed (911188a); its reviews found a gap in the contract.**
+  - **Also committed:** `claude-code/install/deck-install.mjs` with 10 tests (401545c), and the user guide `claude-code/README.md` (911188a).
+  - **Built:**
+    - Deck 0.3.0: `/v1/pretool`, confirmation with one more registry reading, 409 hellos, and quiet logs for refusals.
+    - Plugin 0.2.0: the mode hook, and the mod talks only from a desktop session of its own. T2–T4 hot-reloaded it and said hello as 0.2.0.
+    - Tools: the same rules in the fake deck and the player.
+  - **Re-run by the main thread:**
+    - Deck: 230/230, also with the clock two days ahead and a week back, plus typecheck, build and validate.
+    - Plugin: `tsc`, validate, 111/111 and the fixtures check.
+    - Tools: 175/175, also clock-shifted. Install: 10/10.
+    - Two mutations, each in a scratch copy: a plugin gate that lets everything through fails 28 tests, and a deck that confirms every hook request fails 9.
+  - **The gap, which all three reviewers found:** only a hello makes an `inst` current, but the mod says hello only when it loads and after a failed request. Two things leave it with no hello to the deck and no failure to tell it so: a deck restart in the second the mod waits after a turn ends, and a registry reading that misses the session (release rule 4). Its polls were then answered at once for good, and the session took no prompts or mode changes. Probes with the real mod code showed it; HEAD's old rule had healed it by itself.
+  - **The fix, in the amendment's items 5 and 6:**
+    - A session no instance has said hello for gets 409 `{"error": "hello first"}` on its polls. The mod takes that like a rejected fetch: a quiet hello about 100 ms later.
+    - It goes only to a session with no current instance, so it never displaces one. A replaced instance can't answer it, since a reload drops its timers.
+    - The narrower choice over "any instance new to this deck": a lingering old process could otherwise take over a session after a restart.
+    - New fixture `hello-again` (18 in all). Smaller points the builders raised are settled too: results with no `inst` are ignored, a hello that isn't made current changes nothing, and the mode check reads `session_id`.
+    - Before the build: the deck fails 2 tests, the tools 7 and the plugin 1, all of them `hello-again` or the fixture count.
+  - **Open, to check live:** whether the app's forks (side chats, recaps) write a registry file under the parent's host. None does now: 12 files, one per host.
+  - **Next:** round 2's workflow builds the hello-first rule and the reviewers' remaining minors in all three tracks. Then the live checks, the release and the install.
+- 2026-11-03, **round 2 is built: hello first, and the minors** (workflow `wf_d8fa4582-a7a`, each track built, reviewed adversarially, then refixed).
+  - **Built:**
+    - Deck: a poll for a session with no current instance gets 409 `hello first`, logged at info once per host and quietly after. Results with no `inst` are ignored. The registry, records and model wiring moved to `src/model/sources.ts`, so the fixture runner runs the plugin's own wiring. Every answer the runner waits for has a 2 s deadline, and `npm test` gives each test 20 s and force-exits, so a regression fails instead of hanging.
+    - Plugin: a poll answered 409 `hello first` goes the way of a rejected fetch, a quiet hello 100 ms later. A change from Auto the engine refuses at once is reported `refused`, as the contract says. The mods API has no typed refusal, so the mod reads the engine's own words, and falls back to `failed` should they change. `sync-fixtures.mjs --check` also checks `hooks.json` against PROTOCOL.md, `plugin.json`'s keys (2.1.309 loads hooks from it too) and its version, with 21 tests of its own.
+    - Tools: the same rules in the fake deck. Interactive mode skips expect lines, since a real deck shows none of the fixtures' sessions.
+  - **Re-run by the main thread:**
+    - Deck: 245/245, the same with the clock two days ahead and a week back, plus typecheck, build and validate.
+    - Plugin: `tsc`, validate, 136/136, the fixtures check's four lines, and its tests, 21/21.
+    - Tools: 192/192. Install: 10/10. `make-fixtures.mjs` regenerates with no change.
+  - **Settled from the reviews:** an unlisted host's 409 logs at debug only. Hellos need no client-gone check, since an instance can only make itself current. Three hung test runs a round-1 reviewer left in a scratch copy were stopped.
+  - **For round 3, decided:**
+    - **Two live mods for one host across a deck restart,** a restarted process and its lingering predecessor: both get 409 and say hello, and the later one is made current, possibly the predecessor's. The mod can't rank itself. The mods API has no pid, and a resumed session keeps its session id: the app resumes with `resume: cliSessionId`, and only `--fork-session` makes a new id. The fix: a current instance that goes 60 s with no poll open and none sent stops counting, and the deck forgets the session's instances, as at release rule 4 but keeping the rest. The live mod's next poll then gets 409, and its hello makes it current. That heals any dead current instance.
+    - **A repeated hello from the current instance,** as after every Deny: its mode and effort are only what the mod last told the deck. So it could put back a mode older than the PermissionRequest's the deck just took, until the next prompt. It will take `cwd` and `model` only. Both decks take everything today.
+    - **Contract wording:** the registry's `startedAt`, and which of two files for one host the deck shows; release rule 4 when no file lists the host; `plugin.json` declares nothing; `refused` covers the engine refusing the call. The recheck script watches the engine's wording.
+  - **Next:** commit, restart the deck, the live checks, then the release and the install.
 
 ## Progress
 

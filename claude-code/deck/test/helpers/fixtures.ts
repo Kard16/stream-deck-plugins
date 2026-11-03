@@ -106,6 +106,24 @@ export function replyMismatches(route: string, status: number, want: unknown, go
 	return problems;
 }
 
+/**
+ * What's wrong with the answer to a request no `reply` line checks, or an empty list. It must be 200 or 204
+ * (PROTOCOL.md, Fixtures), and a 2xx from a hook's route must still be exactly one of the bodies the route allows
+ * (replyMismatches), so a mode check the fixture doesn't follow up can't slip through with an odd allow.
+ */
+export function unrepliedMismatches(route: string, status: number, body: string): string[] {
+	if (status !== 200 && status !== 204) return [`$: expected 200 or 204, got ${status} ${body}`];
+	let got: unknown;
+	if (body !== "") {
+		try {
+			got = JSON.parse(body);
+		} catch {
+			return [`$: the body isn't JSON: ${body}`];
+		}
+	}
+	return replyMismatches(route, status, undefined, got);
+}
+
 /** Which labels a later `reply` line checks. */
 export function repliedLabels(lines: FixtureLine[]): Set<string> {
 	return new Set(lines.flatMap((l) => ("reply" in l ? [l.reply.to] : [])));

@@ -13,7 +13,7 @@ import { performance } from 'node:perf_hooks'
 
 import { BadRequest, FakeDeck, NotThisSession } from './deck.mjs'
 import { REPO } from './fixtures.mjs'
-import { MAX_BODY, MAX_WAIT_S, ROUTE_METHODS, ROUTES } from './protocol.mjs'
+import { HOST_PATTERN, MAX_BODY, MAX_WAIT_S, ROUTE_METHODS, ROUTES } from './protocol.mjs'
 import { findRecord, readRecord, readRegistry, signature } from './registry.mjs'
 
 export const DEFAULTS = Object.freeze({
@@ -475,8 +475,23 @@ export async function startFakeBridge(options = {}) {
           if (r.id) watchClose(() => deck.clientClosed(r.id))
         }
         // A hook's request from a session the latest reading doesn't confirm: the registry is read once more, and the
-        // deck then takes it or answers {} at once.
-        if (deck.hookNeedsReading(hostHeader, body)) return rescan().then(take)
+        // deck then takes it or answers {} at once. Its client may have gone meanwhile, as the real deck allows for:
+        // then nothing is answered or held, and a mode command's allowance can't go to a request nobody hears.
+        if (deck.hookNeedsReading(hostHeader, body)) {
+          return rescan().then(() => {
+            if (responder.open) {
+              take()
+              return
+            }
+            const host = typeof hostHeader === 'string' && HOST_PATTERN.test(hostHeader) ? hostHeader : null
+            const what = route === ROUTES.permission ? 'permission request' : 'mode check'
+            log({
+              kind: 'client-gone', route: route.slice('/v1/'.length), host, sid: typeof body.session_id === 'string' ? body.session_id : null,
+              why: 'its client went away while the registry was read once more',
+              say: `${what} from ${host ?? '(no host)'}: its client went away while the registry was read once more, so it isn't taken`,
+            })
+          })
+        }
         take()
         return
       }

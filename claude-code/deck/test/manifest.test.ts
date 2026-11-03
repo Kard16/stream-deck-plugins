@@ -17,3 +17,19 @@ describe("the plugin's version", () => {
 		assert.deepEqual([lock.version, lock.packages?.[""]?.version], [pkg.version, pkg.version]);
 	});
 });
+
+describe("npm test (package.json's test script)", () => {
+	test("gives every test a deadline of a minute at most, and exits once the last test has run: an answer that never comes fails its test instead of holding up the run", () => {
+		const scripts = read("package.json").scripts as Record<string, unknown> | undefined;
+		const script = String(scripts?.test ?? "");
+		// node --test takes its flags before the files only: one after them is ignored, as `npm test -- --test-timeout=…` is.
+		const run = /\bnode --test((?: --[a-z-]+(?:=\S+)?)*) build\/test\/test\/\*\.test\.js$/.exec(script);
+		assert.ok(run, `the script runs node --test on the built tests, its flags first: ${script}`);
+		const flags = (run[1] ?? "").trim().split(" ");
+		const timeout = flags.find((f) => f.startsWith("--test-timeout="));
+		const ms = Number(timeout?.slice("--test-timeout=".length));
+		assert.ok(Number.isInteger(ms) && ms > 0 && ms <= 60_000, `each test has a deadline (--test-timeout) of a minute at most: ${script}`);
+		// A test that runs out of time never reaches its own clean-up, and what it left open would keep node running.
+		assert.ok(flags.includes("--test-force-exit"), `the run ends with its last test (--test-force-exit): ${script}`);
+	});
+});

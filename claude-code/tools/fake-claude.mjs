@@ -4,9 +4,11 @@
 // requests and mode checks, the mod the rest. It sends the fixtures' plugin lines and checks the replies; press,
 // registry and expect lines go one of two ways:
 // - --against-fake: through the fake bridge's control routes and folders, and checked against its state.
-// - --interactive: a person presses on the real deck plugin and checks it by eye (ladder step 5 in
+// - --interactive: against the real deck plugin, with a person to press on it (ladder step 5 in
 //   docs/claude-code/plan.md). Registry lines are skipped there, and so are the replies and presses that hang on
-//   them: no registry the real deck reads lists the fixtures' sessions.
+//   them: no registry the real deck reads lists the fixtures' sessions. So is every Saved Prompt and Mode press,
+//   which would go to one of the user's own sessions, and the replies that wait on its command, and every expect
+//   line, since nothing of a fixture's session shows on a real deck.
 // README.md has the walkthrough. Node 24, no dependencies.
 
 import path from 'node:path'
@@ -36,8 +38,9 @@ Code and the mod would, and checks the bridge's replies. Fixtures are names in c
                        and expect lines are checked against its state. One failure ends that fixture.
   --interactive        against the real deck plugin (ladder step 5): it says what to press on the deck and
                        waits for the answer, skips registry lines (the deck reads the real registry, which
-                       this never writes) and the replies and presses that hang on them, and shows expect
-                       lines for you to check by eye.
+                       this never writes) and the replies and presses that hang on them, and skips every
+                       Saved Prompt and Mode press and every expect line: nothing of a fixture's session
+                       shows on a real deck.
   --url URL            the bridge (default http://127.0.0.1:47600)
   --token-file PATH    the bridge's token (default: --against-fake, ${path.relative(REPO, TOKEN_FILES['against-fake'])};
                        --interactive, ${path.relative(REPO, TOKEN_FILES.interactive)})
@@ -92,7 +95,7 @@ async function main(argv) {
     const say = mode === 'interactive' ? (t) => ui.show(`  ${t}`) : values.verbose ? (t) => process.stdout.write(`  ${t}\n`) : () => {}
     if (mode === 'interactive') {
       ui.show(`fake-claude, interactive, against ${url}.`)
-      ui.show('Before going on: no real session should be waiting for approval (Approve acts on the oldest held request, whosever it is), and Saved Prompt and Mode presses must target the fixture\'s session, never a real one.')
+      ui.show('Before going on: no real session should be waiting for approval (Approve acts on the oldest held request, whosever it is). Saved Prompt and Mode presses are skipped: no real deck lists a fixture\'s session, so they would go to one of yours. Expect lines are skipped too: nothing of a fixture\'s session shows on the deck.')
     }
 
     const results = []
@@ -105,7 +108,8 @@ async function main(argv) {
         const secs = ((Date.now() - started) / 1000).toFixed(2)
         const replies = r.skipped.filter((s) => s.reply !== undefined).length
         const presses = r.skipped.filter((s) => s.press !== undefined).length
-        const extra = [replies ? `${replies} reply(s) skipped` : '', presses ? `${presses} press(es) skipped` : '', r.notes.length ? `${r.notes.length} note(s)` : ''].filter(Boolean).join(', ')
+        const checks = r.skipped.filter((s) => s.expect !== undefined).length
+        const extra = [replies ? `${replies} reply(s) skipped` : '', presses ? `${presses} press(es) skipped` : '', checks ? `${checks} check(s) skipped` : ''].filter(Boolean).join(', ')
         process.stdout.write(`${r.ok ? 'ok  ' : 'FAIL'}  ${fx.name.padEnd(26)} ${String(r.checked).padStart(2)} checked  ${secs} s${extra ? `  (${extra})` : ''}${r.ok ? '' : `\n      ${r.error}`}\n`)
       }
     } finally {
@@ -114,11 +118,6 @@ async function main(argv) {
     }
 
     const failed = results.filter((r) => !r.ok)
-    const notes = results.flatMap((r) => r.notes.map((n) => ({ fixture: r.name, ...n })))
-    if (notes.length) {
-      process.stdout.write('\nWhat you saw that differed:\n')
-      for (const n of notes) process.stdout.write(`  ${n.fixture} line ${n.line}: expected ${JSON.stringify(n.expected)}; saw: ${n.saw}\n`)
-    }
     process.stdout.write(`\n${results.length - failed.length} passed, ${failed.length} failed (${mode})\n`)
     return failed.length ? 1 : 0
   } catch (err) {

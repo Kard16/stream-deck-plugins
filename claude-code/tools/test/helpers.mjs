@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 
 import { startFakeBridge } from '../lib/bridge.mjs'
@@ -129,3 +130,132 @@ export function fakeTimers(start = 1_800_000_000_000) {
 }
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** claude-code/plugin/hooks/bridge.ts's timings, which modLoop plays by. */
+export const MOD = Object.freeze({ RETRY_MS: 100, POLL_MIN_MS: 1000, BACKOFF_MS: [1000, 2000, 5000, 10_000, 30_000] })
+
+/**
+ * A mod's hello and long poll as claude-code/plugin/hooks/bridge.ts plays them, on real timers, against `bridge`:
+ * - hello, and once one is answered `ok: true`, the poll, again as soon as one answers;
+ * - a poll answered under POLL_MIN_MS with no command waits out the rest of that second, with nothing open;
+ * - a fetch that rejects, or a poll answered 409 `{"error": "hello first"}` (PROTOCOL.md, "Failure and recovery", as
+ *   amended on 2026-11-03), brings a quiet hello RETRY_MS later. A second failure before a poll goes through begins
+ *   an outage, with a hello after each of BACKOFF_MS; any other failed hello or poll does too.
+ * Only the poll's side: no events or results. `trace` lists what it did, `{ms, what, status?, cmds?}` by the time
+ * since `start()`, and `cmds` the commands it took. `stop()` drops its open poll and its timers.
+ */
+export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm' }) {
+  const headers = { host: hostHeader(bridge.url), authorization: `Bearer ${token}` }
+  const trace = []
+  const cmds = []
+  const timers = new Set()
+  let t0 = 0
+  let epoch = 0
+  let running = false
+  let attempt = 0
+  let outage
+  let quick
+  let polling = null
+  const note = (what, extra = {}) => trace.push({ ms: Math.round(performance.now() - t0), what, ...extra })
+  const after = (ms, fn) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer)
+      if (running) fn()
+    }, ms)
+    timers.add(timer)
+  }
+  const through = (channel) => {
+    if (quick === channel) quick = undefined
+    if (outage !== channel) return
+    outage = undefined
+    attempt = 0
+  }
+  const helloAfter = (ms) => {
+    epoch++
+    after(ms, () => void hello())
+  }
+  const fail = (channel) => {
+    if (outage === undefined) {
+      outage = quick ?? channel
+      quick = undefined
+    }
+    const wait = MOD.BACKOFF_MS[Math.min(attempt, MOD.BACKOFF_MS.length - 1)]
+    attempt++
+    note('outage', { channel, wait })
+    helloAfter(wait)
+  }
+  const rejected = (channel) => {
+    if (outage !== undefined || quick !== undefined) return fail(channel)
+    quick = channel
+    note('quick-hello', { channel })
+    helloAfter(MOD.RETRY_MS)
+  }
+  async function hello() {
+    const ep = ++epoch
+    let r
+    try {
+      r = await send(bridge.url, { method: 'POST', path: '/v1/hello', headers, body: JSON.stringify({ v: 1, sid, host, inst, cwd, model, plugin: '0.3.0', cc: '2.1.309' }) }).answer
+    } catch {
+      note('hello', { status: null })
+      if (ep === epoch && running) rejected('hello')
+      return
+    }
+    note('hello', { status: r.status })
+    if (ep !== epoch || !running) return
+    if (r.status >= 200 && r.status < 300 && r.json?.ok === true) {
+      through('hello')
+      void poll(ep)
+      return
+    }
+    fail('hello')
+  }
+  async function poll(ep) {
+    while (running && ep === epoch) {
+      const started = performance.now()
+      polling = send(bridge.url, { path: `/v1/next?sid=${encodeURIComponent(sid)}&host=${encodeURIComponent(host)}&inst=${encodeURIComponent(inst)}&wait=20`, headers })
+      let r
+      try {
+        r = await polling.answer
+      } catch {
+        note('poll', { status: null })
+        if (ep === epoch && running) rejected('poll')
+        return
+      }
+      const got = Array.isArray(r.json?.cmds) ? r.json.cmds : []
+      note('poll', { status: r.status, cmds: got.map((c) => c.id) })
+      if (r.status === 409 && r.json?.error === 'hello first') {
+        if (ep === epoch && running) rejected('poll')
+        return
+      }
+      if (ep !== epoch || !running) return
+      if (r.status < 200 || r.status > 299) return fail('poll')
+      through('poll')
+      cmds.push(...got)
+      const rest = MOD.POLL_MIN_MS - (performance.now() - started)
+      if (got.length === 0 && rest > 0) await new Promise((resolve) => after(rest, resolve))
+    }
+  }
+  return {
+    trace,
+    cmds,
+    start() {
+      t0 = performance.now()
+      running = true
+      void hello()
+    },
+    stop() {
+      running = false
+      for (const timer of timers) clearTimeout(timer)
+      timers.clear()
+      polling?.abort()
+    },
+    /** Resolves once `test(trace)` holds, or rejects after `ms`. */
+    async until(test, ms, what) {
+      const deadline = performance.now() + ms
+      while (!test(trace)) {
+        if (performance.now() > deadline) throw new Error(`${what}: not within ${ms} ms; the mod did ${JSON.stringify(trace)}`)
+        await sleep(10)
+      }
+    },
+  }
+}

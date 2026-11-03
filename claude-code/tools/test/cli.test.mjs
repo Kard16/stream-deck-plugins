@@ -105,14 +105,14 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
   }
 })
 
-test('cli: fake-claude --against-fake plays all 17 fixtures against the fake bridge\'s own CLI', async (t) => {
+test('cli: fake-claude --against-fake plays all 18 fixtures against the fake bridge\'s own CLI', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
   const r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile], { env: home })
   assert.equal(r.code, 0, `${r.out}${r.err}`)
-  assert.match(r.out, /17 passed, 0 failed \(against-fake\)/)
-  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 17)
+  assert.match(r.out, /18 passed, 0 failed \(against-fake\)/)
+  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 18)
 
   const one = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, '--verbose', 'two-held'], { env: home })
   assert.equal(one.code, 0, one.out)
@@ -124,27 +124,25 @@ test('cli: fake-claude --against-fake plays all 17 fixtures against the fake bri
   assert.match(wrong.err, /can't read the token file/)
 })
 
-test('cli: fake-claude --interactive reads the person\'s answers from stdin', async (t) => {
+test('cli: fake-claude --interactive against a deck whose registry lists none of the fixtures\' sessions, as no real deck\'s does, asks nothing: it skips and counts the presses and checks', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
-  // auth has no presses or checks; hello has one check, answered with what the person saw.
+  // auth has no presses or checks; hello has one check, skipped and counted. What the person types goes unread.
   const r = await run(CLAUDE, ['--interactive', '--url', url, '--token-file', env.tokenFile, 'auth', 'hello'], { env: home, input: 'the dial lists other sessions\n' })
   assert.equal(r.code, 0, `${r.out}${r.err}`)
-  assert.match(r.out, /CHECK on the deck:\n {2}- the Sessions dial lists local_test-a/)
-  assert.match(r.out, /hello line \d+: expected .*; saw: the dial lists other sessions/)
+  assert.match(r.out, /^skip: expect \{"sessions":\["local_test-a"\].*: a real deck shows nothing of a fixture's session$/m)
+  assert.doesNotMatch(r.out, /CHECK|What you saw|the dial lists other sessions/)
+  assert.match(r.out, /^ok {4}auth +7 checked +[\d.]+ s$/m)
+  assert.match(r.out, /^ok {4}hello +1 checked +[\d.]+ s {2}\(1 check\(s\) skipped\)$/m)
   assert.match(r.out, /2 passed, 0 failed \(interactive\)/)
-  // At the end of its input it goes on as if the person pressed Enter.
-  const eof = await run(CLAUDE, ['--interactive', '--url', url, '--token-file', env.tokenFile, 'hello'], { env: home, input: '' })
-  assert.equal(eof.code, 0, eof.out)
   // No registry the fake bridge reads lists approve's session: its permission request gets {} at once, so the press
-  // and the replies that hang on it are skipped, and counted.
+  // and the replies that hang on it are skipped, and counted, with its checks.
   const skips = await run(CLAUDE, ['--interactive', '--url', url, '--token-file', env.tokenFile, '--press-timeout', '5', 'approve'], { env: home, input: '' })
   assert.equal(skips.code, 0, skips.out)
   assert.match(skips.out, /skip: press approve: nothing fake-claude sent is held/)
-  assert.doesNotMatch(skips.out, /PRESS:/)
-  // The person's last answer was the end of input, so the result comes after its question, on the same line.
-  assert.match(skips.out, /ok {4}approve +2 checked .*\(2 reply\(s\) skipped, 1 press\(es\) skipped\)$/m)
+  assert.doesNotMatch(skips.out, /PRESS:|CHECK/)
+  assert.match(skips.out, /^ok {4}approve +2 checked +[\d.]+ s {2}\(2 reply\(s\) skipped, 1 press\(es\) skipped, 3 check\(s\) skipped\)$/m)
 })
 
 test('cli: fake-claude\'s defaults are those README.md gives: the bridge on 47600, each mode\'s token, a press waited on for 300 s', async (t) => {

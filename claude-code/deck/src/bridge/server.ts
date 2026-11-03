@@ -31,6 +31,7 @@ export interface BridgeRoutes {
 	pretool(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void>;
 	hello(body: Obj): RouteAnswer | Promise<RouteAnswer>;
 	events(body: Obj): RouteAnswer;
+	/** `GET /v1/next`: held, or answered at once, with 409 `hello first` for a session no instance has said hello for. */
 	next(query: URLSearchParams, reply: PollReply): void;
 	result(body: Obj): RouteAnswer;
 }

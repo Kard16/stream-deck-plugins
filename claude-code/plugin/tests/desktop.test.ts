@@ -47,6 +47,10 @@ const QUIET: readonly Quiet[] = [
   { what: 'a VS Code session (entrypoint claude-vscode)', env: { CLAUDE_CODE_ENTRYPOINT: 'claude-vscode' }, log: [/CLAUDE_CODE_ENTRYPOINT is "claude-vscode"/] },
   { what: 'a Cowork session (entrypoint local-agent), which the engine trusts and the protocol doesn\'t', env: { CLAUDE_CODE_ENTRYPOINT: 'local-agent' }, log: [/CLAUDE_CODE_ENTRYPOINT is "local-agent"/] },
   { what: 'an entrypoint with a stray space', env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop ' }, log: [/CLAUDE_CODE_ENTRYPOINT is "claude-desktop "/] },
+  // The entrypoint's case counts.
+  { what: 'an entrypoint in another case (Claude-Desktop)', env: { CLAUDE_CODE_ENTRYPOINT: 'Claude-Desktop' }, log: [/: CLAUDE_CODE_ENTRYPOINT is "Claude-Desktop", not claude-desktop or claude-desktop-3p\.$/] },
+  { what: 'an entrypoint in capitals (CLAUDE-DESKTOP)', env: { CLAUDE_CODE_ENTRYPOINT: 'CLAUDE-DESKTOP' }, log: [/: CLAUDE_CODE_ENTRYPOINT is "CLAUDE-DESKTOP", not claude-desktop or claude-desktop-3p\.$/] },
+  { what: 'a third-party entrypoint in another case (claude-desktop-3P)', env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop-3P' }, log: [/: CLAUDE_CODE_ENTRYPOINT is "claude-desktop-3P", not claude-desktop or claude-desktop-3p\.$/] },
 
   // CLAUDE_CODE_HOST_SESSION_ID matches ^local_[A-Za-z0-9-]{1,64}$.
   { what: 'no CLAUDE_CODE_HOST_SESSION_ID', env: { CLAUDE_CODE_HOST_SESSION_ID: undefined }, log: [/CLAUDE_CODE_HOST_SESSION_ID isn't set/] },
@@ -68,6 +72,13 @@ const QUIET: readonly Quiet[] = [
     env: { CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' },
     log: [/CLAUDECODE is set \("1"\); CLAUDE_CODE_CHILD_SESSION is set \("1"\)\.$/],
   },
+  // Only the empty string is empty: a space or a 0 is set.
+  { what: 'CLAUDECODE a space', env: { CLAUDECODE: ' ' }, log: [/: CLAUDECODE is set \(" "\)\.$/] },
+  { what: 'CLAUDECODE 0', env: { CLAUDECODE: '0' }, log: [/: CLAUDECODE is set \("0"\)\.$/] },
+  { what: 'CLAUDE_CODE_CHILD_SESSION a space', env: { CLAUDE_CODE_CHILD_SESSION: ' ' }, log: [/: CLAUDE_CODE_CHILD_SESSION is set \(" "\)\.$/] },
+  { what: 'CLAUDE_CODE_CHILD_SESSION 0', env: { CLAUDE_CODE_CHILD_SESSION: '0' }, log: [/: CLAUDE_CODE_CHILD_SESSION is set \("0"\)\.$/] },
+  { what: 'CLAUDE_CODE_TAGS a space', env: { CLAUDE_CODE_TAGS: ' ' }, log: [/: CLAUDE_CODE_TAGS is set \(" "\)\.$/] },
+  { what: 'CLAUDE_CODE_TAGS 0', env: { CLAUDE_CODE_TAGS: '0' }, log: [/: CLAUDE_CODE_TAGS is set \("0"\)\.$/] },
 
   // DECK_TOKEN is set.
   { what: 'no DECK_TOKEN', env: { DECK_TOKEN: undefined }, log: [/DECK_TOKEN isn't set/] },
@@ -81,9 +92,13 @@ const QUIET: readonly Quiet[] = [
     log: [/: CLAUDE_CODE_ENTRYPOINT is "cli", not claude-desktop or claude-desktop-3p; CLAUDE_CODE_HOST_SESSION_ID isn't set; DECK_TOKEN isn't set\.$/],
   },
 
-  // A variable the engine won't read fails its test: the gate stays shut when in doubt.
-  { what: 'CLAUDECODE unreadable', unreadable: ['CLAUDECODE'], log: [/CLAUDECODE couldn't be read/] },
-  { what: 'DECK_TOKEN unreadable', unreadable: ['DECK_TOKEN'], log: [/DECK_TOKEN couldn't be read/] },
+  // A variable the engine won't read fails its test, and the line says so: the gate stays shut when in doubt.
+  { what: 'CLAUDE_CODE_ENTRYPOINT unreadable', unreadable: ['CLAUDE_CODE_ENTRYPOINT'], log: [/: CLAUDE_CODE_ENTRYPOINT couldn't be read\.$/] },
+  { what: 'CLAUDE_CODE_HOST_SESSION_ID unreadable', unreadable: ['CLAUDE_CODE_HOST_SESSION_ID'], log: [/: CLAUDE_CODE_HOST_SESSION_ID couldn't be read\.$/] },
+  { what: 'CLAUDECODE unreadable', unreadable: ['CLAUDECODE'], log: [/: CLAUDECODE couldn't be read\.$/] },
+  { what: 'CLAUDE_CODE_CHILD_SESSION unreadable', unreadable: ['CLAUDE_CODE_CHILD_SESSION'], log: [/: CLAUDE_CODE_CHILD_SESSION couldn't be read\.$/] },
+  { what: 'CLAUDE_CODE_TAGS unreadable', unreadable: ['CLAUDE_CODE_TAGS'], log: [/: CLAUDE_CODE_TAGS couldn't be read\.$/] },
+  { what: 'DECK_TOKEN unreadable', unreadable: ['DECK_TOKEN'], log: [/: DECK_TOKEN couldn't be read\.$/] },
 ]
 
 for (const q of QUIET) {
@@ -112,6 +127,19 @@ test('a long value is cut short in the log line', async ($, on) => {
   expect(w.sent).toEqual([])
   expect(w.logs).toHaveLength(1)
   expect(w.logs[0]).toMatch(/: CLAUDE_CODE_TAGS is set \("x{78}…\)\.$/)
+})
+
+test("a token across a value's 80-character cut is hidden before the cut: no piece of it reaches the log", async ($, on) => {
+  // The quoted value is cut to its first 79 characters, the quote and 78 of the value. The token starts at the
+  // value's 74th, so a cut made first would leave its first 5 characters, too few to be known as the token's.
+  const filler = 'x'.repeat(73)
+  const w = world(on, { env: desktopWith({ CLAUDE_CODE_TAGS: `${filler}${TOKEN} and on` }) })
+  await aTurn($, w)
+  expect(w.sent).toEqual([])
+  expect(w.logs).toHaveLength(1)
+  const line = w.logs[0] ?? ''
+  expect(line).toMatch(/: CLAUDE_CODE_TAGS is set \("x{73}<toke…\)\.$/)
+  for (let i = 0; i + 5 <= TOKEN.length; i++) expect(line).not.toContain(TOKEN.slice(i, i + 5))
 })
 
 /** A desktop session of its own: what it is, and its environment over DESKTOP_ENV. */

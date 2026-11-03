@@ -1,12 +1,22 @@
-// Copies the protocol's fixtures into claude-code/plugin/tests/fixtures.gen.ts. `claude plugin test` loads only
+// Keeps the plugin in step with the protocol (claude-code/protocol/).
+//
+// It copies the protocol's fixtures into claude-code/plugin/tests/fixtures.gen.ts. `claude plugin test` loads only
 // code (.ts, .js, ...) from inside the plugin's folder, so the plugin's tests can't read
 // claude-code/protocol/fixtures/*.jsonl or vectors.json themselves. Each fixture line and the vectors go in
 // verbatim: JSON is valid TypeScript.
 //
-//   mise exec -- node claude-code/plugin-tsc/sync-fixtures.mjs           rewrite fixtures.gen.ts
-//   mise exec -- node claude-code/plugin-tsc/sync-fixtures.mjs --check   exit 1 when it's out of date
+// It also checks what it doesn't copy:
+// - claude-code/plugin/hooks/hooks.json is PROTOCOL.md's block under "The plugin's hooks.json", once both are parsed:
+//   the hooks are the contract's, matcher, timeout, url and all;
+// - claude-code/plugin/.claude-plugin/plugin.json only describes the plugin (MANIFEST_KEYS), so it adds no hooks
+//   beside hooks.json's, as its `hooks` key would, and nothing else for a session to load;
+// - plugin.json's version is hooks/bridge.ts's PLUGIN_VERSION, the one the hello sends, since `$.plugin` has none.
 //
-// Run it after make-fixtures.mjs changes the fixtures.
+//   mise exec -- node claude-code/plugin-tsc/sync-fixtures.mjs           rewrite fixtures.gen.ts, then check the rest
+//   mise exec -- node claude-code/plugin-tsc/sync-fixtures.mjs --check   exit 1 when any of the four is out of step
+//
+// Run it after make-fixtures.mjs changes the fixtures. Its tests run it on copies of what it reads:
+//   mise exec -- node --test claude-code/plugin-tsc/sync-fixtures.test.mjs
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -14,7 +24,22 @@ import { fileURLToPath } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const FIXTURES = path.join(here, '..', 'protocol', 'fixtures')
-const OUT = path.join(here, '..', 'plugin', 'tests', 'fixtures.gen.ts')
+const PROTOCOL = path.join(here, '..', 'protocol', 'PROTOCOL.md')
+const PLUGIN = path.join(here, '..', 'plugin')
+const OUT = path.join(PLUGIN, 'tests', 'fixtures.gen.ts')
+const HOOKS = path.join(PLUGIN, 'hooks', 'hooks.json')
+const MANIFEST = path.join(PLUGIN, '.claude-plugin', 'plugin.json')
+const BRIDGE = path.join(PLUGIN, 'hooks', 'bridge.ts')
+/** The section of PROTOCOL.md whose first ```json block is the plugin's hooks.json. */
+const HOOKS_SECTION = "The plugin's hooks.json"
+/**
+ * The keys plugin.json may have: those that only describe the plugin. In 2.1.309 others add to what a session loads.
+ * `hooks` adds hooks beside hooks/hooks.json: a block, a path to another hooks file, or a list of either. And
+ * `mcpServers`, `commands`, `agents`, `skills`, `dependencies` and more add servers, prompts or other plugins. The
+ * plugin's hooks are hooks/hooks.json's alone, PROTOCOL.md's block, so a key not listed here fails until someone
+ * looks at it.
+ */
+const MANIFEST_KEYS = ['$schema', 'name', 'displayName', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords']
 
 function render() {
   const out = [
@@ -44,16 +69,126 @@ function render() {
   return { text: out.join('\n'), fixtures: names.length }
 }
 
-const { text, fixtures } = render()
-const rel = path.relative(process.cwd(), OUT)
-if (process.argv.includes('--check')) {
-  const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : ''
-  if (current !== text) {
-    console.error(`${rel} is out of date with claude-code/protocol/fixtures/: run this script without --check`)
-    process.exit(1)
+const rel = (file) => path.relative(process.cwd(), file)
+const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
+const show = (v) => (v === undefined ? 'nothing' : JSON.stringify(v))
+
+/** Parses a JSON file, or throws saying which file isn't JSON. */
+function readJson(file) {
+  const text = fs.readFileSync(file, 'utf8')
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    throw new Error(`${rel(file)} isn't JSON: ${err.message}`)
   }
-  console.log(`${rel} matches the ${fixtures} fixtures and vectors.json`)
+}
+
+/** PROTOCOL.md's hooks.json: the first ```json block in HOOKS_SECTION, before the next heading. */
+function protocolHooks() {
+  const lines = fs.readFileSync(PROTOCOL, 'utf8').split('\n')
+  const heading = lines.findIndex((l) => l.trimEnd() === `## ${HOOKS_SECTION}`)
+  if (heading < 0) throw new Error(`${rel(PROTOCOL)} has no section "${HOOKS_SECTION}"`)
+  let open = -1
+  for (let i = heading + 1; i < lines.length && !lines[i].startsWith('#'); i++) {
+    if (lines[i].trim() === '```json') {
+      open = i
+      break
+    }
+  }
+  if (open < 0) throw new Error(`${rel(PROTOCOL)} has no \`\`\`json block under "${HOOKS_SECTION}"`)
+  const close = lines.findIndex((l, i) => i > open && l.trim() === '```')
+  if (close < 0) throw new Error(`${rel(PROTOCOL)}'s hooks.json block under "${HOOKS_SECTION}" never ends`)
+  try {
+    return JSON.parse(lines.slice(open + 1, close).join('\n'))
+  } catch (err) {
+    throw new Error(`${rel(PROTOCOL)}'s hooks.json block isn't JSON: ${err.message}`)
+  }
+}
+
+/**
+ * Where two JSON values first differ, `{ at, want, got }` with `at` a path below `where`, or undefined when they're
+ * equal. Objects are equal when they have the same keys, in any order, with equal values; arrays, item by item.
+ */
+function difference(want, got, where) {
+  if (Array.isArray(want) && Array.isArray(got)) {
+    for (let i = 0; i < Math.max(want.length, got.length); i++) {
+      const d = difference(want[i], got[i], `${where}[${i}]`)
+      if (d !== undefined) return d
+    }
+    return undefined
+  }
+  if (isObject(want) && isObject(got)) {
+    for (const key of new Set([...Object.keys(want), ...Object.keys(got)])) {
+      const d = difference(want[key], got[key], `${where}.${key}`)
+      if (d !== undefined) return d
+    }
+    return undefined
+  }
+  return Object.is(want, got) ? undefined : { at: where, want, got }
+}
+
+/** hooks.json against PROTOCOL.md's block: a line saying it matches, or throws saying where it doesn't. */
+function checkHooks() {
+  const want = protocolHooks()
+  const got = readJson(HOOKS)
+  const d = difference(want, got, '')
+  if (d !== undefined) {
+    const at = d.at.replace(/^\./, '') || 'the top'
+    throw new Error(
+      `${rel(HOOKS)} isn't PROTOCOL.md's block under "${HOOKS_SECTION}": at ${at}, PROTOCOL.md has ${show(d.want)} and hooks.json ${show(d.got)}`,
+    )
+  }
+  return `${rel(HOOKS)} matches PROTOCOL.md's block under "${HOOKS_SECTION}"`
+}
+
+/** plugin.json's keys against MANIFEST_KEYS: a line saying it only describes the plugin, or throws naming the rest. */
+function checkManifest() {
+  const manifest = readJson(MANIFEST)
+  if (!isObject(manifest)) throw new Error(`${rel(MANIFEST)} isn't a JSON object`)
+  const extra = Object.keys(manifest).filter((key) => !MANIFEST_KEYS.includes(key))
+  if (extra.length > 0) {
+    throw new Error(
+      `${rel(MANIFEST)} has ${extra.map((key) => JSON.stringify(key)).join(', ')}, beyond the keys that only describe the plugin (${MANIFEST_KEYS.join(', ')}): the engine loads hooks, MCP servers, commands, agents, skills and other plugins from plugin.json too, and the plugin's hooks are hooks/hooks.json's alone`,
+    )
+  }
+  return `${rel(MANIFEST)} only describes the plugin: ${Object.keys(manifest).join(', ')}`
+}
+
+/** plugin.json's version against bridge.ts's PLUGIN_VERSION: a line saying they match, or throws. */
+function checkVersion() {
+  const m = /^export const PLUGIN_VERSION\s*=\s*(['"])([^'"\n]*)\1/m.exec(fs.readFileSync(BRIDGE, 'utf8'))
+  if (m === null) throw new Error(`${rel(BRIDGE)} has no \`export const PLUGIN_VERSION = '<version>'\``)
+  const sent = m[2]
+  const manifest = readJson(MANIFEST)
+  const version = isObject(manifest) ? manifest.version : undefined
+  if (version !== sent) {
+    throw new Error(`${rel(MANIFEST)}'s version is ${show(version)}, but bridge.ts's PLUGIN_VERSION, which the hello sends, is ${show(sent)}`)
+  }
+  return `${rel(MANIFEST)}'s version, ${sent}, is bridge.ts's PLUGIN_VERSION`
+}
+
+const check = process.argv.includes('--check')
+const passed = []
+const problems = []
+
+const { text, fixtures } = render()
+if (check) {
+  const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : ''
+  if (current !== text) problems.push(`${rel(OUT)} is out of date with claude-code/protocol/fixtures/: run this script without --check`)
+  else passed.push(`${rel(OUT)} matches the ${fixtures} fixtures and vectors.json`)
 } else {
   fs.writeFileSync(OUT, text)
-  console.log(`wrote ${rel}: ${fixtures} fixtures and vectors.json`)
+  passed.push(`wrote ${rel(OUT)}: ${fixtures} fixtures and vectors.json`)
 }
+
+for (const run of [checkHooks, checkManifest, checkVersion]) {
+  try {
+    passed.push(run())
+  } catch (err) {
+    problems.push(err.message)
+  }
+}
+
+for (const line of passed) console.log(line)
+for (const line of problems) console.error(line)
+if (problems.length > 0) process.exit(1)

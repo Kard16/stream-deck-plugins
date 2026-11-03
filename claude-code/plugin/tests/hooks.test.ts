@@ -2,6 +2,7 @@
 // what the fixtures cover: subagents, errors, settings, the other events, and commands that go wrong.
 
 import { expect, test } from 'claude-code/testing'
+import { runCommand, type CommandHost } from '../hooks/commands'
 import { fingerprint, fnv1a32 } from '../hooks/fingerprint'
 import { HOST, MODEL, SID, START, world } from './world'
 
@@ -348,7 +349,8 @@ test("a mode command calls the app's own tool for this session: done with its te
       if (e.args.mode === 'plan') {
         return { value: { content: [{ type: 'text', text: 'Refused: this session is waiting for the user to answer a request.' }], isError: true } }
       }
-      if (e.args.mode === 'auto') return { deny: 'the engine refused the call' }
+      // The kit words this as 2.1.309 words a call to a tool the session hasn't got: `<plugin>: $.mcp.call: <reason>`.
+      if (e.args.mode === 'auto') return { deny: 'no connected MCP tool "set_session_permission_mode" on a server named "ccd_session_mgmt"' }
       return { value: { content: [{ type: 'text', text: 'This session now runs in Accept edits mode.' }], isError: false } }
     },
   })
@@ -368,10 +370,41 @@ test("a mode command calls the app's own tool for this session: done with its te
   expect(w.results()).toEqual([
     { id: 'c1', state: 'done', detail: 'This session now runs in Accept edits mode.' },
     { id: 'c2', state: 'refused', error: 'Refused: this session is waiting for the user to answer a request.' },
-    { id: 'c3', state: 'failed', error: expect.stringMatching(/the engine refused the call/) },
+    { id: 'c3', state: 'failed', error: expect.stringMatching(/no connected MCP tool "set_session_permission_mode"/) },
   ])
   // Mode commands skip waiting; a done one is followed by the new mode.
   expect(w.settings()).toEqual([{ mode: 'acceptEdits' }])
   const order = w.sent.filter(r => r.route !== '/v1/next').map(r => (r.route === '/v1/events' ? r.body.events[0].t : r.body.state ?? r.route))
   expect(order).toEqual(['/v1/hello', 'done', 'settings', 'refused', 'failed'])
+})
+
+test("a mode change the engine refuses, as the auto-mode classifier did from Auto in Phase 4, is refused with the engine's reason and brings no settings; the call's other errors are failed", async () => {
+  // The kit answers `$.mcp.call` from the test's own hook, whose `{ deny }` reads like any other failed call, so the
+  // engine's refusal is played here in 2.1.309's own words, as register.ts's adapter hands them on.
+  const reason = 'The server-side auto mode classifier judged this action dangerous (it gave no explanation)'
+  const refused = (why: string) => `streamdeck-bridge: $.mcp.call(ccd_session_mgmt, set_session_permission_mode) refused: ${why}`
+  const run = async (err: unknown): Promise<unknown[]> => {
+    const reported: unknown[] = []
+    const host: CommandHost = {
+      submit: async () => ({}),
+      setMode: async () => {
+        throw err
+      },
+    }
+    await runCommand({ id: 'c1', t: 'mode', mode: 'default' }, host, {
+      result: (id, state, extra) => reported.push({ id, state, ...extra }),
+      modeSet: mode => reported.push({ modeSet: mode }),
+    })
+    return reported
+  }
+  expect(await run(new Error(refused(reason)))).toEqual([{ id: 'c1', state: 'refused', error: reason }])
+  expect(await run(refused(reason))).toEqual([{ id: 'c1', state: 'refused', error: reason }])
+  expect(await run(new Error(refused(' ')))).toEqual([{ id: 'c1', state: 'refused', error: 'the engine refused the mode change' }])
+  for (const other of [
+    'streamdeck-bridge: $.mcp.call: no connected MCP tool "set_session_permission_mode" on a server named "ccd_session_mgmt"',
+    'streamdeck-bridge: $.tool.call(mcp__ccd_session_mgmt__set_session_permission_mode) produced no result (aborted)',
+  ]) {
+    expect(await run(new Error(other))).toEqual([{ id: 'c1', state: 'failed', error: other }])
+  }
+  expect(await run({ why: 'not an error' })).toEqual([{ id: 'c1', state: 'failed', error: 'the call failed without a reason' }])
 })

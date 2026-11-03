@@ -9,13 +9,16 @@
 // - Lines for /v1/permission and /v1/pretool are Claude Code's, the hooks' input, never the mod's: their bodies
 //   are sent as they are, with no inst bound (see uniqueInst below), and their answers, which Claude Code acts on,
 //   are held to PROTOCOL.md's bodies (hookAnswerMismatch).
-// - `press`, `registry` and `expect` lines go to a driver (drivers.mjs), which knows how to press keys, change
-//   the registry and read the deck's state, or to ask a person to. A driver that skips registry lines skips the
-//   replies that hang on them too, and reports them: one that waits on a registry change; one to a poll the deck
-//   answers at once only because the registry says busy after the main loop's turn ended; one to a hook's request
-//   the deck answered {} at once, though the line expects a decision, as a deck that confirms a hook's session by
-//   its registry must when no registry it reads lists the fixture's; and a hello's 409, which only a registry that
-//   lists the hello's host under another sessionId gives ("Desktop sessions only").
+// - `press`, `registry` and `expect` lines go to a driver (drivers.mjs), which presses keys, changes the registry
+//   and reads the deck's state itself, or asks a person to press and skips the rest. A driver that skips registry
+//   lines skips the replies that hang on them too, and reports them: one that waits on a registry change; one to a
+//   poll the deck answers at once only because the registry says busy after the main loop's turn ended; one to a
+//   hook's request the deck answered {} at once, though the line expects a decision, as a deck that confirms a hook's
+//   session by its registry must when no registry it reads lists the fixture's; a hello's 409, which only a registry
+//   that lists the hello's host under another sessionId gives ("Desktop sessions only"); and a poll's 409 hello
+//   first, which only a deck that forgot the session gives, as at release rule 4 when a registry line removes its
+//   file (Identity). A driver may skip a press too, and the replies to polls that expect a command then go with it:
+//   only a press queues one.
 // The deck's command ids bind to the fixture's names at their first appearance in a reply. An answer to a
 // permission request must also be exactly one of PROTOCOL.md's three, and one to a mode check one of its two,
 // whatever its reply line expects, since it's what Claude Code acts on, or an error answer when it isn't 2xx.
@@ -34,6 +37,16 @@ export class PlayFailure extends Error {
 
 /** Requests that may be held, so the runner doesn't wait for their answers before going on. */
 const MAY_HOLD = new Set([ROUTES.permission, ROUTES.next])
+
+/**
+ * How soon an answer to one of Claude Code's requests counts as at once, by the time the client measured from sending
+ * it to the answer's end. A deck that doesn't confirm the request's session answers it {} at once, after one more
+ * reading of its registry at most ("Desktop sessions only"), which takes milliseconds; a press counts only once its
+ * request has been on the key for 1 s ("Held requests"). So an answer this soon wasn't a press's, whenever the runner
+ * happened to look, and a slower one is checked as it is.
+ */
+export const AT_ONCE_MS = 500
+
 /** Claude Code's requests, the hooks', whose answers Claude Code acts on. */
 const HOOKS = new Set(HOOK_ROUTES)
 /** The mod's requests, which name its inst. */
@@ -161,12 +174,14 @@ export function replyMismatch(route, expected, actual, bindings, status = 200) {
  * a hook's request only from a session its registry confirms, and refuses a hello only from a host its registry lists
  * under another sessionId (PROTOCOL.md, "Desktop sessions only"). No registry such a deck reads lists the fixture's
  * sessions, so it answers their hook requests {} at once, and takes a hello the fixture has refused. `entry` is the
- * labeled request, `want` the reply line, `r` the answer.
+ * labeled request, `want` the reply line, `r` the answer, whose `ms` the client measured: at once is within
+ * AT_ONCE_MS of sending it.
  */
 function hangsOnRegistry(entry, want, r) {
   const decision = isObject(want.body) && Object.hasOwn(want.body, 'hookSpecificOutput')
   const none = r.status === 200 && isObject(r.json) && Object.keys(r.json).length === 0
-  if (HOOKS.has(entry.route) && decision && entry.answeredAtOnce && none) {
+  const atOnce = Number.isFinite(r.ms) && r.ms <= AT_ONCE_MS
+  if (HOOKS.has(entry.route) && decision && atOnce && none) {
     return "the deck answered {} at once, as it does for a session its registry doesn't confirm, and this mode skips registry lines: no registry it reads lists the fixture's session"
   }
   if (entry.route === ROUTES.hello && want.status === 409 && r.status === 200 && r.json?.ok === true) {
@@ -187,9 +202,10 @@ function hangsOnRegistry(entry, want, r) {
  * requests: the mod picks its inst, and a deck that isn't reset between fixtures would otherwise drop a replay's
  * events as retries of the last play's, since each fixture's seq starts at 1 again. Claude Code's requests, the
  * hooks', have no inst, and are sent as they are.
- * Resolves `{name, ok, error?, checked, skipped, notes}`: `skipped` lists `{line, reply, why}` for the replies a
- * driver that skips registry lines can't check, and `{line, press, why}` for the presses it skips. A mismatch ends
- * the fixture and is reported, not thrown.
+ * Resolves `{name, ok, error?, checked, skipped}`: `skipped` lists `{line, reply, why}` for the replies a driver
+ * that skips registry lines or presses can't check, `{line, press, why}` for the presses it skips, and `{line,
+ * expect, why}`, with the fields the line expects, for the expect lines it skips. A mismatch ends the fixture and is
+ * reported, not thrown.
  */
 export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2000, answerMs = 5000 } = {}) {
   const bindings = new Bindings()
@@ -197,8 +213,14 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
   const open = new Set()
   let sent = 0
   let lastAction = null
-  const result = { name: fx.name, ok: true, checked: 0, skipped: [], notes: [] }
-  const ctx = { fx, bindings, created: [], notes: result.notes, say, open: () => openHeld(), skip: (s) => result.skipped.push(s) }
+  // Saved Prompt and Mode presses the driver skipped, so commands the fixture expects that no press queued.
+  let commandPressesSkipped = 0
+  const result = { name: fx.name, ok: true, checked: 0, skipped: [] }
+  const ctx = {
+    fx, bindings, created: [], say, open: () => openHeld(), skip: (s) => result.skipped.push(s),
+    /** Whether command `label` (c1, c2…) can't have been queued: a Saved Prompt or Mode press was skipped, and it isn't bound. */
+    unsent: (label) => commandPressesSkipped > 0 && bindings.real('cmd', label) === undefined,
+  }
   const tag = Math.random().toString(36).slice(2, 8)
   // The fixture's registry files by pid, as its lines have left them, and the hosts whose main loop's turn has ended
   // with no main-loop turn.start since, by the events the bridge took. From that turn end the deck answers a poll at
@@ -206,6 +228,9 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
   // it say.
   const registry = new Map((fx.setup.registry ?? []).filter(isObject).map((f) => [f.pid, { ...f }]))
   const turnEnded = new Set()
+  // The hosts whose registry file a line removed since their mod's last hello: the fixture's deck has forgotten them
+  // (release rule 4) and answers their polls 409 hello first (Identity). One that reads another registry hasn't.
+  const forgotten = new Set()
 
   /** Whether the deck answers a poll for `host` at once only because the fixture's registry says busy after its turn end. */
   function atOnceAfterTurnEnd(host) {
@@ -277,15 +302,17 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     open.add(handle)
     const drop = () => open.delete(handle)
     handle.answer.then(drop, drop)
-    const atOnce = route === ROUTES.next && atOnceAfterTurnEnd(new URL(p.path, 'http://fixture').searchParams.get('host'))
-    // `answeredAtOnce`: whether the answer had come by the time the runner went on to the next line.
-    const entry = { line, handle, route, atOnce, answeredAtOnce: false }
+    const pollHost = route === ROUTES.next ? new URL(p.path, 'http://fixture').searchParams.get('host') : null
+    const atOnce = route === ROUTES.next && atOnceAfterTurnEnd(pollHost)
+    // `forgotten`: the poll is for a session the fixture's deck has forgotten, and asks for a hello.
+    const entry = { line, handle, route, atOnce, forgotten: route === ROUTES.next && forgotten.has(pollHost) }
     if (p.as) labeled.set(p.as, entry)
+    // The mod's hello: the fixture's deck has it from now on.
+    if (route === ROUTES.hello && isObject(p.body)) forgotten.delete(p.body.host)
     say(`→ ${p.method} ${p.path}${p.as ? ` [${p.as}]` : ''}`)
     if (MAY_HOLD.has(route)) {
       // Let the bridge take it before the next line, so what follows lands after it, as in the fixture.
       await driver.taken(sent)
-      entry.answeredAtOnce = handle.settled
       return
     }
     let r
@@ -294,7 +321,6 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     } catch (err) {
       throw new PlayFailure(line, `${p.method} ${route}: ${err.message}`)
     }
-    entry.answeredAtOnce = true
     if (!(p.as && fx.replied.has(p.as)) && r.status !== 200 && r.status !== 204) {
       throw new PlayFailure(line, `${p.method} ${route} answered ${r.status} ${r.text}`)
     }
@@ -321,6 +347,18 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     if (driver.skipsRegistry && entry.atOnce) {
       // The deck holds this poll instead: no registry it reads says the session is busy.
       skip('the deck answers it at once only while the registry says busy after the turn ended, and this mode skips registry lines', 'answered at once only while the skipped registry says busy')
+      return
+    }
+    if (driver.skipsRegistry && entry.forgotten && status === 409) {
+      // The deck that read the fixture's registry forgot the session when a line removed its file. One that reads
+      // another registry never did, and holds the poll of the instance that said hello.
+      skip("the deck asks for a hello first only for a session it forgot, as at release rule 4 when the session's registry file goes, and this mode skips registry lines", 'a hello first that only the skipped removal of its registry file brings')
+      return
+    }
+    const cmds = entry.route === ROUTES.next && isObject(body) && Array.isArray(body.cmds) ? body.cmds : []
+    if (cmds.some((c) => isObject(c) && ctx.unsent(c.id))) {
+      // No command can come: only a press queues one, and the driver skipped it.
+      skip('it expects a command that only a Saved Prompt or Mode press queues, and the press was skipped', 'whose command no press queued')
       return
     }
     const waitMs = lastAction === 'press' && driver.replyAfterPressMs ? driver.replyAfterPressMs : replyMs
@@ -357,20 +395,29 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
         case 'reply':
           await checkReply(line)
           break
-        case 'press':
+        case 'press': {
+          const before = result.skipped.length
           await driver.press(line, { ...ctx, replyNext: nextAction(i) === 'reply' })
-          lastAction = 'press'
+          const skipped = result.skipped.length > before
+          const [key] = Object.keys(line.value)
+          if (skipped && (key === 'prompt' || key === 'mode')) commandPressesSkipped++
+          // A press the driver skipped gives no reply after it a person's time to come.
+          lastAction = skipped ? 'press-skipped' : 'press'
           break
+        }
         case 'registry': {
           const { pid, gone, ...fields } = line.value
+          const host = registry.get(pid)?.hostSessionId
           if (gone) registry.delete(pid)
           else registry.set(pid, { ...(registry.get(pid) ?? { pid }), ...fields })
+          // Release rule 4: no file lists the host any more.
+          if (gone && typeof host === 'string' && ![...registry.values()].some((f) => f.hostSessionId === host)) forgotten.add(host)
           await driver.registry(line, ctx)
           lastAction = 'registry'
           break
         }
         case 'expect':
-          // True when the driver checked the state itself; a person's look isn't counted.
+          // True when the driver checked the state itself; one it skipped isn't counted.
           if (await driver.expect(line, ctx)) result.checked++
           break
         default:

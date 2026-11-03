@@ -529,7 +529,7 @@ const fixtures = {}
   const a = session(A)
   const stale = 'istale'
   fixtures['stray-instance'] = [
-    note("Only a hello makes an instance current. A poll from an instance that never said hello to this deck, like a replaced instance's late request after a deck restart, is answered at once and takes no commands. The current instance keeps its poll and gets the command. No mod lines: the plugin side skips this fixture."),
+    note("Only a hello makes an instance current. While another instance is current, a poll from an instance that never said hello to this deck, like a replaced instance's late request after a deck restart, is answered at once and takes no commands. The current instance keeps its poll and gets the command. No mod lines: the plugin side skips this fixture."),
     setup(),
     { plugin: { as: 'h', method: 'POST', path: '/v1/hello', body: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: CWD, model: MODEL, plugin: '0.1.0', cc: '2.1.309' } } },
     reply('h', { v: 1, ok: true }),
@@ -539,6 +539,31 @@ const fixtures = {}
     { press: { prompt: { session: A.host, text: 'Say hello.' } } },
     reply('n1', { cmds: [{ id: 'c1', t: 'prompt', text: 'Say hello.' }] }),
     { expect: { cmds: { c1: 'delivered' } } },
+  ]
+}
+
+{
+  const a = session(A)
+  const text = 'Say hello.'
+  fixtures['hello-again'] = [
+    note("A registry reading that misses the session makes the deck forget it (release rule 4), as a restart makes a new deck forget every session. The deck answers the open poll, and the file comes back. The mod's next poll is its first request to a deck with no hello from it, so the deck answers 409 hello first. The mod says hello again about 100 ms later, with no log line, and its poll after that is held and gets the command. A deck restart in the second the mod waits after a turn's end ends the same way."),
+    setup(),
+    ...a.hello(),
+    a.registry({ gone: true }),
+    reply('n1', { cmds: [] }),
+    a.registry({ sessionId: A.sid, hostSessionId: A.host, name: A.name, cwd: CWD, status: 'idle', statusUpdatedAt: T0 + 1000 }),
+    a.next('n2'),
+    reply('n2', { error: 'hello first' }, 409),
+    { plugin: { as: 'h2', method: 'POST', path: '/v1/hello', body: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: CWD, model: MODEL, plugin: '*', cc: '*' } } },
+    reply('h2', { v: 1, ok: true }),
+    a.next('n3'),
+    { press: { prompt: { session: A.host, text } } },
+    reply('n3', { cmds: [{ id: 'c1', t: 'prompt', text }] }),
+    { engine: { call: 'prompt.submit', args: { text, asUser: true }, returns: { text, origin: { kind: 'plugin', name: 'streamdeck-bridge', asUser: true } } } },
+    a.result('c1', 'waiting'),
+    a.next('n4'),
+    a.result('c1', 'done'),
+    { expect: { cmds: { c1: 'done' } } },
   ]
 }
 

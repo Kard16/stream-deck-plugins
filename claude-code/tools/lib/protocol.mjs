@@ -111,6 +111,12 @@ export const PRE_ALLOW = deepFreeze({
 /** The error a hello gets, with 409, from a host the registry lists under another sessionId ("Desktop sessions only"). */
 export const NOT_THIS_SESSION = 'not this session'
 
+/**
+ * The error a poll gets, with 409, for a session no instance has said hello for (PROTOCOL.md, Identity): after the
+ * deck restarts, or forgets the session at release rule 4. The mod takes it as a rejected fetch, and says hello.
+ */
+export const HELLO_FIRST = 'hello first'
+
 // ---- fingerprints and summaries (PROTOCOL.md, "Fingerprints and summaries") ----------------------------
 
 export { canonical, fingerprint, fnv1a32, summary } from '../../protocol/make-fixtures.mjs'

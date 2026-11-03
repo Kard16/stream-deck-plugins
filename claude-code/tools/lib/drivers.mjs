@@ -3,11 +3,14 @@
 // - againstFake: the fake bridge does it all. Presses go to its /control/ routes, registry and records files
 //   are written into the folders it reads (only ever fake ones: see checkDir), and expect lines are checked
 //   against its state, retried for up to 1 s as PROTOCOL.md allows.
-// - interactive: a person does it on the real deck. Presses are printed for them to make, registry lines
-//   are skipped (the real deck reads the real registry, which nothing here writes), and expect lines are
-//   shown for them to check by eye. An Approve or Deny press with nothing of fake-claude's held is skipped, so the
-//   person never presses on another session's request: a deck that takes the hooks' requests only from sessions
-//   its registry confirms answers the fixture's {} at once (PROTOCOL.md, "Desktop sessions only").
+// - interactive: a person at the real deck. Approve and Deny presses are printed for them to make, and registry
+//   lines are skipped (the real deck reads the real registry, which nothing here writes). An Approve or Deny press
+//   with nothing of fake-claude's held is skipped, so the person never presses on another session's request: a deck
+//   that takes the hooks' requests only from sessions its registry confirms answers the fixture's {} at once
+//   (PROTOCOL.md, "Desktop sessions only"). Saved Prompt and Mode presses are always skipped: they go to the session
+//   picked on the Sessions dial, and no real deck lists a fixture's session, so the dial would be on one of the user's
+//   own, and the press would send it the fixture's prompt or mode change. Expect lines are always skipped too: they
+//   are the fixture's deck's state, and nothing of a fixture's session shows on a real deck. Each skip is reported.
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -258,65 +261,31 @@ export function terminalUi({ input = process.stdin, output = process.stdout } = 
   }
 }
 
-/** What a person should press, in words. */
+/**
+ * What a person should press, in words: Approve or Deny, the only presses the interactive driver asks for. Saved
+ * Prompt and Mode presses are skipped, never described (interactive's press).
+ */
 export function describePress(press, open) {
   const [key] = Object.keys(press)
-  const p = press[key]
   const shown = open.length ? `${open[0].host ?? '?'}: ${open[0].tool} ${open[0].summary}` : 'nothing fake-claude sent'
   switch (key) {
     case 'approve':
       return `press Approve. The key should show the oldest held request: ${shown}.`
     case 'deny':
       return `press Deny. The key should show the oldest held request: ${shown}.`
-    case 'prompt':
-      return `pick ${p.session} on the Sessions dial, then press a Saved Prompt key whose text is ${JSON.stringify(p.text)}.`
-    case 'mode':
-      return `pick ${p.session} on the Sessions dial, then set its mode to ${p.mode} with the Mode dial or key.`
     default:
-      return `press ${key}: ${JSON.stringify(p)}`
+      throw new Error(`no press of ${key} is asked of a person`)
   }
 }
 
-const KEY_STATES = { queued: 'waiting', delivered: 'waiting', waiting: 'waiting', done: 'sent', refused: 'refused', failed: 'refused' }
-
-/** What a person should see on the deck for an `expect` line, one sentence per field. */
-export function describeExpect(expected) {
-  const out = []
-  for (const [key, want] of Object.entries(expected)) {
-    switch (key) {
-      case 'sessions':
-        out.push(want.length ? `the Sessions dial lists ${want.join(', ')} (the real registry decides this one)` : 'the Sessions dial lists none of the fixture\'s sessions')
-        break
-      case 'held':
-        out.push(want.length ? `${want.length} request(s) held; the Approve key shows ${want[0].host}: ${want[0].tool} ${want[0].summary}${want[0].kind === 'ask' ? ' (needs you)' : ''}` : 'nothing held: the Approve and Deny keys are idle')
-        break
-      case 'status':
-        for (const [host, s] of Object.entries(want)) out.push(`${host} shows ${s}`)
-        break
-      case 'doing':
-        for (const [host, s] of Object.entries(want)) out.push(s === null ? `${host} shows no current tool` : `${host} is working on ${s}`)
-        break
-      case 'context':
-        for (const [host, n] of Object.entries(want)) out.push(`${host} shows ${n}% context`)
-        break
-      case 'settings':
-        for (const [host, s] of Object.entries(want)) out.push(`${host} shows ${Object.entries(s).map(([k, v]) => `${k} ${v}`).join(', ')}`)
-        break
-      case 'cmds':
-        for (const [label, s] of Object.entries(want)) out.push(`the key that sent ${label} shows ${KEY_STATES[s] ?? s} (${s})`)
-        break
-      case 'jumped':
-        out.push(`Claude came forward on ${want} (an id the app doesn't know lands on the Code home)`)
-        break
-      case 'alert':
-        out.push(want ? 'the key showed an alert' : 'the key showed no alert')
-        break
-      default:
-        out.push(`${key}: ${JSON.stringify(want)}`)
-    }
-  }
-  return out
-}
+/**
+ * Why the interactive driver skips every expect line. An expect line is the fixture's deck's state, and a real deck
+ * shows nothing of a fixture's session: it lists only its registry's sessions, which never include a fixture's, it
+ * holds none of the fixture's requests, as it answers their hooks {} at once, and no Saved Prompt or Mode press
+ * queues a command of the fixture's. So its sessions, statuses, settings, held requests, commands and keys are
+ * about what the deck doesn't show, and a person asked to check them could only report the deck's own sessions.
+ */
+export const EXPECT_SKIPPED = "a real deck shows nothing of a fixture's session: it lists only its registry's sessions, holds none of the fixture's requests, and has no command of the fixture's, since no Saved Prompt or Mode press is made"
 
 /** Plays fixtures with a person at the real deck. */
 export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}) {
@@ -331,7 +300,7 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
       ui.show(`\n=== ${fx.name}`)
       for (const note of fx.notes) ui.show(note)
       const sessions = (fx.setup.registry ?? []).map((r) => `${r.hostSessionId} "${r.name ?? ''}" (${r.status ?? '?'})`)
-      if (sessions.length) ui.show(`The fixture's sessions: ${sessions.join('; ')}. Registry lines are skipped: the deck reads the real registry, so it won't list them, and what it shows about them can differ.`)
+      if (sessions.length) ui.show(`The fixture's sessions: ${sessions.join('; ')}. Registry lines are skipped: the deck reads the real registry, so it won't list them, and nothing of them shows on it. Expect lines are skipped too.`)
     },
 
     /** Gives the deck a moment to take a held request, since there's no control route to ask. */
@@ -341,6 +310,14 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
 
     async press(line, ctx) {
       const [key] = Object.keys(line.value)
+      if (key === 'prompt' || key === 'mode') {
+        // A person is never asked to send a fixture's prompt or mode change: no real deck lists the fixture's
+        // session, so the Sessions dial could only be on one of the user's own.
+        const what = key === 'prompt' ? 'prompt' : 'mode change'
+        ctx.skip({ line: line.n, press: key, why: `a ${key === 'prompt' ? 'Saved Prompt' : 'Mode'} press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session, so it would send the fixture's ${what} to one of your own sessions` })
+        ui.show(`skip: press ${key}: it would send the fixture's ${what} to whichever of your own sessions the dial is on`)
+        return
+      }
       const open = ctx.open()
       if ((key === 'approve' || key === 'deny') && open.length === 0) {
         // Approve and Deny act on the oldest held request, whosever it is: with none of fake-claude's held, a press
@@ -358,11 +335,10 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
       ui.show(`skip: registry ${JSON.stringify(line.value)}`)
     },
 
+    /** Skips the line and reports it (EXPECT_SKIPPED): nothing is asked of the person. */
     async expect(line, ctx) {
-      ui.show('CHECK on the deck:')
-      for (const s of describeExpect(line.value)) ui.show(`  - ${s}`)
-      const saw = (await ui.ask('  Enter if it matches, or type what you see and Enter: ')).trim()
-      if (saw) ctx.notes.push({ line: line.n, expected: line.value, saw })
+      ctx.skip({ line: line.n, expect: Object.keys(line.value), why: EXPECT_SKIPPED })
+      ui.show(`skip: expect ${JSON.stringify(line.value)}: a real deck shows nothing of a fixture's session`)
       return false
     },
 

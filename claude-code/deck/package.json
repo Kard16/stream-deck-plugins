@@ -8,7 +8,7 @@
     "build": "rollup -c",
     "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.karimdhanji.claude\"",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
-    "test": "rm -rf build/test && tsc -p tsconfig.test.json && node --test --test-reporter=spec build/test/test/*.test.js",
+    "test": "rm -rf build/test && tsc -p tsconfig.test.json && node --test --test-timeout=20000 --test-force-exit --test-reporter=spec build/test/test/*.test.js",
     "icons": "node scripts/make-icons.mjs"
   },
   "devDependencies": {

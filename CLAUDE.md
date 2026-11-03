@@ -139,7 +139,8 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 **Claude Code plugin** (from the repo root; `CC` is the app's binary, `$HOME/Library/Application Support/Claude/claude-code/2.1.309/5af865b9901c/claude.app/Contents/MacOS/claude`)
 - `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`
 - `CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`.
-- `node claude-code/plugin-tsc/sync-fixtures.mjs --check`: the plugin's copy of the fixtures is current. `claude plugin test` can't read files outside the plugin, so after `make-fixtures.mjs` changes them, run it without `--check`.
+- `node claude-code/plugin-tsc/sync-fixtures.mjs --check`: the plugin's copy of the fixtures is current, `hooks.json` is PROTOCOL.md's block, `plugin.json` only describes the plugin, and its version is the mod's `PLUGIN_VERSION`. `claude plugin test` can't read files outside the plugin, so after `make-fixtures.mjs` changes them, run it without `--check`.
+- `node --test claude-code/plugin-tsc/sync-fixtures.test.mjs`: that script's own tests. Name the file: Node 24 takes a bare folder as a module.
 
 **Claude deck plugin** (from `claude-code/deck`)
 - `npm run typecheck`, `npm test`, `npm run build`

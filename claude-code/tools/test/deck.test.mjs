@@ -414,7 +414,7 @@ test('deck: a hello from a host the registry lists under another sessionId is re
   assert.deepEqual(view().settings[A.host], { model: 'm1', effort: null, mode: null }, 'nor its model or mode taken')
   assert.throws(() => deck.events({ sid: 'sid-child', host: '', inst: 'ichild', seq: 1, events: [] }), BadRequest, 'nor its sid a pair')
   assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 0)
-  assert.deepEqual(log.filter((e) => e.kind === 'hello' && e.status === 409).map((e) => [e.host, e.inst, e.sid, e.listedSid]), [[A.host, 'ichild', 'sid-child', A.sid]])
+  assert.deepEqual(log.filter((e) => e.kind === 'hello' && e.status === 409).map((e) => [e.host, e.inst, e.sid, e.listedSids]), [[A.host, 'ichild', 'sid-child', [A.sid]]])
   // A hello with no sid isn't the listed session's either; one on another version is refused for that first.
   assert.throws(() => hello(A, { sid: undefined, inst: 'inosid' }), NotThisSession)
   assert.deepEqual(hello(child, { v: 2 }), { v: 1, ok: false, error: 'version' })
@@ -449,11 +449,14 @@ test('deck: only a hello makes an inst current: one that hasn\'t said hello has 
   const { deck, log, reg, hello, ev, poll, view } = setup()
   reg([A, 'idle'])
   const OLD = { ...A, inst: 'iold' }
-  // Before any hello, as just after a deck restart: the replaced instance's late poll, and one with no inst.
+  // Before any hello, as just after a deck restart: the replaced instance's late poll, and one with no inst. The
+  // session has no current instance, so each asks for a hello; a replaced instance can't give one.
   const stray1 = poll(OLD)
   const stray2 = poll(A, 20, null)
-  assert.deepEqual([stray1.r.sent, stray2.r.sent], [[{ status: 200, json: { cmds: [] } }], [{ status: 200, json: { cmds: [] } }]], 'answered at once')
+  const helloFirst = [{ status: 409, json: { error: 'hello first' } }]
+  assert.deepEqual([stray1.r.sent, stray2.r.sent], [helloFirst, helloFirst], 'answered at once')
   assert.equal(deck.state().sessions[A.host].inst, null, 'neither made current')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-hello-first').map((e) => [e.poll, e.inst]), [[stray1.id, 'iold'], [stray2.id, null]])
   // The live instance's hello, then its poll.
   hello(A)
   const n1 = poll(A)
@@ -466,7 +469,7 @@ test('deck: only a hello makes an inst current: one that hasn\'t said hello has 
   const c = deck.prompt({ host: A.host, text: 'x' }).cmd
   assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'x' }] } }], 'the current instance takes the command')
   assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 0, 'none of it is a restart')
-  assert.deepEqual(log.filter((e) => e.kind === 'poll-stale').map((e) => [e.poll, e.inst, e.current]), [[stray1.id, 'iold', null], [stray2.id, null, null], [stray3.id, 'iold', 'ia']])
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-stale').map((e) => [e.poll, e.inst, e.current]), [[stray3.id, 'iold', 'ia']])
 })
 
 test('deck: the deck remembers at least the last 8 insts that said hello for a session: none of them counts again', () => {
@@ -480,10 +483,219 @@ test('deck: the deck remembers at least the last 8 insts that said hello for a s
   for (const inst of insts.slice(0, 8)) assert.deepEqual(hello({ ...A, inst }), { v: 1, ok: true })
   assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 8)
   assert.deepEqual([deck.state().sessions[A.host].inst, n.r.sent], ['i9', []])
-  // Its fields are taken all the same, as an event's would be.
-  hello({ ...A, inst: 'i1' }, { model: 'm2', mode: 'plan' })
-  assert.deepEqual(deck.view().settings[A.host], { model: 'm2', effort: null, mode: 'plan' })
-  assert.equal(deck.state().sessions[A.host].inst, 'i9')
+})
+
+test('deck: a hello that doesn\'t make its inst current is answered ok and changes nothing: no model, mode or effort taken', () => {
+  // PROTOCOL.md, Identity, as amended: "Its hello is answered ok but changes nothing, its model, mode and effort
+  // included". A replaced instance's late hello, a retry say, carries what that instance last saw.
+  const { deck, log, reg, hello, poll, view } = setup()
+  reg([A, 'idle'])
+  hello(A, { model: 'm1', mode: 'default', effort: 'low' })
+  hello({ ...A, inst: 'ia2' }, { model: 'm2', mode: 'acceptEdits', effort: 'medium' })
+  const n = poll({ ...A, inst: 'ia2' })
+  const settings = { model: 'm2', effort: 'medium', mode: 'acceptEdits' }
+  const helloSeen = deck.state().sessions[A.host].hello
+  assert.deepEqual([view().settings[A.host], helloSeen.inst, helloSeen.model], [settings, 'ia2', 'm2'])
+  // The replaced instance says hello again, and one says hello with no inst at all.
+  for (const extra of [{ inst: 'ia', model: 'm-old', mode: 'plan', effort: 'high' }, { inst: undefined, model: 'm-none', mode: 'auto', effort: 'xhigh' }]) {
+    assert.deepEqual(hello(A, extra), { v: 1, ok: true }, `${extra.inst ?? 'no inst'}: answered ok`)
+    assert.deepEqual(view().settings[A.host], settings, `${extra.inst ?? 'no inst'}: no model, mode or effort taken`)
+    assert.equal(deck.state().sessions[A.host].hello, helloSeen, `${extra.inst ?? 'no inst'}: nor is it the session's hello`)
+  }
+  assert.deepEqual([deck.state().sessions[A.host].inst, n.r.sent], ['ia2', []], 'the current instance and its poll stay')
+  assert.deepEqual(log.filter((e) => e.kind === 'hello').map((e) => [e.inst, e.madeCurrent, e.current]), [['ia', true, 'ia'], ['ia2', true, 'ia2'], ['ia', false, 'ia2'], [null, false, 'ia2']])
+
+  // A session with no current instance: a hello with no inst makes none current, and its polls still ask for one.
+  reg()
+  reg([A, 'idle'])
+  assert.deepEqual(hello(A, { inst: undefined, model: 'm-none' }), { v: 1, ok: true })
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host].model], [null, null])
+  assert.deepEqual(poll(A, 20, null).r.sent, [{ status: 409, json: { error: 'hello first' } }])
+})
+
+test('deck: the current instance\'s hello, said again as after a rejected fetch, is taken as the real deck takes it: its cwd, model, mode and effort, with no restart', () => {
+  // The mod says a quick hello with its own inst after a fetch the engine abandoned, at an Esc or a deck Deny, and in
+  // an outage. Once a hello is answered ok it takes the deck to have the hello's model, and sends a settings event
+  // only for another (connected() in claude-code/plugin/hooks/bridge.ts), so a model changed in the app since its
+  // last report reaches the deck only in that hello. The real deck takes it: #makeCurrent is true for the current
+  // inst, and #greet then takes the fields (claude-code/deck/src/model/sessions.ts).
+  const { deck, log, reg, hello, poll, view } = setup()
+  reg([A, 'busy'])
+  hello(A, { model: 'm1', mode: 'default', effort: 'low' })
+  const n1 = poll(A)
+  const c = deck.prompt({ host: A.host, text: 'x' }).cmd
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'x' }] } }])
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c, state: 'waiting' })
+  const n2 = poll(A)
+
+  assert.deepEqual(hello(A, { cwd: '/s2', model: 'm2', mode: 'acceptEdits', effort: 'high' }), { v: 1, ok: true })
+  assert.deepEqual(view().settings[A.host], { model: 'm2', effort: 'high', mode: 'acceptEdits' }, 'its model, mode and effort taken')
+  const s = deck.state().sessions[A.host]
+  assert.deepEqual([s.hello.inst, s.hello.cwd, s.hello.model], ['ia', '/s2', 'm2'], "and it's the session's hello")
+  // Nothing else changes: no restart, so the waiting prompt and the open poll stay, and so does the instance.
+  assert.deepEqual([s.inst, s.insts, view().cmds[c], n2.r.sent], ['ia', ['ia'], 'waiting', []])
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 0)
+  // A field the hello leaves out, as the mod does a model it can't read or a mode it hasn't seen, is kept.
+  hello(A, { model: undefined, mode: undefined, effort: undefined })
+  assert.deepEqual(view().settings[A.host], { model: 'm2', effort: 'high', mode: 'acceptEdits' })
+  assert.deepEqual(log.filter((e) => e.kind === 'hello').map((e) => [e.inst, e.madeCurrent, e.again]), [['ia', true, false], ['ia', true, true], ['ia', true, true]])
+
+  // Once another instance has replaced it, its hello is a replaced instance's, and changes nothing.
+  hello({ ...A, inst: 'ia2' }, { model: 'm3', mode: 'plan', effort: 'medium' })
+  hello(A, { model: 'm-old', mode: 'auto', effort: 'xhigh' })
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host]], ['ia2', { model: 'm3', effort: 'medium', mode: 'plan' }])
+  assert.deepEqual(log.filter((e) => e.kind === 'hello').slice(-2).map((e) => [e.inst, e.madeCurrent, e.again]), [['ia2', true, false], ['ia', false, false]])
+})
+
+test('deck: a session no instance has said hello for asks for one: every poll gets 409 hello first at once, whatever its inst, until a hello; with a current instance nothing changes', () => {
+  // PROTOCOL.md, Identity, as amended (item 5): after a deck restart, or release rule 4, the mod may have had no request
+  // open to fail. Its polls answered {"cmds": []} would go through, and it would poll on unheard for good.
+  const { deck, clock, log, reg, hello, ev, poll, view } = setup()
+  const first = [{ status: 409, json: { error: 'hello first' } }]
+  reg([A, 'busy'], [B, 'busy'])
+  hello(B)
+  const nB = poll(B)
+  // A's mod is there, its events taken, but no instance of it has said hello to this deck.
+  ev(A, { t: 'measure', context: { percent: 7, window: 10 } })
+  for (const [inst, wait] of [[A.inst, 20], ['iold', 20], [null, 20], [A.inst, 0]]) {
+    assert.deepEqual(poll(A, wait, inst).r.sent, first, `inst ${inst}, wait ${wait}: at once`)
+  }
+  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].poll, view().context[A.host]], [null, null, 7], 'none made current or held; its events still count')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-hello-first').map((e) => [e.host, e.inst]), [[A.host, A.inst], [A.host, 'iold'], [A.host, null], [A.host, A.inst]])
+  assert.deepEqual(nB.r.sent, [], "another session's poll is left alone")
+
+  // The hello, about 100 ms later: the same inst is current, and its next poll is held and takes the next command.
+  clock.advance(100)
+  hello(A)
+  const n1 = poll(A)
+  assert.equal(n1.r.sent.length, 0, 'held')
+  const c = deck.prompt({ host: A.host, text: 'Hi.' }).cmd
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Hi.' }] } }])
+  // With a current instance, a poll from another inst is answered at once with none, never 409: it can't displace it.
+  assert.deepEqual(poll(A, 20, 'iold').r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.equal(log.filter((e) => e.kind === 'poll-hello-first').length, 4)
+
+  // A registry reading that misses the session forgets it (release rule 4), and answers its open poll. With the file
+  // back, the mod's next poll is its first to a deck with no hello from it: it asks for one again.
+  const n2 = poll(A)
+  reg([B, 'busy'])
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }])
+  reg([A, 'busy'], [B, 'busy'])
+  assert.deepEqual(poll(A).r.sent, first)
+  hello(A)
+  assert.equal(poll(A).r.sent.length, 0, 'held after the hello')
+})
+
+test('deck: a prompt or mode press for a session with no current instance alerts, as the real deck does, and queues nothing', () => {
+  // PROTOCOL.md, "Commands": "A prompt or mode press also alerts when the target has ended, has no plugin, or has no
+  // instance that has said hello to this deck." A command queued then would fail "not delivered" a minute later.
+  const { deck, clock, reg, hello, ev, poll, view } = setup()
+  reg([A, 'idle'])
+  ev(A, { t: 'measure', context: { percent: 7, window: 10 } })
+  assert.equal(deck.state().sessions[A.host].plugin, true, 'its mod is there')
+  const why = /^local_a has no current instance: no instance of its mod has said hello to this deck, so it can't take commands until one does$/
+  for (const r of [deck.prompt({ host: A.host, text: 'Hi.' }), deck.mode({ host: A.host, mode: 'plan' })]) {
+    assert.deepEqual([r.ok, r.alert, r.cmd], [false, true, undefined])
+    assert.match(r.error, why)
+  }
+  assert.deepEqual([view().cmds, view().alert], [{}, true], 'nothing queued')
+  // Its poll asks for a hello; once one comes, the presses go through.
+  assert.deepEqual(poll(A).r.sent, [{ status: 409, json: { error: 'hello first' } }])
+  hello(A)
+  const n = poll(A)
+  const r = deck.prompt({ host: A.host, text: 'Hi.' })
+  assert.deepEqual([r.ok, n.r.sent[0]?.json.cmds.map((c) => c.id)], [true, [r.cmd]])
+  // A reset forgets the instance: the presses alert again until its next hello.
+  deck.reset()
+  reg([A, 'idle'])
+  ev({ ...A, inst: 'ia-reset' }, { t: 'measure', context: { percent: 8, window: 10 } })
+  assert.match(deck.mode({ host: A.host, mode: 'plan' }).error, why)
+  clock.advance(60_000)
+  assert.deepEqual(view().cmds, {}, 'and nothing failed "not delivered" later, as nothing was queued')
+})
+
+test('deck: two registry files that list one host: either file\'s sessionId confirms a hook\'s request and takes a hello, and the deck shows the file that started later', () => {
+  // A restarted process whose old file lingers beside its new one. The real deck counts every file for confirmation,
+  // and shows the one with the later startedAt.
+  const { deck, log, reg, hello, perm, pre, view } = setup()
+  const file = (pid, sessionId, status, startedAt, extra = {}) => ({ pid, sessionId, hostSessionId: A.host, name: `${A.host} ${pid}`, status, statusUpdatedAt: 1, startedAt, ...extra })
+  const OLD = file(7, 'sid-old', 'idle', 100)
+  const NEW = file(3, 'sid-new', 'busy', 200)
+  for (const order of [[OLD, NEW], [NEW, OLD]]) {
+    deck.applyRegistry(order)
+    assert.deepEqual([view().sessions, view().status[A.host], deck.state().registry[A.host].pid], [[A.host], 'working', 3], `${order.map((f) => f.pid)}: the later start shows`)
+  }
+  // Each file's sessionId confirms a request with A's host; a third doesn't.
+  const none = [{ status: 200, json: {} }]
+  for (const sid of ['sid-old', 'sid-new']) {
+    assert.equal(perm({ ...A, sid }, 'Write', W1).kind, 'tool', `${sid}: held`)
+    assert.equal(pre({ ...A, sid }, 'default').kind, 'none', `${sid}: a mode check taken, with no command in flight`)
+  }
+  const child = perm({ ...A, sid: 'sid-child' }, 'Write', W1)
+  assert.deepEqual([child.kind, child.r.sent], ['unconfirmed', none])
+  assert.equal(log.filter((e) => e.kind === 'unconfirmed').at(-1).why, 'the registry lists local_a under another sessionId')
+  assert.equal(deck.hookNeedsReading(A.host, { session_id: 'sid-old' }), false, 'no second reading for either file\'s')
+  // A hello is refused only when no file lists the host with its sid.
+  assert.deepEqual(hello({ ...A, sid: 'sid-old' }), { v: 1, ok: true })
+  assert.deepEqual(hello({ ...A, sid: 'sid-new', inst: 'ia2' }), { v: 1, ok: true })
+  assert.throws(() => hello({ ...A, sid: 'sid-child', inst: 'ichild' }), NotThisSession)
+  assert.deepEqual(log.filter((e) => e.kind === 'hello' && e.status === 409).map((e) => e.listedSids.toSorted()), [['sid-new', 'sid-old']])
+  assert.equal(deck.helloNeedsReading({ v: 1, sid: 'sid-old', host: A.host }), false)
+
+  // Ties: the same startedAt, or none on both, goes to the lower pid; a file without one loses to a file with one.
+  // Every file reads busy, as the shown one did, so no release rule runs.
+  deck.applyRegistry([file(9, 'sid-9', 'busy', 300), file(4, 'sid-4', 'busy', 300)])
+  assert.equal(deck.state().registry[A.host].pid, 4, 'the same start: the lower pid')
+  deck.applyRegistry([file(9, 'sid-9', 'busy', undefined), file(4, 'sid-4', 'busy', undefined)])
+  assert.equal(deck.state().registry[A.host].pid, 4, 'no start on either: the lower pid')
+  deck.applyRegistry([file(2, 'sid-2', 'busy', undefined), file(8, 'sid-8', 'busy', 50)])
+  assert.equal(deck.state().registry[A.host].pid, 8, 'a start beats none')
+  // The session ends only when no file lists it: its held requests go with the last.
+  assert.equal(view().held.length, 2)
+  deck.applyRegistry([file(8, 'sid-8', 'busy', 50)])
+  assert.equal(view().held.length, 2, 'one file left: still listed')
+  reg()
+  assert.deepEqual([view().held, view().sessions], [[], []])
+})
+
+test('deck: a hook\'s request from a session the registry doesn\'t confirm leaves the mode command in flight its allowances, both kinds', () => {
+  // A `claude` started inside A has A's host and its own session id. Its mode check, and the PermissionRequest its
+  // mode tool raises, get no decision; A's own, for A's command, are each still allowed once.
+  const { deck, log, reg, hello, perm, pre, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const CHILD = { ...A, sid: 'sid-child' }
+  const SPARE = { ...A, sid: 'sid-spare', host: 'local_spare' }
+  const mode = { session_id: 'self', mode: 'plan' }
+  const none = [{ status: 200, json: {} }]
+  const deliver = () => {
+    const c = deck.mode({ host: A.host, mode: 'plan' }).cmd
+    poll(A)
+    assert.equal(deck.view().cmds[c], 'delivered')
+    return c
+  }
+  // Each kind on its own, then both, from the child and from a host the registry doesn't list.
+  const cases = [
+    [CHILD, ['check']],
+    [CHILD, ['raise']],
+    [CHILD, ['check', 'raise']],
+    [CHILD, ['raise', 'check']],
+    [SPARE, ['check', 'raise']],
+  ]
+  for (const [S, kinds] of cases) {
+    const c = deliver()
+    for (const kind of kinds) {
+      const r = kind === 'check' ? pre(S, 'plan') : perm(S, MODE_TOOL, mode)
+      assert.deepEqual([r.kind, r.r.sent], ['unconfirmed', none], `${S.sid}'s ${kind}`)
+    }
+    const check = pre(A, 'plan')
+    const raise = perm(A, MODE_TOOL, mode)
+    assert.deepEqual([check.kind, check.cmd, check.r.sent], ['allow', c, [{ status: 200, json: PRE_ALLOW }]], `${kinds.join(', ')} from ${S.sid}: A's check`)
+    assert.deepEqual([raise.kind, raise.cmd, raise.r.sent], ['mode', c, [{ status: 200, json: ALLOW }]], `${kinds.join(', ')} from ${S.sid}: A's raise`)
+    deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c, state: 'done', detail: '' })
+  }
+  assert.equal(log.filter((e) => e.kind === 'unconfirmed').length, 8)
+  assert.deepEqual(deck.view().held, [], 'and nothing held')
 })
 
 test('deck: a result is taken only from the inst its command was delivered to', () => {
@@ -1792,11 +2004,11 @@ test('deck: a reset answers held requests with {} and cuts open polls off with n
   assert.deepEqual(log.filter((e) => e.kind === 'poll-cut').map((e) => [e.host, e.poll, e.inst]), [[A.host, n2.id, A.inst]])
   assert.deepEqual([view().sessions, view().held, view().cmds], [[], [], {}])
   assert.equal(clock.pending, 0, 'no timers left behind')
-  // Until it says hello again, the reset having forgotten its inst, its polls are answered at once with none: as a mod
-  // with no poll open at the reset, waiting out its second after a poll answered at once, finds them.
+  // Until it says hello again, the reset having forgotten its inst, its polls ask for a hello: as a mod with no poll open
+  // at the reset, waiting out its second after a poll answered at once, finds at its next.
   reg([A, 'busy'])
   const stale = poll(A)
-  assert.deepEqual(stale.r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.deepEqual(stale.r.sent, [{ status: 409, json: { error: 'hello first' } }])
   // Its fetch failed, so the mod says hello again, with the same inst: current again, its next poll is held and takes
   // the next command.
   hello(A)

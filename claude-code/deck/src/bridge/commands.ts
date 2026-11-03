@@ -25,7 +25,7 @@ export type Command = CommandSpec & {
 	readonly id: string;
 	readonly host: string;
 	state: CommandState;
-	/** The mod instance it was delivered to. */
+	/** The mod instance it was delivered to; null until it's delivered. */
 	inst: string | null;
 	deliveredAt: number | null;
 	/** `error` from a refused or failed result, or why the deck gave up on it. */
@@ -54,7 +54,8 @@ export const IN_FLIGHT_MS = 60_000;
 /** Finished commands kept for the keys to read, beyond which the oldest finished ones are forgotten. */
 const KEEP = 200;
 
-type Poll = { host: string; inst: string | null; reply: PollReply; timer: TimerHandle | null };
+/** A held poll, from the session's current mod instance: only that instance's polls take commands. */
+type Poll = { host: string; inst: string; reply: PollReply; timer: TimerHandle | null };
 
 /** A session's time without an open poll: since when, and the timer that then fails its waiting prompts. */
 type Unpolled = { since: number; timer: TimerHandle | null };
@@ -118,10 +119,11 @@ export class CommandQueue {
 	}
 
 	/**
-	 * `GET /v1/next`: answers at once with the session's queued commands, oldest first, or holds the request up
-	 * to `waitS` seconds until one is queued. A newer poll from the same session answers the older with none.
+	 * `GET /v1/next` from the session's current mod instance `inst`: answers at once with the session's queued
+	 * commands, oldest first, or holds the request up to `waitS` seconds until one is queued. A newer poll from the
+	 * same session answers the older with none.
 	 */
-	poll(host: string, inst: string | null, waitS: number, reply: PollReply): void {
+	poll(host: string, inst: string, waitS: number, reply: PollReply): void {
 		const older = this.#polls.get(host);
 		if (older) {
 			this.#endPoll(older);
@@ -149,7 +151,8 @@ export class CommandQueue {
 
 	/**
 	 * `POST /v1/result`. Returns false when it was ignored: an unknown or finished command, one delivered to
-	 * another session or mod instance, or a state the protocol doesn't have.
+	 * another session, a result with no inst or from an instance other than the one the command was delivered to,
+	 * or a state the protocol doesn't have (PROTOCOL.md, Commands).
 	 */
 	result(host: string, inst: string | null, id: string, state: string | null, error: string | null, detail: string | null): boolean {
 		const cmd = this.#commands.get(id);
@@ -161,7 +164,8 @@ export class CommandQueue {
 		if (cmd.host !== host) return ignore(`it was for ${cmd.host}`);
 		if (FINAL_STATES.has(cmd.state)) return ignore(`it already ended ${cmd.state}`);
 		if (cmd.state === "queued") return ignore("it wasn't delivered");
-		if (cmd.inst !== null && inst !== null && cmd.inst !== inst) return ignore("it was delivered to another mod instance");
+		if (inst === null) return ignore("it names no mod instance");
+		if (cmd.inst !== inst) return ignore("it was delivered to another mod instance");
 		if (state === "waiting") {
 			if (cmd.state === "waiting") return ignore("already waiting");
 			cmd.state = "waiting";
@@ -310,7 +314,7 @@ export class CommandQueue {
 	}
 
 	/** Answers a poll with the session's queued commands. A client that has gone gets nothing, and they stay queued. */
-	#deliver(reply: PollReply, host: string, inst: string | null): void {
+	#deliver(reply: PollReply, host: string, inst: string): void {
 		if (!reply.open) return;
 		const cmds = this.#queuedFor(host);
 		const now = this.#clock.now();

@@ -11,7 +11,7 @@ import test from 'node:test'
 import { parseWait, readToken, scrubber, startFakeBridge } from '../lib/bridge.mjs'
 import { hostHeader, send, within } from '../lib/client.mjs'
 import { ALLOW, MAX_BODY, MODE_TOOL, PRE_ALLOW, fingerprint, summary } from '../lib/protocol.mjs'
-import { request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
+import { MOD, modLoop, request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const A = { sid: 'sid-a', host: 'local_a', inst: 'ia', pid: 11 }
 
@@ -366,9 +366,9 @@ test('bridge: a long poll waits, answers when a command is queued, and needs a s
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: Date.now() })
   const bridge = await startBridge(t, env)
   const next = (wait, extra = '') => request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=${wait}${extra}` })
-  // Only a hello makes an inst current: without one, every poll is answered at once.
+  // Only a hello makes an inst current: without one, every poll asks for a hello, at once.
   let r = await next(1).answer
-  assert.deepEqual([r.status, r.json, r.ms < 500], [200, { cmds: [] }, true], 'no hello yet: at once')
+  assert.deepEqual([r.status, r.json, r.ms < 500], [409, { error: 'hello first' }, true], 'no hello yet: at once')
   await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
 
   r = await next(0).answer
@@ -577,11 +577,26 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
     socket.on('close', resolve)
     socket.on('error', resolve)
   }), 3000, 'no close within 3 s')
-  // A reset with a poll open cuts it off.
+  // A mode check whose client goes away while the registry is read once more, slowly.
+  const readdir = fsp.readdir
+  fsp.readdir = async (...args) => {
+    await sleep(150)
+    return readdir(...args)
+  }
+  try {
+    const gone = hook('/v1/pretool', { session_id: 'sid-gone', tool_name: MODE_TOOL, tool_input: input })
+    await sleep(30)
+    gone.abort()
+    await sleep(250)
+  } finally {
+    fsp.readdir = readdir
+  }
+  // A reset with a poll open cuts it off, and the mod's next poll asks for a hello.
   const n4 = next('ia2')
   await sleep(30)
   await call({ method: 'POST', path: '/control/reset' })
   assert.equal(await within(n4.answer.then(() => 'answered', () => 'cut off'), 3000, 'n4: neither answered nor cut off within 3 s'), 'cut off')
+  assert.deepEqual((await answered(next('ia2'), 'the poll after the reset')).json, { error: 'hello first' })
   bridge.deck.state = () => {
     throw new TypeError('the state broke')
   }
@@ -590,7 +605,7 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   await bridge.close()
 
   const log = runLog(env)
-  const kinds = ['fp-check', 'held', 'release', 'answered', 'command', 'result-ignored', 'mode-check', 'mode-allowed', 'unconfirmed', 'poll-turn-end', 'poll-at-once', 'poll-superseded', 'poll-stale', 'poll-cut', 'hello', 'mod-restart', 'request', 'registry', 'route-error', 'control-error', 'client-error']
+  const kinds = ['fp-check', 'held', 'release', 'answered', 'command', 'result-ignored', 'mode-check', 'mode-allowed', 'unconfirmed', 'client-gone', 'poll-turn-end', 'poll-at-once', 'poll-superseded', 'poll-stale', 'poll-cut', 'poll-hello-first', 'hello', 'mod-restart', 'request', 'registry', 'route-error', 'control-error', 'client-error']
   assert.deepEqual(kinds.filter((k) => !log.some((e) => e.kind === k)), [], 'every kind the jq lines select')
   assert.ok(log.some((e) => e.unlogged), 'and a line that says why its body is missing')
   // The fields the jq lines pick out.
@@ -599,6 +614,8 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   assert.ok(log.some((e) => e.kind === 'answered' && e.decision === 'allow' && e.by === 'press'))
   assert.ok(log.some((e) => e.kind === 'mode-check' && e.allowed === true && e.cmd === press.json.cmd && e.mode === 'plan'))
   assert.ok(log.some((e) => e.kind === 'unconfirmed' && e.route === 'pretool' && e.sid === 'sid-child' && e.host === A.host))
+  assert.ok(log.some((e) => e.kind === 'client-gone' && e.route === 'pretool' && e.sid === 'sid-gone' && e.host === A.host && typeof e.why === 'string'))
+  assert.ok(log.some((e) => e.kind === 'poll-hello-first' && e.host === A.host && e.inst === 'ia2' && Number.isInteger(e.poll)))
   assert.ok(log.some((e) => e.kind === 'poll-at-once' && Array.isArray(e.cmds) && Number.isFinite(e.sinceTurnEndMs)))
   assert.ok(log.some((e) => e.kind === 'request' && e.path === '/v1/next' && typeof e.query === 'string' && Number.isInteger(e.n) && e.method === 'GET' && e.auth === 'ok'))
   assert.ok(log.some((e) => e.kind === 'registry' && e.change === 'changed' && e.to.status === 'idle' && e.host === A.host))
@@ -612,6 +629,7 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
     [new RegExp(` ${press.json.cmd} queued for local_a: mode plan`), 'a command'],
     [new RegExp(` ${press.json.cmd} delivered to local_a \\(inst ia\\)`), 'its delivery'],
     [/ registry ~ local_a busy → idle/, 'a registry change'],
+    [/ local_a: poll from inst ia2 answered 409 hello first: no instance has said hello for the session/, 'a hello first'],
   ]
   assert.deepEqual(want.filter(([re]) => !re.test(said)).map(([, what]) => what), [], said)
 })
@@ -737,6 +755,151 @@ test('bridge: a reset cuts the open poll off with no answer, so the live mod\'s 
   const log = runLog(env)
   assert.deepEqual(log.filter((e) => e.kind === 'poll-cut').map((e) => [e.host, e.inst, e.why]), [[A.host, A.inst, 'the bridge was reset']])
   assert.equal(log.filter((e) => e.kind === 'cut').length, 1, 'and a cut line for its request')
+})
+
+/** Index of the first trace item after `from` that `test` picks, or -1; -1 too when `from` is. */
+const findFrom = (trace, from, test) => {
+  if (from < 0) return -1
+  for (let i = from + 1; i < trace.length; i++) if (test(trace[i])) return i
+  return -1
+}
+
+/** Index of the first hello answered ok after the first poll answered 409 after `from`, or -1. */
+const helloAfter409 = (trace, from) => findFrom(trace, findFrom(trace, from, (x) => x.what === 'poll' && x.status === 409), (x) => x.what === 'hello' && x.status === 200)
+
+test('bridge: two registry files for one host, read from the folder: the one that started later shows, and either\'s session id confirms a hook\'s request or a hello', async (t) => {
+  // A restarted process whose old file lingers. registry.mjs keeps startedAt, which picks the file the deck shows.
+  const env = tempEnv(t)
+  // The older start has the higher pid and the later file name, so neither the order of reading nor the pid picks it.
+  writeRegistry(env, 99, { sessionId: 'sid-old', hostSessionId: A.host, status: 'idle', statusUpdatedAt: 1, startedAt: 1000 })
+  writeRegistry(env, 100, { sessionId: 'sid-new', hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1, startedAt: 2000 })
+  const bridge = await startBridge(t, env)
+  assert.deepEqual([bridge.deck.view().sessions, bridge.deck.view().status[A.host], bridge.deck.state().registry[A.host].startedAt], [[A.host], 'working', 2000])
+  const hook = (sid) => request(bridge, env.token, { method: 'POST', path: '/v1/pretool', headers: { 'x-deck-host': A.host }, json: { session_id: sid, tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'plan' } } }).answer
+  for (const sid of ['sid-old', 'sid-new', 'sid-other']) assert.deepEqual((await hook(sid)).json, {}, sid)
+  assert.deepEqual(runLog(env).filter((e) => e.kind === 'unconfirmed').map((e) => e.sid), ['sid-other'], 'only the session id no file lists is unconfirmed')
+  const hello = (sid, inst) => request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid, host: A.host, inst, cwd: '/s', model: 'm', plugin: '0.3.0', cc: '2.1.309' } }).answer
+  assert.deepEqual([(await hello('sid-old', 'i1')).status, (await hello('sid-new', 'i2')).status, (await hello('sid-other', 'i3')).status], [200, 200, 409])
+})
+
+test('bridge: a mod waiting out its second after a turn end, with nothing open, when the deck resets hears 409 hello first at its next poll, says hello 100 ms later, and takes the next command', async (t) => {
+  // PROTOCOL.md, Identity, as amended (item 5). The mod is played as claude-code/plugin/hooks/bridge.ts plays it.
+  // Before the amendment its next poll went through, answered at once with none, and so did every one after it.
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const bridge = await startBridge(t, env)
+  const mod = modLoop(bridge, env.token, A)
+  t.after(() => mod.stop())
+  mod.start()
+  const open = () => bridge.deck.state().sessions[A.host]?.poll !== null && bridge.deck.state().sessions[A.host]?.poll !== undefined
+  await mod.until(() => open(), 2000, 'its first poll held')
+  // The main loop's turn ends: the bridge answers the open poll with none, and the mod waits out the rest of its second.
+  const events = { sid: A.sid, host: A.host, inst: A.inst, seq: 1, events: [{ t: 'turn.start', turn: 't1', at: 1 }, { t: 'turn.end', turn: 't1', reason: 'answer', at: 2 }] }
+  assert.equal((await request(bridge, env.token, { method: 'POST', path: '/v1/events', json: events }).answer).status, 204)
+  await mod.until((tr) => tr.some((x) => x.what === 'poll' && x.status === 200), 2000, 'the poll answered at the turn end')
+  // Now, in that second, with nothing of the mod's open, the deck restarts.
+  assert.equal(open(), false, 'nothing open')
+  assert.equal((await request(bridge, env.token, { method: 'POST', path: '/control/reset' }).answer).status, 200)
+  const resetAt = mod.trace.length - 1
+  const early = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'Too soon.' } }).answer
+  assert.equal(early.json.alert, true, 'a press before its hello alerts, and queues nothing')
+  // Its next poll asks for a hello, which it says quietly 100 ms later, and its poll after that is held.
+  await mod.until((tr) => helloAfter409(tr, resetAt) >= 0, 3000, 'a hello after the 409')
+  const i409 = findFrom(mod.trace, resetAt, (x) => x.what === 'poll' && x.status === 409)
+  const iHello = findFrom(mod.trace, i409, (x) => x.what === 'hello')
+  assert.ok(mod.trace[iHello].ms - mod.trace[i409].ms >= MOD.RETRY_MS - 10, JSON.stringify(mod.trace))
+  assert.deepEqual(mod.trace.slice(i409, iHello + 1).map((x) => x.what), ['poll', 'quick-hello', 'hello'], 'no outage: the 409 is a quick hello')
+  await mod.until(() => open(), 2000, 'its poll held after the hello')
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'Hi.' } }).answer
+  assert.equal(press.json.ok, true, JSON.stringify(press.json))
+  await mod.until(() => mod.cmds.some((c) => c.id === press.json.cmd), 2000, 'the command delivered')
+  assert.deepEqual(runLog(env).filter((e) => e.kind === 'poll-hello-first').map((e) => [e.host, e.inst]), [[A.host, A.inst]])
+  assert.equal(runLog(env).filter((e) => e.kind === 'poll-cut').length, 0, 'the reset found no poll to cut')
+})
+
+test('bridge: a registry reading that misses the session answers its poll and forgets it; with its file back, the mod\'s next poll hears 409 hello first, and it takes commands again after its hello', async (t) => {
+  // The hello-again fixture's case, with the mod played as bridge.ts plays it.
+  const env = tempEnv(t)
+  const file = { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: 1 }
+  writeRegistry(env, A.pid, file)
+  const bridge = await startBridge(t, env)
+  const mod = modLoop(bridge, env.token, A)
+  t.after(() => mod.stop())
+  mod.start()
+  const open = () => (bridge.deck.state().sessions[A.host]?.poll ?? null) !== null
+  await mod.until(() => open(), 2000, 'its first poll held')
+  fs.rmSync(path.join(env.registryDir, `${A.pid}.json`))
+  await bridge.rescan()
+  await mod.until((tr) => tr.some((x) => x.what === 'poll' && x.status === 200), 2000, 'the poll answered at release rule 4')
+  const goneAt = mod.trace.length - 1
+  writeRegistry(env, A.pid, { ...file, statusUpdatedAt: 2 })
+  await bridge.rescan()
+  await mod.until((tr) => helloAfter409(tr, goneAt) >= 0, 3000, 'a hello after the 409')
+  await mod.until(() => open(), 2000, 'its poll held after the hello')
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: A.host, mode: 'plan' } }).answer
+  assert.equal(press.json.ok, true, JSON.stringify(press.json))
+  await mod.until(() => mod.cmds.some((c) => c.id === press.json.cmd), 2000, 'the command delivered')
+  assert.deepEqual(mod.trace.filter((x) => x.what === 'outage'), [], 'and no outage')
+})
+
+test('bridge: a reset with the mod\'s poll open cuts it off: the mod\'s fetch fails, it says hello 100 ms later, and takes the next command', async (t) => {
+  // As a deck that restarts drops the connection; the mod played as bridge.ts plays it, no 409 needed.
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: 1 })
+  const bridge = await startBridge(t, env)
+  const mod = modLoop(bridge, env.token, A)
+  t.after(() => mod.stop())
+  mod.start()
+  const open = () => (bridge.deck.state().sessions[A.host]?.poll ?? null) !== null
+  await mod.until(() => open(), 2000, 'its first poll held')
+  await request(bridge, env.token, { method: 'POST', path: '/control/reset' }).answer
+  await mod.until((tr) => tr.some((x) => x.what === 'hello' && x.status === 200 && tr.indexOf(x) > 0), 2000, 'a second hello')
+  assert.deepEqual(mod.trace.map((x) => [x.what, x.status ?? null]).slice(0, 4), [['hello', 200], ['poll', null], ['quick-hello', null], ['hello', 200]])
+  await mod.until(() => open(), 2000, 'its poll held after the hello')
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'Hi.' } }).answer
+  await mod.until(() => mod.cmds.some((c) => c.id === press.json.cmd), 2000, 'the command delivered')
+  assert.equal(runLog(env).filter((e) => e.kind === 'poll-hello-first').length, 0)
+})
+
+test('bridge: a hook\'s request whose client goes away while the registry is read once more isn\'t taken: nothing held, and no allowance spent on it', async (t) => {
+  // As the real deck: after the second reading, the request is taken only if its client is still there.
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const bridge = await startBridge(t, env)
+  await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: '/s', model: 'm', plugin: '0.3.0', cc: '2.1.309' } }).answer
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: A.host, mode: 'plan' } }).answer
+  await request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=0` }).answer
+  assert.equal(bridge.deck.view().cmds[press.json.cmd], 'delivered')
+  const hook = (p, json) => request(bridge, env.token, { method: 'POST', path: p, headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, ...json } })
+  const mode = { tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'plan' } }
+  // Each time, the session's id changes (a /clear) before the bridge has read it: the request waits for one more
+  // reading, made slow here, which confirms it, and its client goes away meanwhile.
+  const readdir = fsp.readdir
+  fsp.readdir = async (...args) => {
+    await sleep(200)
+    return readdir(...args)
+  }
+  const sids = ['sid-a2', 'sid-a3', 'sid-a4']
+  try {
+    const requests = [['/v1/pretool', mode], ['/v1/permission', mode], ['/v1/permission', { tool_name: 'Write', tool_input: { file_path: '/s/a.txt', content: 'a' } }]]
+    for (const [i, [p, json]] of requests.entries()) {
+      writeRegistry(env, A.pid, { sessionId: sids[i], hostSessionId: A.host, status: 'busy', statusUpdatedAt: 2 + i })
+      const before = (await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken
+      const h = hook(p, { ...json, session_id: sids[i] })
+      await sleep(50)
+      h.abort()
+      for (let n = 0; n < 100 && (await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken === before; n++) await sleep(10)
+    }
+  } finally {
+    fsp.readdir = readdir
+  }
+  assert.deepEqual(bridge.deck.view().held, [], 'nothing held')
+  const log = runLog(env)
+  assert.deepEqual(log.filter((e) => e.kind === 'client-gone').map((e) => [e.route, e.host, e.sid]), [['pretool', A.host, 'sid-a2'], ['permission', A.host, 'sid-a3'], ['permission', A.host, 'sid-a4']])
+  assert.deepEqual(log.filter((e) => ['held', 'mode-check', 'mode-allowed', 'unconfirmed'].includes(e.kind)), [], 'none of them taken')
+  // The command's allowances are still there, for the session's own check and raise.
+  assert.deepEqual((await hook('/v1/pretool', { ...mode, session_id: 'sid-a4' }).answer).json, PRE_ALLOW)
+  assert.deepEqual((await hook('/v1/permission', { ...mode, session_id: 'sid-a4' }).answer).json, ALLOW)
 })
 
 test('bridge: closing answers held requests with {} and open polls with no commands', async (t) => {

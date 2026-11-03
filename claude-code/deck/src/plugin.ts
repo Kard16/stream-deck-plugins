@@ -17,11 +17,8 @@ import { type LoadedToken, loadOrCreateToken } from "./bridge/token.js";
 import { ModeKeys, PromptKeys } from "./keys/commands.js";
 import { DecisionKeys } from "./keys/decision.js";
 import { SessionKeys } from "./keys/session.js";
-import { SessionModel } from "./model/sessions.js";
+import { connectSources } from "./model/sources.js";
 import { ModeDials } from "./mode/dials.js";
-import { RecordsReader, RecordsWatcher } from "./records/records.js";
-import { RegistryReader } from "./registry/registry.js";
-import { RegistryWatcher } from "./registry/watcher.js";
 import { SessionsDials } from "./sessions/dials.js";
 import { loadLogLevelFile, LOG_LEVEL_FILE } from "./util/log-level.js";
 import { describeError, type Log, redacting, Scrubber } from "./util/log.js";
@@ -71,16 +68,12 @@ const openSession = (host: string): void => {
 
 // The session model: the registry, the app's records and the bridge, merged by the app's local_ id. A hook's request
 // or a hello that the latest reading doesn't confirm has the registry read once more at once, not at the next scan.
-const registryLog = scope("Registry");
-const registry = new RegistryWatcher(new RegistryReader(REGISTRY_DIR, { log: registryLog }), { log: registryLog });
-const model = new SessionModel({ log: scope("Sessions"), rescan: () => registry.scanNow() });
-const recordsLog = scope("Records");
-const records = new RecordsWatcher(new RecordsReader(RECORDS_DIR, { log: recordsLog }), { log: recordsLog });
-registry.onChange((sessions) => {
-	model.setRegistry(sessions);
-	records.setHosts(model.hosts());
+// The wiring is connectSources's, which the tests run too.
+const { registry, records, model } = connectSources({
+	registryDir: REGISTRY_DIR,
+	recordsDir: RECORDS_DIR,
+	logs: { registry: scope("Registry"), records: scope("Records"), sessions: scope("Sessions") },
 });
-records.onChange((recs) => model.setRecords(recs));
 
 // The bridge on 127.0.0.1:47600.
 const bridge = loaded ? new BridgeServer({ port: BRIDGE_PORT, host: BRIDGE_HOST, token: loaded.token, routes: model, log: scope("Bridge") }) : null;

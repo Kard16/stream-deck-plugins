@@ -54,6 +54,10 @@ function now(answer: RouteAnswer | Promise<RouteAnswer>): RouteAnswer {
 const OK = { status: 200, body: { v: 1, ok: true } };
 const NONE = { status: 200, body: {} };
 const NOT_THIS_SESSION = { status: 409, body: { error: "not this session" }, logged: true };
+/** A poll's answer for a session no instance has said hello for (PROTOCOL.md, Identity). */
+const HELLO_FIRST = { status: 409, body: { error: "hello first" } };
+/** A poll's answer with no commands. */
+const NO_CMDS = { status: 200, body: { cmds: [] } };
 
 function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)], opts: { rescan?: () => Promise<void> } = {}) {
 	let wall = 10_000;
@@ -1174,6 +1178,55 @@ describe("desktop sessions only (PROTOCOL.md, Desktop sessions only)", () => {
 		assert.deepEqual(await model.hello({ v: 1, sid: "sid-9", host: "local_spare", inst: "ispare", model: "m" }), OK);
 		assert.equal(reads, 3);
 	});
+
+	test("a confirmation doesn't outlive the reading that gave it: a session id the registry no longer lists stops confirming", async () => {
+		let next: RegistrySession[] = [reg(1, A, { status: "busy" })];
+		let reads = 0;
+		const { model } = setup(next, {
+			rescan: async () => {
+				reads++;
+				model.setRegistry(next);
+			},
+		});
+		const request = (sid: string, command: string): FakeReply => {
+			const reply = new FakeReply();
+			void model.permission({ session_id: sid, tool_name: "Bash", tool_input: { command } }, A, reply);
+			return reply;
+		};
+		assert.deepEqual([request("sid-1", "a").answers, model.held.size, reads], [[], 1, 0], "confirmed by the latest reading");
+		// After /clear, the registry lists A under its new session id.
+		next = [reg(1, A, { status: "busy", sessionId: "sid-1b" })];
+		model.setRegistry(next);
+		const stale = new FakeReply();
+		await model.permission({ session_id: "sid-1", tool_name: "Bash", tool_input: { command: "b" } }, A, stale);
+		const check = new FakeReply();
+		await model.pretool({ session_id: "sid-1", tool_name: MODE_TOOL, tool_input: { session_id: "self", mode: "plan" } }, A, check);
+		assert.deepEqual([stale.answers, check.answers, model.held.size, reads], [[NONE], [NONE], 1, 2], "the old id, read once more each time: no decision");
+		assert.deepEqual(await model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia", model: "m" }), NOT_THIS_SESSION);
+		assert.deepEqual([request("sid-1b", "c").answers, model.held.size, reads], [[], 2, 3], "the new id confirms at once");
+	});
+
+	test("a hook's request is timed when it arrives, before any second reading of the registry, so release rules 2 and 3 compare that time", async () => {
+		const { model, at } = setup([reg(2, B)], {
+			rescan: async () => {
+				// The second reading comes later, and finds the session gone idle after the request arrived.
+				at(6000);
+				model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 5500 }), reg(2, B)]);
+			},
+		});
+		at(5000);
+		const r = new FakeReply();
+		const taking = model.permission({ session_id: "sid-1", tool_name: "Bash", tool_input: { command: "a" } }, A, r);
+		assert.ok(taking instanceof Promise, "it waits for the reading");
+		await taking;
+		assert.deepEqual(
+			model.held.list().map((h) => [h.host, h.at]),
+			[[A, 5000]],
+		);
+		// The next reading still says idle since 5500, after the request arrived: rule 3 lets it go.
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 5500 }), reg(2, B)]);
+		assert.deepEqual([r.answers, model.held.size], [[NONE], 0]);
+	});
 });
 
 describe("mod instances (PROTOCOL.md, Identity)", () => {
@@ -1193,6 +1246,7 @@ describe("mod instances (PROTOCOL.md, Identity)", () => {
 		// Its events and results are still taken, and still don't make it current.
 		assert.equal(model.events({ host: A, inst: "istale", seq: 1, events: [{ t: "tool.start", tool: "Read", use: "u1", summary: "a.md", fp: "1" }] }).status, 204);
 		assert.equal(model.result({ host: A, inst: "istale", id: delivered.id, state: "done" }).status, 204);
+		assert.equal(model.result({ host: A, id: delivered.id, state: "done" }).status, 204, "one with no inst is answered as ignored");
 		assert.deepEqual([view(A)?.doing, delivered.state], ["a.md", "delivered"], "a result counts only from the instance its command went to");
 		const next = model.commands.queue(A, { t: "prompt", text: "two" });
 		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [{ id: next.id, t: "prompt", text: "two" }] } }], "the current instance gets the command");
@@ -1201,13 +1255,13 @@ describe("mod instances (PROTOCOL.md, Identity)", () => {
 		assert.deepEqual(again.answers, [{ status: 200, body: { cmds: [] } }]);
 	});
 
-	test("before any hello, no instance is current: every poll is answered at once, and the session has no plugin to take presses", () => {
+	test("before any hello, no instance is current: every poll gets 409 hello first at once, and the session has no plugin to take presses", () => {
 		const { model, view, log } = setup();
 		assert.equal(model.events({ host: A, inst: "ia", seq: 1, events: [{ t: "settings", mode: "plan" }] }).status, 204);
 		assert.equal(view(A)?.mode, "plan", "its events are taken");
 		const early = new FakeReply();
 		model.next(new URLSearchParams({ host: A, inst: "ia", wait: "20" }), early);
-		assert.deepEqual(early.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(early.answers, [HELLO_FIRST]);
 		assert.equal(view(A)?.plugin, false);
 		assert.deepEqual(model.queue(A, { t: "prompt", text: "x" }), { ok: false, why: `"Session 1"'s mod hasn't said hello to this deck, so it can't take commands until it does` });
 		// Its hello makes it current: no restart, as no instance was current before.
@@ -1242,6 +1296,109 @@ describe("mod instances (PROTOCOL.md, Identity)", () => {
 		hi("i0");
 		assert.equal(restarts(), HELLOS_KEPT + 1);
 	});
+
+	test("a late hello from a replaced instance leaves the new one current: its fresh poll is held and takes the next command, the late one's gets none at once, and the late hello's settings are dropped", () => {
+		const { model, view, log } = setup([reg(1, A, { status: "idle" })]);
+		const hello = (inst: string, settings: { model: string; mode: string; effort: string }) => now(model.hello({ v: 1, sid: "sid-1", host: A, inst, ...settings }));
+		assert.deepEqual(hello("i0", { model: "claude-haiku-5-5", mode: "default", effort: "low" }), OK);
+		// The mod reloads: i1 says hello, a restart.
+		assert.deepEqual(hello("i1", { model: "claude-haiku-5-5", mode: "acceptEdits", effort: "low" }), OK);
+		// i0's hello comes late, from its line still running after the reload, with what it had seen: ok, and nothing else.
+		assert.deepEqual(hello("i0", { model: "claude-opus-5-5", mode: "plan", effort: "max" }), OK);
+		assert.deepEqual([view(A)?.plugin, view(A)?.model, view(A)?.mode, view(A)?.effort], [true, "claude-haiku-5-5", "acceptEdits", "low"]);
+		const fresh = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "i1", wait: "20" }), fresh);
+		assert.deepEqual(fresh.answers, [], "i1's poll is held");
+		const late = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "i0", wait: "20" }), late);
+		assert.deepEqual([late.answers, fresh.answers], [[NO_CMDS], []], "i0's is answered at once, and doesn't displace i1's");
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.deepEqual(fresh.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+		assert.deepEqual([cmd.state, cmd.inst], ["delivered", "i1"]);
+		assert.deepEqual(
+			log.lines.filter((l) => l.message.startsWith("RESTART")).map((l) => l.message),
+			[`RESTART ${A}: mod instance "i1" replaces "i0"; its current tool and in-flight commands are forgotten, and any poll the old one left open is answered`],
+		);
+	});
+
+	test("hello first: with no instance current, every poll for the session gets 409 at once, whatever its inst, none included; once one is, another instance's poll gets none at once", () => {
+		const { model } = setup();
+		const poll = (params: Record<string, string>): FakeReply => {
+			const reply = new FakeReply();
+			model.next(new URLSearchParams({ wait: "20", ...params }), reply);
+			return reply;
+		};
+		const before: Record<string, string>[] = [{ host: A, inst: "ia" }, { host: A, inst: "istale" }, { host: A }, { host: "", sid: "sid-1", inst: "ia" }];
+		for (const params of before) assert.deepEqual(poll(params).answers, [HELLO_FIRST], JSON.stringify(params));
+		assert.equal(model.commands.polling(A), false, "none is held");
+		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia", model: "m" })), OK);
+		const strays: Record<string, string>[] = [{ host: A, inst: "istale" }, { host: A }];
+		for (const params of strays) assert.deepEqual(poll(params).answers, [NO_CMDS], JSON.stringify(params));
+		assert.deepEqual(poll({ host: A, inst: "ia" }).answers, [], "the current instance's is held");
+		// Another session, which no instance has said hello for, still gets 409.
+		assert.deepEqual(poll({ host: B, inst: "ib" }).answers, [HELLO_FIRST]);
+	});
+
+	test("after the 409, the mod's hello makes its instance current: its poll is held and takes commands; so again after release rule 4 forgot the session", () => {
+		const { model, view } = setup([reg(1, A, { status: "idle" }), reg(2, B)]);
+		const poll = (): FakeReply => {
+			const reply = new FakeReply();
+			model.next(new URLSearchParams({ sid: "sid-1", host: A, inst: "ia", wait: "20" }), reply);
+			return reply;
+		};
+		const prompt = (text: string): { reply: FakeReply; id: string } => {
+			const reply = poll();
+			assert.deepEqual(reply.answers, [], "held");
+			const queued = model.queue(A, { t: "prompt", text });
+			assert.ok(queued.ok, JSON.stringify(queued));
+			return { reply, id: queued.cmd.id };
+		};
+		assert.deepEqual(poll().answers, [HELLO_FIRST]);
+		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia", model: "m" })), OK);
+		const one = prompt("one");
+		assert.deepEqual(one.reply.answers, [{ status: 200, body: { cmds: [{ id: one.id, t: "prompt", text: "one" }] } }]);
+		// A registry reading that misses A: the deck forgets it and answers its open poll (release rule 4).
+		const open = poll();
+		model.setRegistry([reg(2, B)]);
+		assert.deepEqual(open.answers, [NO_CMDS]);
+		model.setRegistry([reg(1, A, { status: "idle" }), reg(2, B)]);
+		assert.equal(view(A)?.plugin, false);
+		// The mod's next poll asks for a hello, and the same instance's hello is a first one to the deck that forgot it.
+		assert.deepEqual(poll().answers, [HELLO_FIRST]);
+		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia", model: "m" })), OK);
+		assert.equal(view(A)?.plugin, true);
+		const two = prompt("two");
+		assert.deepEqual(two.reply.answers, [{ status: 200, body: { cmds: [{ id: two.id, t: "prompt", text: "two" }] } }]);
+	});
+
+	test("a host the registry doesn't list gets 409 too, logged only at debug; its hello is taken, and its next poll held", () => {
+		const { model, log } = setup();
+		const spare = "local_spare";
+		const poll = (): FakeReply => {
+			const reply = new FakeReply();
+			model.next(new URLSearchParams({ sid: "sid-9", host: spare, inst: "ispare", wait: "20" }), reply);
+			return reply;
+		};
+		assert.deepEqual(poll().answers, [HELLO_FIRST]);
+		assert.deepEqual(
+			log.lines.filter((l) => l.message.includes("HELLO FIRST")).map((l) => `${l.level} ${l.message}`),
+			[`debug HELLO FIRST ${spare}: mod instance "ispare" polls, but no instance has said hello to this deck for the session, so the deck answers 409 to ask for one; the registry doesn't list it`],
+		);
+		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-9", host: spare, inst: "ispare", model: "m" })), OK);
+		const held = poll();
+		assert.deepEqual([held.answers, model.commands.polling(spare)], [[], true]);
+	});
+
+	test("a hello that makes an instance current repaints the deck, a restart's included", () => {
+		const { model } = setup();
+		const seen: unknown[] = [];
+		model.onChange(() => seen.push([model.session(A)?.plugin, model.session(A)?.model]));
+		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia", model: "claude-haiku-5-5" })), OK);
+		assert.deepEqual(seen, [[true, "claude-haiku-5-5"]]);
+		// A new instance, with nothing in flight to fail: only its hello repaints.
+		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ib", model: "claude-opus-5-5" })), OK);
+		assert.deepEqual(seen.slice(1), [[true, "claude-opus-5-5"]]);
+	});
 });
 
 describe("quiet logs (Phase 6)", () => {
@@ -1273,59 +1430,72 @@ describe("quiet logs (Phase 6)", () => {
 		]);
 	});
 
-	test("a mod talking to a deck it hasn't said hello to, as after a restart in its second between polls, or a registry reading without the session: at info, then quietly, afresh after a hello; a press says why it's refused", () => {
+	test("the deck asks a mod it has no hello from for one, as after a restart in the mod's second between polls, or a registry reading without the session: each poll's 409 at info, then quietly, afresh after a hello or the session's end; events and results only at debug; a press says why it's refused", () => {
 		const { model, clock, log, view } = setup([reg(1, A, { status: "busy" }), reg(2, B)]);
-		const NO_HELLO = `NO HELLO ${A}: mod instance "ia" polls, but no instance has said hello to this deck for the session, so it takes no prompts or mode changes until one does`;
-		const noHello = (): string[] => log.at("info").filter((l) => l.includes("NO HELLO"));
-		const poll = (): FakeReply => {
+		const ASKED = `HELLO FIRST ${A}: mod instance "ia" polls, but no instance has said hello to this deck for the session, so the deck answers 409 to ask for one`;
+		const asked = (): string[] => log.at("info").filter((l) => l.includes("HELLO FIRST") || l.includes("NO HELLO"));
+		const poll = (inst = "ia"): FakeReply => {
 			const reply = new FakeReply();
-			model.next(new URLSearchParams({ sid: "sid-1", host: A, inst: "ia", wait: "20" }), reply);
+			model.next(new URLSearchParams({ sid: "sid-1", host: A, inst, wait: "20" }), reply);
 			return reply;
 		};
-		// A deck that started while A's mod waited out its second between polls: no hello comes, ever, as nothing failed.
-		assert.deepEqual(poll().answers, [{ status: 200, body: { cmds: [] } }], "answered at once, as Identity says");
-		assert.deepEqual(noHello(), [`info ${NO_HELLO}`]);
-		for (let i = 0; i < 59; i++) poll();
+		// A deck that started while A's mod waited out its second between polls: nothing of the mod's failed, so its
+		// next poll is the first the deck hears, and the deck asks for a hello.
+		assert.deepEqual(poll().answers, [HELLO_FIRST]);
+		assert.deepEqual(asked(), [`info ${ASKED}`]);
+		// Should no hello come, as from a mod that only retries its poll: the rest at debug, whichever instance polls,
+		// since the quiet key is the session's.
+		for (let i = 0; i < 59; i++) assert.deepEqual(poll(i % 2 === 0 ? "ia" : "ib").answers, [HELLO_FIRST]);
+		assert.equal(log.lines.filter((l) => l.level === "debug" && l.message.startsWith(`HELLO FIRST ${A}: mod instance `)).length, 59);
+		// Its events and results are taken, logged only at debug, and counted with none of that.
 		assert.equal(model.events({ sid: "sid-1", host: A, inst: "ia", seq: 1, events: [{ t: "settings", mode: "plan", at: 1 }] }).status, 204);
 		assert.equal(model.result({ sid: "sid-1", host: A, inst: "ia", id: "c9", state: "done" }).status, 204);
-		assert.equal(noHello().length, 1, "the rest at debug");
-		assert.equal(log.lines.filter((l) => l.level === "debug" && l.message.startsWith(`NO HELLO ${A}: mod instance "ia" `)).length, 61);
-		assert.deepEqual([view(A)?.plugin, view(A)?.mode], [false, "plan"]);
+		assert.deepEqual(
+			log.lines.filter((l) => l.message.startsWith("NO HELLO")).map((l) => `${l.level} ${l.message}`),
+			[
+				`debug NO HELLO ${A}: mod instance "ia" sends events, but no instance has said hello to this deck for the session; taken all the same`,
+				`debug NO HELLO ${A}: mod instance "ia" sends a result, but no instance has said hello to this deck for the session; taken all the same`,
+			],
+		);
+		assert.deepEqual([asked().length, view(A)?.plugin, view(A)?.mode], [1, false, "plan"]);
 		// A press names the missing hello. B's mod has never talked: no plugin.
 		assert.deepEqual(model.queue(A, { t: "prompt", text: "hi" }), { ok: false, why: `"Session 1"'s mod hasn't said hello to this deck, so it can't take commands until it does` });
 		assert.deepEqual(model.queue(B, { t: "prompt", text: "hi" }), { ok: false, why: '"Session 2" doesn\'t have the plugin' });
-		// Still so 10 minutes on: one line at info, with the count since.
+		// Still so 10 minutes on: one line at info, with the count of polls since.
 		clock.advance(QUIET_MS);
 		poll();
-		assert.deepEqual(noHello().slice(1), [`info ${NO_HELLO}; 61 more like it, at debug, in the 10 min since the last at info`]);
+		assert.deepEqual(asked().slice(1), [`info ${ASKED}; 59 more like it, at debug, in the 10 min since the last at info`]);
 		// Its hello, when it comes: current, its poll held, a press delivered, and its requests no longer logged so.
 		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia", model: "m" })), OK);
 		assert.equal(model.events({ sid: "sid-1", host: A, inst: "ia", seq: 2, events: [{ t: "settings", mode: "default", at: 1 }] }).status, 204);
 		assert.equal(model.result({ sid: "sid-1", host: A, inst: "ia", id: "c9", state: "done" }).status, 204);
-		assert.equal(log.lines.filter((l) => l.message.startsWith("NO HELLO")).length, 63);
+		assert.equal(log.lines.filter((l) => l.message.startsWith("NO HELLO") || l.message.startsWith("HELLO FIRST")).length, 63);
 		const held = poll();
 		const cmd = model.queue(A, { t: "prompt", text: "hi" });
 		assert.ok(cmd.ok);
 		assert.deepEqual(held.answers, [{ status: 200, body: { cmds: [{ id: cmd.cmd.id, t: "prompt", text: "hi" }] } }]);
 		const open = poll();
-		// One registry reading without A: the deck forgets it and answers its poll (release rule 4). Its next poll is a
-		// mod talking without a hello again, at info at once: the hello started the quiet count afresh.
+		// One registry reading without A: the deck forgets it and answers its poll (release rule 4). Its next poll asks
+		// for a hello again, at info at once: the hello started the quiet count afresh.
 		model.setRegistry([reg(2, B)]);
 		model.setRegistry([reg(1, A, { status: "busy" }), reg(2, B)]);
-		assert.deepEqual(open.answers, [{ status: 200, body: { cmds: [] } }]);
-		assert.deepEqual(poll().answers, [{ status: 200, body: { cmds: [] } }]);
-		assert.deepEqual(noHello().slice(2), [`info ${NO_HELLO}`]);
+		assert.deepEqual(open.answers, [NO_CMDS]);
+		assert.deepEqual(poll().answers, [HELLO_FIRST]);
+		assert.deepEqual(asked().slice(2), [`info ${ASKED}`]);
 		assert.equal(view(A)?.plugin, false);
-		// A stray poll while an instance is current isn't this: it stays at debug.
+		// So does a session that ends while its mod is asked: with no hello since, its next 409 is at info too.
+		model.setRegistry([reg(2, B)]);
+		model.setRegistry([reg(1, A, { status: "busy" }), reg(2, B)]);
+		assert.deepEqual(poll().answers, [HELLO_FIRST]);
+		assert.deepEqual(asked().slice(3), [`info ${ASKED}`]);
+		// A stray poll while an instance is current isn't this: none at once, and only at debug.
 		assert.deepEqual(now(model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia2", model: "m" })), OK);
-		const stray = new FakeReply();
-		model.next(new URLSearchParams({ sid: "sid-1", host: A, inst: "istale", wait: "20" }), stray);
-		assert.deepEqual([stray.answers, noHello().length], [[{ status: 200, body: { cmds: [] } }], 3]);
+		assert.deepEqual([poll("istale").answers, asked().length], [[NO_CMDS], 4]);
 		// Nor is a session the registry doesn't list, which takes no presses: one ending, say, whose mod polled once more.
 		const ending = new FakeReply();
 		model.next(new URLSearchParams({ sid: "sid-5", host: "local_e", inst: "ie", wait: "20" }), ending);
-		assert.deepEqual([ending.answers, noHello().length], [[{ status: 200, body: { cmds: [] } }], 3]);
-		assert.ok(log.lines.some((l) => l.level === "debug" && l.message === `NO HELLO local_e: mod instance "ie" polls, but no instance has said hello to this deck for the session, so it takes no prompts or mode changes until one does; the registry doesn't list it`));
+		assert.deepEqual([ending.answers, asked().length], [[HELLO_FIRST], 4]);
+		assert.ok(log.lines.some((l) => l.level === "debug" && l.message === `HELLO FIRST local_e: mod instance "ie" polls, but no instance has said hello to this deck for the session, so the deck answers 409 to ask for one; the registry doesn't list it`));
 	});
 
 	test("QuietLog: a key's first line at info, then one per period with the count since, and keys apart", () => {

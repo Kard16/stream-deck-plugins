@@ -3,8 +3,9 @@
 // without the deck, to run the real Claude Code plugin against (ladder step 4 in docs/claude-code/plan.md).
 // It takes the hooks' requests only from sessions the registry confirms, holds permission requests until told
 // otherwise (only the mode rules answer on their own: a mode check and a raise's PermissionRequest for a mode
-// command in flight), queues commands for the mod's long poll, follows sessions and events, applies the release
-// rules, and logs every request and answer to its run folder. The same file is a small CLI for its token-checked
+// command in flight), queues commands for the mod's long poll, asks a session no instance has said hello for to say
+// one (409 hello first), follows sessions and events, applies the release rules, and logs every request and answer
+// to its run folder. The same file is a small CLI for its token-checked
 // /control/ routes. README.md has the walkthrough. Node 24, no dependencies.
 
 import path from 'node:path'
@@ -49,12 +50,14 @@ Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}
   deny [<id>]                    Deny: the same
   prompt <host> <text>           the Saved Prompt key with that text: queues a prompt for that
                                  session (local_…), or alerts while the key's last prompt is
-                                 still queued, delivered or waiting
+                                 still queued, delivered or waiting, and for a session whose mod
+                                 has no instance that said hello
   mode <host> <mode>             the Mode dial: ${MODES.join(', ')}. Its mode check, and the
                                  PermissionRequest a raise brings, are allowed at once, once each
   rescan                         reads the registry and records now
   reset                          forgets everything: held requests get {}, and open polls are
-                                 cut off with no answer, so their mods say hello again
+                                 cut off with no answer, so their mods say hello again; a mod
+                                 with none open hears 409 hello first at its next poll
   It prints the answer as JSON and exits 1 when the call failed or the press alerted, and 2 for a
   usage error, before it reads any token.
 

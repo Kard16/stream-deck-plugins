@@ -38,6 +38,9 @@ type Answer = { value: HttpValue } | { deny: string }
 /** An answer the bridge is set to give: its status, and a body to go with it. */
 export type Reply = { status: number; body?: unknown }
 
+/** The bridge's answer to a poll while no instance has said hello for the session (PROTOCOL.md, "Identity"). */
+export const HELLO_FIRST: Reply = { status: 409, body: { error: 'hello first' } }
+
 /** How the fake bridge behaves: answering, refusing connections (down), or taking requests it leaves unanswered (hang). */
 export type Mode = 'up' | 'down' | 'hang'
 
@@ -67,6 +70,8 @@ export function world(on: On, o: WorldOptions = {}) {
   const hung: { req: Sent; reply: (a: Answer) => void }[] = []
   /** Requests to fail with no answer at all, by route, each counting one down. */
   const abandoned = new Map<string, number>()
+  /** Whether the deck has forgotten the session (forget()) and had no hello since: it asks each poll for one. */
+  let forgotten = false
   const bridge = {
     mode: o.mode ?? ('up' as Mode),
     hello: { status: 200, body: { v: 1, ok: true } as unknown },
@@ -158,13 +163,18 @@ export function world(on: On, o: WorldOptions = {}) {
     if (bridge.mode === 'down') return { deny: bridge.refusal }
     if (bridge.mode === 'hang') return hang(req)
     switch (req.route) {
-      case '/v1/hello':
-        return answer(bridge.hello.status, bridge.hello.body)
+      case '/v1/hello': {
+        const { status, body } = bridge.hello
+        // A hello answered ok makes the instance current again.
+        if (status >= 200 && status < 300 && (body as { ok?: unknown } | undefined)?.ok === true) forgotten = false
+        return answer(status, body)
+      }
       case '/v1/events':
         return respond(req, bridge.events)
       case '/v1/result':
         return respond(req, bridge.result)
       case '/v1/next':
+        if (forgotten) return answer(HELLO_FIRST.status, HELLO_FIRST.body)
         if (bridge.poll !== undefined) return answer(bridge.poll.status, bridge.poll.body)
         return new Promise<Answer>(reply => {
           const entry = { req, reply }
@@ -230,6 +240,15 @@ export function world(on: On, o: WorldOptions = {}) {
     /** The deck restarts: every held poll's connection drops. */
     drop: (): void => {
       for (const entry of held.splice(0)) entry.reply({ deny: 'socket hang up' })
+    },
+    /**
+     * The deck forgets the session, as when a registry reading misses it (release rule 4), or as a deck that restarted
+     * while the mod had no request open knows nothing of it: it answers the poll it holds, if any, with no commands,
+     * and every poll from then on at once with 409 hello first, until a hello is answered ok (PROTOCOL.md, "Identity").
+     */
+    forget: (): void => {
+      forgotten = true
+      for (const entry of held.splice(0)) entry.reply(answer(200, { cmds: [] }))
     },
     /**
      * The next `n` requests to `route` fail with no answer at all, as the engine abandons a mod's fetches when a turn

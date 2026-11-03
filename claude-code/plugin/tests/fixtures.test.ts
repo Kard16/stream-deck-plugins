@@ -10,10 +10,13 @@
 // among themselves), with the token in its Authorization header, and the mod may send nothing more. Lines about
 // /v1/permission and /v1/pretool, which Claude Code's hooks send, not the mod, and lines about other sessions,
 // presses, the registry and the deck's state are the deck side's.
+//
+// The mod's clock moves only when a line waits on it: by POLL_MIN_MS for a poll after an early empty answer, and by
+// RETRY_MS for a hello after a rejected fetch or a poll answered 409 hello first. The mod logs nothing in any fixture.
 
 import type { On } from 'claude-code'
 import { expect, mock, test, type Engine, type MockClock } from 'claude-code/testing'
-import { POLL_MIN_MS } from '../hooks/bridge'
+import { POLL_MIN_MS, RETRY_MS } from '../hooks/bridge'
 import { FIXTURES } from './fixtures.gen'
 
 const BRIDGE = 'http://127.0.0.1:47600'
@@ -260,8 +263,12 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
       const n = isPoll ? pollsSeen++ : othersSeen++
       for (let k = 0; k < 20 && list.length <= n; k++) await clock.settle()
       // After an empty answer that came sooner than POLL_MIN_MS, as at a turn's end, the mod waits out the rest
-      // before it polls again (PROTOCOL.md, "Commands"). The clock moves only when told to.
-      if (isPoll && list.length <= n) await clock.advance(POLL_MIN_MS)
+      // before it polls again (PROTOCOL.md, "Commands"). After a rejected fetch or a poll answered 409 hello first,
+      // it says hello RETRY_MS later (PROTOCOL.md, "Failure and recovery"). The clock moves only when told to.
+      if (list.length <= n) {
+        if (isPoll) await clock.advance(POLL_MIN_MS)
+        else if (route === '/v1/hello') await clock.advance(RETRY_MS)
+      }
       for (let k = 0; k < 20 && list.length <= n; k++) await clock.settle()
       const req = list[n]
       if (req === undefined) {

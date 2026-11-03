@@ -5,16 +5,19 @@
 // on their own, through the engine's fetch and clock (BridgeHost: register.ts's adapter over `$`, or a test's
 // fake). A fetch that rejects, with no answer at all, is followed 100 ms later by a quick hello, quietly: the engine
 // abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still there, and a
-// deck that restarts can be back within those 100 ms, and must hear hello before anything else. A failed request (a
-// failure of that hello or of what follows it, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts
-// an outage: one log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is
-// answered, the poll starts again and the queued requests go out in order, a failed one again with its own seq. The
-// outage ends only when the request that began it, or began the quick hello it grew from, goes through, so a bridge
-// that answers hello and fails that request again doesn't start the waits over. Each hello opens an epoch, and a
-// send or poll left over from an older one changes nothing when it settles.
+// deck that restarts can be back within those 100 ms, and must hear hello before anything else. So is a poll answered
+// 409 hello first: the deck has had no hello from this instance, as when it restarted, or forgot the session at
+// release rule 4, while the mod had nothing open to fail. A failed request (a failure of that hello or of what
+// follows it, a second 409 before a poll goes through, a 5xx, a request the bridge takes and leaves unanswered 35 s)
+// starts an outage: one log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello
+// is answered, the poll starts again and the queued requests go out in order, a failed one again with its own seq.
+// The outage ends only when the request that began it, or began the quick hello it grew from, goes through, so a
+// bridge that answers hello and fails that request again doesn't start the waits over. Each hello opens an epoch,
+// and a send or poll left over from an older one changes nothing when it settles.
 
 import { whyQuiet, type Read } from './desktop'
 import { changed, type DeckEvent, type Settings } from './events'
+import { redact } from './redact'
 
 export const BRIDGE_URL = 'http://127.0.0.1:47600'
 export const PROTOCOL_VERSION = 1
@@ -31,10 +34,15 @@ export const POLL_WAIT_S = 20
 export const STALL_MS = 35_000
 /**
  * A fetch that rejects, with no answer at all, is followed this long after by a hello, with no log line and no
- * outage yet: only a failure of that hello, or of what follows it, begins one (PROTOCOL.md, "Failure and
- * recovery"). The engine abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge
- * is still there (ladder step 4). And `streamdeck restart` brought the deck back 85 ms after it stopped (Phase 4), so
- * the failed request sent again on its own would have been the new deck's first, with no hello and no version check.
+ * outage yet, and so is a poll answered 409 hello first: only a failure of that hello, or of what follows it, begins
+ * one (PROTOCOL.md, "Failure and recovery").
+ * - The engine abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still
+ *   there (ladder step 4).
+ * - `streamdeck restart` brought the deck back 85 ms after it stopped (Phase 4), so the failed request sent again on
+ *   its own would have been the new deck's first, with no hello and no version check.
+ * - A deck that restarted, or forgot the session, while the mod had nothing open to fail asks for a hello with the
+ *   409 (PROTOCOL.md, "Identity"): after a poll answered within a second, as at every turn's end, the mod waits out
+ *   the rest of that second with no request open.
  */
 export const RETRY_MS = 100
 /**
@@ -50,8 +58,8 @@ export const MAX_QUEUED = 500
 const MAX_RAN = 200
 /** The most of a reason a log line quotes: an error's text, or the version a bridge says it speaks. */
 const MAX_REASON = 200
-/** A piece of the token this long or longer is hidden wherever it is: a text cut short can end in one. */
-const TOKEN_RUN = 8
+/** The error the bridge answers a poll with, 409, while no instance has said hello for the session. */
+const HELLO_FIRST = 'hello first'
 
 export type HttpRequest = { method: string; headers: Record<string, string>; body?: string }
 export type HttpAnswer = { status: number; ok: boolean; text: string }
@@ -109,40 +117,6 @@ type Channel = 'hello' | 'poll' | 'line'
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/**
- * `text` with the token in it put as `<token>`, and with it every run of TOKEN_RUN or more of the token's
- * characters, such as the start of one in a text the engine had already cut short. With `max`, it stops once it
- * has more than that many characters to give back, so a long text costs no more than a short one.
- */
-function redact(text: string, token: string, max = Number.POSITIVE_INFINITY): string {
-  if (token === '') return text
-  // A token shorter than a run is hidden only whole.
-  const least = Math.min(TOKEN_RUN, token.length)
-  let out = ''
-  let copied = 0
-  let i = 0
-  while (i < text.length && out.length + i - copied <= max) {
-    const n = runAt(text, i, token)
-    if (n >= least) {
-      out += `${text.slice(copied, i)}<token>`
-      i += n
-      copied = i
-    } else i++
-  }
-  return out + text.slice(copied, i)
-}
-
-/** The length of the longest piece of `token` that `text` holds from `at` on. */
-function runAt(text: string, at: number, token: string): number {
-  let best = 0
-  for (let j = 0; j + best < token.length; j++) {
-    let n = 0
-    while (at + n < text.length && j + n < token.length && text[at + n] === token[j + n]) n++
-    if (n > best) best = n
-  }
-  return best
-}
-
 /** A reason for the log, at most MAX_REASON characters. The token goes before the cut, so the cut can't halve it. */
 function clip(text: string, token: string): string {
   const shown = redact(text, token, MAX_REASON)
@@ -168,6 +142,14 @@ function parse(text: string): Record<string, unknown> | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Whether the bridge answered a poll 409 hello first: no instance has said hello for the session since the deck
+ * restarted or forgot it (PROTOCOL.md, "Identity"). Any other answer that isn't 2xx is a failure.
+ */
+function asksForHello(res: HttpAnswer): boolean {
+  return res.status === 409 && parse(res.text)?.error === HELLO_FIRST
 }
 
 /** Whether a queued request is a settings event that tells the deck a model. */
@@ -198,9 +180,9 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
    */
   let outage: Channel | undefined
   /**
-   * The channel whose rejected fetch began a quick hello; undefined when none is on, and always while an outage is.
-   * Until that request goes through, any failure is the second one: it begins the outage the rejection held off, and
-   * that outage is still the rejected request's.
+   * The channel whose rejected fetch, or poll answered 409 hello first, began a quick hello; undefined when none is
+   * on, and always while an outage is. Until that request goes through, any failure is the second one, another 409
+   * included: it begins the outage the rejection held off, and that outage is still the rejected request's.
    */
   let quick: Channel | undefined
   let retry: Timer | undefined
@@ -363,16 +345,17 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   }
 
   /**
-   * A request on `channel` had no answer at all in the current epoch: its fetch rejected. Unless an outage or a
-   * quick hello is on, that's no failure yet (PROTOCOL.md, "Failure and recovery"): the epoch ends quietly, with no
-   * log line and the outage's waits untouched, and hello goes RETRY_MS later, ahead of the request, for a deck that
-   * restarted meanwhile. Otherwise it fails as any request does: the second failure after a quick hello, or one more
-   * in an outage.
+   * A request on `channel` had no answer at all in the current epoch, its fetch rejected; or the poll was answered
+   * 409 hello first, the bridge having had no hello from this instance. Unless an outage or a quick hello is on,
+   * that's no failure yet (PROTOCOL.md, "Failure and recovery"): the epoch ends quietly, with no log line and the
+   * outage's waits untouched, and hello goes RETRY_MS later, ahead of the request, for a deck that restarted or
+   * forgot the session meanwhile. Otherwise it fails as any request does, for the reason `why` gives: the second
+   * failure after a quick hello, a second 409 among them, or one more in an outage.
    */
-  function rejected(channel: Channel, err: unknown): void {
+  function rejected(channel: Channel, why: unknown): void {
     if (silent()) return
     if (outage !== undefined || quick !== undefined) {
-      fail(channel, describe(err, ids.token))
+      fail(channel, describe(why, ids.token))
       return
     }
     quick = channel
@@ -491,7 +474,11 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     say(`The Stream Deck bridge refused a ${path} request with ${status}; it was dropped.`)
   }
 
-  /** The long poll: one open at a time, again as soon as one answers (PROTOCOL.md, "Commands"). */
+  /**
+   * The long poll: one open at a time, again as soon as one answers (PROTOCOL.md, "Commands"). A 2xx answer's
+   * commands run. An answer of 409 hello first goes the way of a fetch that rejected, through rejected(): a quick
+   * hello, or the second failure. Any other answer that isn't 2xx is a failure.
+   */
   async function poll(ep: number): Promise<void> {
     while (phase === 'up' && ep === epoch) {
       let floorReached: () => void = () => {}
@@ -512,7 +499,9 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
       const delivered = res.ok ? deliver(res.text) : 0
       if (ep !== epoch || !res.ok) {
         soon?.cancel()
-        if (ep === epoch) fail('poll', `a poll was answered ${res.status}`)
+        if (ep !== epoch) return
+        if (asksForHello(res)) rejected('poll', `a poll was answered ${res.status} ${HELLO_FIRST}`)
+        else fail('poll', `a poll was answered ${res.status}`)
         return
       }
       through('poll')

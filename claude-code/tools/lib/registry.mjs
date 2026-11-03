@@ -8,8 +8,11 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
-/** The registry fields the deck uses; anything else in the file is dropped. */
-export const REGISTRY_FIELDS = Object.freeze(['pid', 'sessionId', 'hostSessionId', 'name', 'cwd', 'status', 'statusUpdatedAt'])
+/**
+ * The registry fields the deck uses; anything else in the file is dropped. `startedAt` picks the file the deck shows
+ * when two list one host, a restarted process's old file lingering beside its new one.
+ */
+export const REGISTRY_FIELDS = Object.freeze(['pid', 'sessionId', 'hostSessionId', 'name', 'cwd', 'status', 'statusUpdatedAt', 'startedAt'])
 
 /** A host id safe to put in a file name: the app's ids are `local_` plus a UUID. */
 export const SAFE_HOST = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/

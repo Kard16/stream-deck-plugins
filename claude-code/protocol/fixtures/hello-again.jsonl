@@ -1,0 +1,21 @@
+{"note":"A registry reading that misses the session makes the deck forget it (release rule 4), as a restart makes a new deck forget every session. The deck answers the open poll, and the file comes back. The mod's next poll is its first request to a deck with no hello from it, so the deck answers 409 hello first. The mod says hello again about 100 ms later, with no log line, and its poll after that is held and gets the command. A deck restart in the second the mod waits after a turn's end ends the same way."}
+{"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
+{"mod":{"on":"session.start","e":{"cwd":"/Users/me/sandbox","surface":null,"isInteractive":false}}}
+{"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
+{"reply":{"to":"h","status":200,"body":{"v":1,"ok":true}}}
+{"plugin":{"as":"n1","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"registry":{"pid":101,"gone":true}}
+{"reply":{"to":"n1","status":200,"body":{"cmds":[]}}}
+{"registry":{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600001000}}
+{"plugin":{"as":"n2","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"reply":{"to":"n2","status":409,"body":{"error":"hello first"}}}
+{"plugin":{"as":"h2","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
+{"reply":{"to":"h2","status":200,"body":{"v":1,"ok":true}}}
+{"plugin":{"as":"n3","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"press":{"prompt":{"session":"local_test-a","text":"Say hello."}}}
+{"reply":{"to":"n3","status":200,"body":{"cmds":[{"id":"c1","t":"prompt","text":"Say hello."}]}}}
+{"engine":{"call":"prompt.submit","args":{"text":"Say hello.","asUser":true},"returns":{"text":"Say hello.","origin":{"kind":"plugin","name":"streamdeck-bridge","asUser":true}}}}
+{"plugin":{"method":"POST","path":"/v1/result","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","id":"c1","state":"waiting"}}}
+{"plugin":{"as":"n4","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"plugin":{"method":"POST","path":"/v1/result","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","id":"c1","state":"done"}}}
+{"expect":{"cmds":{"c1":"done"}}}

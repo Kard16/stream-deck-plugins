@@ -74,7 +74,8 @@ type BridgeSession = {
 	sids: Set<string>;
 	/**
 	 * The current mod instance: the last to say hello that hadn't before. Null until one does, and only a hello
-	 * makes one current (PROTOCOL.md, Identity). Only its polls are held and get commands.
+	 * makes one current (PROTOCOL.md, Identity). Only its polls are held and get commands. While it's null, every
+	 * poll for the session gets 409 `hello first` (#noHello).
 	 */
 	inst: string | null;
 	/**
@@ -84,8 +85,8 @@ type BridgeSession = {
 	hellos: Set<string>;
 	/**
 	 * The mod instance whose poll, events or result came last while no instance was current ("" for one without an
-	 * inst), or null if none has: read only while none is, when it means the session's mod is there but takes no
-	 * commands until it says hello. See #noHello.
+	 * inst), or null if none has: read only while none is, when it means the session's mod is there, and has been
+	 * asked for a hello, but takes no commands until it says one. See #noHello.
 	 */
 	noHelloFrom: string | null;
 	/** The last `seq` seen, per instance. */
@@ -112,6 +113,9 @@ const NO_HOST: RouteAnswer = { status: 400, body: { error: "unknown session: no 
 
 /** A hello from a host the registry lists under another session id (PROTOCOL.md, Desktop sessions only). */
 const NOT_THIS_SESSION = { error: "not this session" };
+
+/** A poll for a session no instance has said hello for: the deck asks for one (PROTOCOL.md, Identity). */
+const HELLO_FIRST = { error: "hello first" };
 
 /** How many of a session's instances that said hello the deck remembers. The protocol asks for at least 8. */
 export const HELLOS_KEPT = 64;
@@ -166,7 +170,7 @@ export class SessionModel implements BridgeRoutes {
 	readonly #rescan: (() => Promise<void>) | null;
 	/** Refused hellos and unconfirmed hook requests, keyed by route and reason (Phase 6's quiet logs). */
 	readonly #refusals: QuietLog;
-	/** Mod requests for a session no instance has said hello for, keyed by host: see #noHello. */
+	/** The 409s that ask a listed session's mod for a hello, keyed by host: see #noHello. */
 	readonly #noHellos: QuietLog;
 	readonly #listeners = new Set<() => void>();
 	readonly #bridge = new Map<string, BridgeSession>();
@@ -389,22 +393,28 @@ export class SessionModel implements BridgeRoutes {
 			reply.send(NO_HOST.status, JSON.stringify(NO_HOST.body));
 			return;
 		}
+		const current = b.inst;
+		// No instance is current, so none takes commands: whatever the poll's inst, a missing one included, the deck
+		// asks for a hello, which makes the mod's instance current (#noHello).
+		if (current === null) {
+			reply.send(409, JSON.stringify(HELLO_FIRST));
+			this.#noHello(b, q.inst, "polls");
+			return;
+		}
 		// From an instance that isn't the session's current one, replaced since or never said hello to this deck:
 		// answered at once with none, so it neither displaces the current one's poll nor takes its commands, and
-		// doesn't count as the session's mod polling (PROTOCOL.md, Identity). With no current instance at all, that's
-		// logged at info, quietly.
-		if (b.inst === null || q.inst !== b.inst) {
-			if (b.inst === null) this.#noHello(b, q.inst, "polls");
-			else this.#log.debug(`POLL ${b.host} from mod instance ${quote(q.inst, 40)}, not the current one: answered with none`);
+		// doesn't count as the session's mod polling (PROTOCOL.md, Identity).
+		if (q.inst !== current) {
+			this.#log.debug(`POLL ${b.host} from mod instance ${quote(q.inst, 40)}, not the current one: answered with none`);
 			reply.send(200, JSON.stringify({ cmds: [] }));
 			return;
 		}
 		if (this.#answersAtOnce(b)) {
 			this.#log.debug(`POLL ${b.host} answered at once: the turn ended and the registry still says busy`);
-			this.commands.poll(b.host, q.inst, 0, reply);
+			this.commands.poll(b.host, current, 0, reply);
 		} else {
 			this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
-			this.commands.poll(b.host, q.inst, q.wait, reply);
+			this.commands.poll(b.host, current, q.wait, reply);
 		}
 		this.#emit();
 	}
@@ -503,7 +513,8 @@ export class SessionModel implements BridgeRoutes {
 		if (!view) return { ok: false, why: `${this.#pickedTitle && key === this.#picked ? quote(this.#pickedTitle) : key} has ended` };
 		if (view.host === null) return { ok: false, why: `${quote(view.title)} has no app id` };
 		if (!view.plugin) {
-			// Its mod talks, but hasn't said hello to this deck: it has the plugin, and can't take commands (#noHello).
+			// Its mod talks, but hasn't said hello to this deck yet: it has the plugin, and can't take commands until its
+			// hello, which its next poll asks for (#noHello).
 			const talking = (this.#bridge.get(view.host)?.noHelloFrom ?? null) !== null;
 			return { ok: false, why: talking ? `${quote(view.title)}'s mod hasn't said hello to this deck, so it can't take commands until it does` : `${quote(view.title)} doesn't have the plugin` };
 		}
@@ -611,24 +622,28 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * A mod request for a session with no current instance. Until an instance says hello, its polls get none and a
-	 * press on it is refused (PROTOCOL.md, Identity), yet its mod is there. Apart from a replaced instance's late
-	 * request just before the live one's hello, that's a live mod the deck lost track of:
-	 * - The deck restarted while the mod had no request open, so no fetch of its failed. Between a poll answered within
-	 *   1 s and its next, the mod waits out the rest of that second, as after every turn's end.
-	 * - Or a registry reading without the session made the deck forget it (release rule 4), and answer its poll.
-	 * Its requests all go through, so it says hello again only when it reloads, and until then the session takes no
-	 * prompts or mode changes. The contract leaves the deck no way to ask for a hello, so this only makes it plain:
-	 * at info the first time, then at most once in 10 minutes with the count since, and the rest at debug; afresh once
-	 * a hello makes an instance current. Only at debug for a session the registry doesn't list, which takes no presses
-	 * anyway: one that's ending, say, whose mod polled again once the deck answered its poll at release rule 4.
+	 * A mod request for a session with no current instance: none has said hello since the deck started, or since
+	 * release rule 4 forgot the session after a registry reading that missed it. Its mod is there all the same, and
+	 * nothing it sent need have failed: between a poll answered within a second and its next, as after every turn's
+	 * end, the mod waits out the rest of that second with nothing open, so a deck that restarts then fails none of
+	 * its requests, and nor does a reading that misses the session. So the deck asks for a hello: it answers each of
+	 * the session's polls at once with 409 `hello first` (`next`), which the mod takes as a fetch that rejected, with
+	 * a quiet hello about 100 ms later (PROTOCOL.md, Identity; Failure and recovery). The 409 goes only to a session
+	 * with no current instance, so it never displaces one. The session's events and results are still taken, and
+	 * until a hello makes an instance current, a press on it is refused, saying its mod hasn't said hello.
+	 *
+	 * The log says the deck asked: a poll's 409 at info the first time, then at most once in 10 minutes with the
+	 * count since, and the rest at debug; afresh once a hello makes an instance current, or the session ends. Events
+	 * and results go only at debug, and so does everything from a session the registry doesn't list, which takes no
+	 * presses: one that's ending, say, whose mod polled again once the deck answered its poll at release rule 4.
 	 */
-	#noHello(b: BridgeSession, inst: string | null, sends: string): void {
+	#noHello(b: BridgeSession, inst: string | null, sends: "polls" | "sends events" | "sends a result"): void {
 		if (b.inst !== null) return;
 		b.noHelloFrom = inst ?? "";
-		const line = `NO HELLO ${b.host}: mod instance ${quote(inst, 40)} ${sends}, but no instance has said hello to this deck for the session, so it takes no prompts or mode changes until one does`;
-		if (this.#registry.has(b.host)) this.#noHellos.note(b.host, line);
-		else this.#log.debug(`${line}; the registry doesn't list it`);
+		const what = `${b.host}: mod instance ${quote(inst, 40)} ${sends}, but no instance has said hello to this deck for the session`;
+		if (sends !== "polls") this.#log.debug(`NO HELLO ${what}; taken all the same`);
+		else if (!this.#registry.has(b.host)) this.#log.debug(`HELLO FIRST ${what}, so the deck answers 409 to ask for one; the registry doesn't list it`);
+		else this.#noHellos.note(b.host, `HELLO FIRST ${what}, so the deck answers 409 to ask for one`);
 	}
 
 	/**
@@ -678,7 +693,7 @@ export class SessionModel implements BridgeRoutes {
 		}
 		b.inst = inst;
 		b.hellos.add(inst);
-		// A mod that talked without a hello (#noHello) has said one: should that happen again, its first line goes at info.
+		// A mod the deck asked for a hello (#noHello) has said one: should that happen again, its first 409 goes at info.
 		this.#noHellos.forget(b.host);
 		for (const old of b.hellos) {
 			if (b.hellos.size <= HELLOS_KEPT) break;
@@ -823,11 +838,16 @@ export class SessionModel implements BridgeRoutes {
 		return null;
 	}
 
-	/** Release rule 4: the registry file disappeared, so the session has ended. */
+	/**
+	 * Release rule 4: the registry file disappeared, so the session has ended. What the bridge knew of it goes, its
+	 * instances included, so should its mod still be there, its next poll gets 409 and its hello makes it current
+	 * again (#noHello).
+	 */
 	#ended(host: string): void {
 		for (const h of this.held.forHost(host)) this.held.release(h.id, "the session's registry file disappeared (rule 4)");
 		this.commands.failHost(host, "the session ended");
 		this.#bridge.delete(host);
+		this.#noHellos.forget(host);
 		this.#log.info(`ENDED ${host}: its registry file disappeared`);
 	}
 

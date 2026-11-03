@@ -46,8 +46,8 @@ export const FINDINGS_APP_VERSION = '4.4212.0'
 export const PLUGIN_PATH = 'claude-code/plugin'
 
 /**
- * The app's `local_…` ids, as its `claude://code/continue` route accepts them: claude-code/deck/src/protocol/wire.ts:49
- * (HOST_PATTERN) and plan.md S5. The deck reads a registry hostSessionId only when it matches (asHost, wire.ts:51), and
+ * The app's `local_…` ids, as its `claude://code/continue` route accepts them: claude-code/deck/src/protocol/wire.ts's
+ * HOST_PATTERN and plan.md S5. The deck reads a registry hostSessionId only when it matches (wire.ts's asHost), and
  * opens only `<host>.json` records whose host does (records.ts:119).
  */
 export const HOST_PATTERN = /^local_[A-Za-z0-9-]{1,64}$/

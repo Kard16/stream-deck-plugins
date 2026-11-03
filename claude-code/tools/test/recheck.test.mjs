@@ -715,3 +715,14 @@ test('recheck: its field lists and strings are the deck\'s and the mod\'s own, s
   const register = execFileSync('git', ['-C', REPO, 'show', 'HEAD:claude-code/plugin/hooks/register.ts'], { encoding: 'utf8' })
   assert.match(register, /\$\.mcp\.call\('ccd_session_mgmt', 'set_session_permission_mode', \{ session_id: 'self', mode \}\)/)
 })
+
+test('recheck: it cites the deck\'s wire.ts by name, not by line, and each name it cites is there', () => {
+  // wire.ts grew past the lines recheck.mjs once cited (:49 for HOST_PATTERN, :51 for asHost). A name holds when lines move.
+  const text = fs.readFileSync(SCRIPT, 'utf8')
+  const wire = fs.readFileSync(path.join(REPO, 'claude-code', 'deck', 'src', 'protocol', 'wire.ts'), 'utf8')
+  assert.deepEqual(text.match(/wire\.ts:\d+/g) ?? [], [], 'no line numbers into wire.ts')
+  // A name can follow on the comment's next line.
+  const named = [...text.matchAll(/wire\.ts's\s+(?:\*\s+)?(\w+)/g)].map((m) => m[1])
+  assert.deepEqual(named.toSorted(), ['HOST_PATTERN', 'asHost'])
+  for (const name of named) assert.match(wire, new RegExp(`^export (const|function) ${name}\\b`, 'm'), name)
+})

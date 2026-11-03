@@ -9,6 +9,11 @@
 // `_M()` in 2.1.309), plus the forks' tags, plus a token to talk with. A spare passes, and talks as the session it
 // will become. Anywhere else the mod sends nothing at all. The hooks in hooks.json can't be gated like this, so the
 // bridge checks their requests against the registry instead.
+//
+// The tests are exact: the entrypoint's case counts, only the empty string is empty, and a variable the engine
+// wouldn't read fails. The one log line quotes each value that failed, cut short, with the token hidden first.
+
+import { redact } from './redact'
 
 /** A desktop session's host id, the app's `local_…` id (PROTOCOL.md, "Identity"). */
 export const HOST_ID = /^local_[A-Za-z0-9-]{1,64}$/
@@ -29,12 +34,16 @@ export type GateEnv = {
   DECK_TOKEN: Read
 }
 
-/** The most of a variable's value the log quotes. */
+/** The most of a variable's value the log quotes, quotes and `…` included. */
 const MAX_SHOWN = 80
 
-/** A value for the log, quoted and cut short. Never the token's: DECK_TOKEN's value is never shown. */
-function shown(value: string): string {
-  const quoted = JSON.stringify(value)
+/**
+ * A value for the log, quoted and cut short. The token goes first, before the quotes could change how it reads and
+ * before the cut could leave a piece of it too short to be known, as bridge.ts's clip() does. DECK_TOKEN's own value
+ * is never shown.
+ */
+function shown(value: string, token: string): string {
+  const quoted = JSON.stringify(redact(value, token, MAX_SHOWN))
   return quoted.length > MAX_SHOWN ? `${quoted.slice(0, MAX_SHOWN - 1)}…` : quoted
 }
 
@@ -45,18 +54,20 @@ function shown(value: string): string {
  */
 export function whyQuiet(env: GateEnv): string[] {
   const why: string[] = []
+  // The token as the mod would send it (PROTOCOL.md, "Transport"): hidden in every value the log quotes.
+  const token = typeof env.DECK_TOKEN === 'string' ? env.DECK_TOKEN.trim() : ''
 
   const entrypoint = env.CLAUDE_CODE_ENTRYPOINT
   if (entrypoint === null) why.push("CLAUDE_CODE_ENTRYPOINT couldn't be read")
   else if (entrypoint === undefined) why.push("CLAUDE_CODE_ENTRYPOINT isn't set")
   else if (!DESKTOP_ENTRYPOINTS.includes(entrypoint)) {
-    why.push(`CLAUDE_CODE_ENTRYPOINT is ${shown(entrypoint)}, not claude-desktop or claude-desktop-3p`)
+    why.push(`CLAUDE_CODE_ENTRYPOINT is ${shown(entrypoint, token)}, not claude-desktop or claude-desktop-3p`)
   }
 
   const host = env.CLAUDE_CODE_HOST_SESSION_ID
   if (host === null) why.push("CLAUDE_CODE_HOST_SESSION_ID couldn't be read")
   else if (host === undefined) why.push("CLAUDE_CODE_HOST_SESSION_ID isn't set")
-  else if (!HOST_ID.test(host)) why.push(`CLAUDE_CODE_HOST_SESSION_ID is ${shown(host)}, not a desktop session's local_… id`)
+  else if (!HOST_ID.test(host)) why.push(`CLAUDE_CODE_HOST_SESSION_ID is ${shown(host, token)}, not a desktop session's local_… id`)
 
   // Set inside another Claude Code process, or in a fork the app made: unset or empty is the only pass.
   const inherited: readonly [string, Read][] = [
@@ -66,13 +77,12 @@ export function whyQuiet(env: GateEnv): string[] {
   ]
   for (const [name, value] of inherited) {
     if (value === null) why.push(`${name} couldn't be read`)
-    else if (value !== undefined && value !== '') why.push(`${name} is set (${shown(value)})`)
+    else if (value !== undefined && value !== '') why.push(`${name} is set (${shown(value, token)})`)
   }
 
   // The token is the trimmed value (PROTOCOL.md, "Transport"), so a blank one is none.
-  const token = env.DECK_TOKEN
-  if (token === null) why.push("DECK_TOKEN couldn't be read")
-  else if (token === undefined || token.trim() === '') why.push("DECK_TOKEN isn't set")
+  if (env.DECK_TOKEN === null) why.push("DECK_TOKEN couldn't be read")
+  else if (token === '') why.push("DECK_TOKEN isn't set")
 
   return why
 }

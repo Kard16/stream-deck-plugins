@@ -1,19 +1,17 @@
 import assert from "node:assert/strict";
 import type http from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
 
-import { BridgeServer } from "../src/bridge/server.js";
+import { type BridgeRoutes, BridgeServer, type RouteAnswer } from "../src/bridge/server.js";
 import { ModeKeys, PromptKeys } from "../src/keys/commands.js";
 import { DecisionKeys } from "../src/keys/decision.js";
-import { SessionModel } from "../src/model/sessions.js";
+import type { SessionModel } from "../src/model/sessions.js";
+import { connectSources } from "../src/model/sources.js";
 import { ALLOW_DECISION, DENY_DECISION, PRETOOL_ALLOW } from "../src/protocol/wire.js";
-import { RecordsReader, RecordsWatcher } from "../src/records/records.js";
-import { RegistryReader } from "../src/registry/registry.js";
-import { RegistryWatcher } from "../src/registry/watcher.js";
-import { type Fixture, loadFixtures, mismatches, type Obj, type PluginLine, repliedLabels, replyMismatches } from "./helpers/fixtures.js";
+import { type Fixture, loadFixtures, mismatches, type Obj, type PluginLine, repliedLabels, replyMismatches, unrepliedMismatches } from "./helpers/fixtures.js";
 import { type Outcome, request, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -23,18 +21,20 @@ import { RecordingLog } from "./helpers/recording-log.js";
  * - `mod` and `engine` lines are skipped.
  * - `plugin` lines are sent in order, with the right Host and token added unless the line sets them (`$TOKEN`
  *   is the right token, `null` leaves a header out), and `*` values sent as they are. The runner waits for
- *   each answer, except for `/v1/permission` and `/v1/next`, which may be held: for those it waits until the
- *   bridge has taken the request (held or answered, after any second reading of the registry), and a later
- *   `reply` line checks the answer, waiting up to 2 s. A mode check (`/v1/pretool`) is answered at once, so
- *   the runner waits for it like any other.
+ *   each answer, up to 2 s, except for `/v1/permission` and `/v1/next`, which may be held: for those it waits,
+ *   as long, until the bridge has taken the request (held or answered, after any second reading of the
+ *   registry), and a later `reply` line checks the answer, waiting up to 2 s. A mode check (`/v1/pretool`) is
+ *   answered at once, so the runner waits for it like any other. An answer that doesn't come in time fails the
+ *   fixture, so nothing the bridge holds by mistake can hold up the run.
  * - `press` lines go through the keys' own logic classes, with no settle time on Approve and Deny, `registry`
- *   lines to the fake folder, after which the watcher scans; `expect` lines are retried for up to 1 s.
- * - The model reads the fake folder again through the same watcher when a hook's request or a hello isn't
- *   confirmed by its latest reading, as the plugin does.
+ *   lines to the fake folder, after which the watcher scans; a line for a file that's gone writes it anew, with
+ *   its pid and the line's fields. `expect` lines are retried for up to 1 s.
+ * - The model and the folders are wired as the plugin wires them (connectSources), so the model reads the fake
+ *   folder again through the same watcher when a hook's request or a hello isn't confirmed by its latest reading.
  * - Command ids: the deck's real id is bound to the fixture's name at its first appearance in a `reply`.
  * - A 2xx from a hook's route must be exactly one of the bodies the route allows, whatever its `reply` line
- *   expects: Allow, Deny or `{}` from `/v1/permission`, the allow or `{}` from `/v1/pretool`. An expected `{}`
- *   means no decision (replyMismatches).
+ *   expects, and when no `reply` line names the request: Allow, Deny or `{}` from `/v1/permission`, the allow or
+ *   `{}` from `/v1/pretool`. An expected `{}` means no decision (replyMismatches).
  * - At the end, a held request or poll that no `reply` line checked must still be open.
  *
  * The deck's wall clock follows the fixture: it starts at the setup's `statusUpdatedAt` and moves to each
@@ -46,8 +46,17 @@ const DEADLINE_EXPECT_MS = 1000;
 
 type Sent = { line: PluginLine; req: http.ClientRequest; outcome: Promise<Outcome>; settled: Outcome | null };
 
-async function play(fixture: Fixture): Promise<void> {
+/** How a fixture is played: by default, against the session model itself, with 2 s for each answer. */
+type PlayOptions = {
+	/** The bridge's routes, made from the model; the runner's own tests put a route of theirs in place of one. */
+	routes?: (model: SessionModel) => BridgeRoutes;
+	/** How long an answer may take: a held request's to reach the bridge, any other's to come back. */
+	replyMs?: number;
+};
+
+async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 	const { setup } = fixture;
+	const replyMs = opts.replyMs ?? DEADLINE_REPLY_MS;
 	const root = mkdtempSync(path.join(os.tmpdir(), "claude-deck-fixture-"));
 	const registryDir = path.join(root, "sessions");
 	const orgDir = path.join(root, "claude-code-sessions", "account", "org");
@@ -64,19 +73,17 @@ async function play(fixture: Fixture): Promise<void> {
 
 	let wall = Math.max(0, ...setup.registry.map((r) => (typeof r.statusUpdatedAt === "number" ? r.statusUpdatedAt : 0)));
 	const log = new RecordingLog();
-	const registry = new RegistryWatcher(new RegistryReader(registryDir));
-	const model = new SessionModel({ log, wallNow: () => ++wall, rescan: () => registry.scanNow() });
-	const records = new RecordsWatcher(new RecordsReader(path.join(root, "claude-code-sessions")));
-	registry.onChange((sessions) => {
-		model.setRegistry(sessions);
-		records.setHosts(model.hosts());
+	const { registry, records, model } = connectSources({
+		registryDir,
+		recordsDir: path.join(root, "claude-code-sessions"),
+		logs: { sessions: log },
+		model: { wallNow: () => ++wall },
 	});
-	records.onChange((recs) => model.setRecords(recs));
 	await registry.scanNow();
 	await records.scanNow();
 
 	const token = setup.session.token;
-	const server = new BridgeServer({ port: 0, token, routes: model, log });
+	const server = new BridgeServer({ port: 0, token, routes: opts.routes?.(model) ?? model, log });
 	server.onState((state) => model.setBridgeState(state));
 	const port = await server.listen();
 
@@ -137,15 +144,18 @@ async function play(fixture: Fixture): Promise<void> {
 				});
 				all.push(entry);
 				if (p.as !== undefined) sent.set(p.as, entry);
-				const route = p.path.split("?")[0];
+				const route = p.path.split("?")[0] ?? "";
 				if (route === "/v1/permission" || route === "/v1/next") {
 					// Held, maybe: go on once the bridge has it, or has answered it, so later lines see it in order.
-					await waitFor(() => entry.settled !== null || server.routed > routedBefore, `${where(n)} to reach the bridge`, DEADLINE_REPLY_MS);
+					await waitFor(() => entry.settled !== null || server.routed > routedBefore, `${where(n)} to reach the bridge`, replyMs);
 					continue;
 				}
-				const o = await outcome;
+				// Never held: an answer that doesn't come in time fails the fixture rather than holding up the run.
+				const o = await within(outcome, replyMs);
+				if (!("status" in o)) assert.fail(`${where(n)}: ${p.method} ${p.path} got no answer${o.error === "pending" ? ` within ${replyMs} ms` : `: ${o.error}`}`);
 				if (p.as === undefined || !replied.has(p.as)) {
-					assert.ok("status" in o && (o.status === 200 || o.status === 204), `${where(n)}: ${p.method} ${p.path} got ${JSON.stringify(o)}, not 200 or 204`);
+					const problems = unrepliedMismatches(route, o.status, o.body);
+					assert.deepEqual(problems, [], `${where(n)}: ${p.method} ${p.path} got ${o.status} ${o.body}: ${problems.join("; ")}`);
 				}
 				continue;
 			}
@@ -154,7 +164,7 @@ async function play(fixture: Fixture): Promise<void> {
 				const r = line.reply;
 				const entry = sent.get(r.to);
 				assert.ok(entry, `${where(n)}: no request labelled ${r.to}`);
-				const o = await within(entry.outcome, DEADLINE_REPLY_MS);
+				const o = await within(entry.outcome, replyMs);
 				assert.ok("status" in o, `${where(n)}: no answer to ${r.to}: ${JSON.stringify(o)}`);
 				assert.equal(o.status, r.status, `${where(n)}: ${r.to} answered ${o.status} ${o.body}`);
 				const got: unknown = o.body === "" ? undefined : JSON.parse(o.body);
@@ -170,7 +180,7 @@ async function play(fixture: Fixture): Promise<void> {
 					});
 				}
 				const problems = replyMismatches(entry.line.path.split("?")[0] ?? "", o.status, want, got);
-				assert.deepEqual(problems, [], `${where(n)}: ${r.to} answered ${o.body}`);
+				assert.deepEqual(problems, [], `${where(n)}: ${r.to} answered ${o.status} ${o.body}: ${problems.join("; ")}`);
 				continue;
 			}
 
@@ -196,7 +206,8 @@ async function play(fixture: Fixture): Promise<void> {
 				const file = path.join(registryDir, `${String(pid)}.json`);
 				if (gone === true) rmSync(file, { force: true });
 				else {
-					const current = JSON.parse(readFileSync(file, "utf8")) as Obj;
+					// A file that's gone is written anew, with its pid and the line's fields (PROTOCOL.md, Fixtures).
+					const current = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Obj) : { pid };
 					writeAtomically(file, { ...current, ...fields });
 					if (typeof fields.statusUpdatedAt === "number") wall = Math.max(wall, fields.statusUpdatedAt);
 				}
@@ -303,8 +314,8 @@ async function play(fixture: Fixture): Promise<void> {
 describe("fixtures, deck side (claude-code/protocol/fixtures/*.jsonl)", () => {
 	const fixtures = loadFixtures();
 
-	test("all 17 fixtures are here", () => {
-		assert.equal(fixtures.length, 17, fixtures.map((f) => f.name).join(", "));
+	test("all 18 fixtures are here", () => {
+		assert.equal(fixtures.length, 18, fixtures.map((f) => f.name).join(", "));
 	});
 
 	for (const fixture of fixtures) {
@@ -312,6 +323,68 @@ describe("fixtures, deck side (claude-code/protocol/fixtures/*.jsonl)", () => {
 			await play(fixture);
 		});
 	}
+});
+
+describe("the runner itself", () => {
+	const fixture = (name: string): Fixture => {
+		const found = loadFixtures().find((f) => f.name === name);
+		assert.ok(found, name);
+		return found;
+	};
+	/** The model's routes, with some of a test's own in their place. */
+	const replacing =
+		(mine: Partial<BridgeRoutes>) =>
+		(model: SessionModel): BridgeRoutes => ({
+			permission: (body, host, reply) => model.permission(body, host, reply),
+			pretool: (body, host, reply) => model.pretool(body, host, reply),
+			hello: (body) => model.hello(body),
+			events: (body) => model.events(body),
+			next: (query, reply) => model.next(query, reply),
+			result: (body) => model.result(body),
+			...mine,
+		});
+
+	test("an answer that never comes fails the fixture in time, instead of holding up the run: a mode check's, a hello's", async () => {
+		const raise = fixture("mode-raise.jsonl");
+		// As with a mutation that held /v1/pretool in the last review, which npm test then waited on for good.
+		const started = Date.now();
+		await assert.rejects(play(raise, { routes: replacing({ pretool: () => undefined }), replyMs: 300 }), /mode-raise\.jsonl:10: POST \/v1\/pretool got no answer within 300 ms/);
+		await assert.rejects(play(raise, { routes: replacing({ hello: () => new Promise<RouteAnswer>(() => {}) }), replyMs: 300 }), /mode-raise\.jsonl:4: POST \/v1\/hello got no answer within 300 ms/);
+		assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+	});
+
+	test("a mode check's 2xx is held to its two bodies even when no reply line names the request", async () => {
+		const raise = fixture("mode-raise.jsonl");
+		const unreplied: Fixture = { ...raise, lines: raise.lines.filter((l) => !("reply" in l && l.reply.to === "q1")) };
+		assert.equal(unreplied.lines.length, raise.lines.length - 1);
+		// The deck's own answer, the allow, passes.
+		await play(unreplied);
+		// An allow with a field Claude Code would act on, or a PermissionRequest's allow, doesn't.
+		const widened = { hookSpecificOutput: { ...PRETOOL_ALLOW.hookSpecificOutput, updatedInput: { session_id: "self", mode: "bypassPermissions" } } };
+		for (const body of [widened, ALLOW_DECISION]) {
+			const pretool: BridgeRoutes["pretool"] = (_body, _host, reply) => reply.send(200, JSON.stringify(body));
+			await assert.rejects(play(unreplied, { routes: replacing({ pretool }) }), /expected exactly the mode check's allow or \{\}/, JSON.stringify(body));
+		}
+	});
+
+	test("an answer no reply line checks must be 200 or 204, and one of its route's bodies if it's a hook's", () => {
+		assert.deepEqual(unrepliedMismatches("/v1/pretool", 200, JSON.stringify(PRETOOL_ALLOW)), []);
+		assert.deepEqual(unrepliedMismatches("/v1/pretool", 200, "{}"), []);
+		assert.deepEqual(unrepliedMismatches("/v1/permission", 200, JSON.stringify(DENY_DECISION)), []);
+		assert.deepEqual(unrepliedMismatches("/v1/hello", 200, '{"v":1,"ok":true}'), []);
+		assert.deepEqual(unrepliedMismatches("/v1/events", 204, ""), []);
+		for (const [route, status, body] of [
+			["/v1/pretool", 200, JSON.stringify(ALLOW_DECISION)],
+			["/v1/pretool", 200, JSON.stringify({ hookSpecificOutput: { ...PRETOOL_ALLOW.hookSpecificOutput, permissionDecision: "ask" } })],
+			["/v1/pretool", 204, ""],
+			["/v1/pretool", 200, "not json"],
+			["/v1/permission", 200, JSON.stringify(PRETOOL_ALLOW)],
+			["/v1/events", 400, '{"error":"Bad Request"}'],
+			["/v1/next", 409, '{"error":"hello first"}'],
+		] as const) {
+			assert.notDeepEqual(unrepliedMismatches(route, status, body), [], `${route} ${status} ${body}`);
+		}
+	});
 });
 
 describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
