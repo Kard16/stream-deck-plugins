@@ -526,7 +526,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.equal(restarted.session(HOST)?.plugin, true);
 	});
 
-	test("two live mods for one host after a deck restart, through the bridge, with the limit shortened to 300 ms: the predecessor's hello lands last, and once it has gone the limit without a poll, the live mod's next poll gets 409, its hello makes it current, and its held poll takes the next command", async () => {
+	test("two live mods for one host after a deck restart, through the bridge, with the limit shortened to 300 ms: the predecessor's hello lands last, and once it has gone the limit without a poll, the live mod's next poll gets 409, its hello makes it current, and its held poll takes the next command; the predecessor's later hello then changes nothing", async () => {
 		const log = new RecordingLog();
 		const restarted = new SessionModel({ log, inFlightMs: 300 });
 		model = restarted;
@@ -556,7 +556,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		}
 		const after = Date.now() - started;
 		assert.ok(after >= 250 && strays > 0, `asked for a hello ${after} ms after iold's, after ${strays} stray polls`);
-		assert.ok(log.at("info").includes(`info UNPOLLED ${HOST}: mod instance "iold" has had no poll open for 0.3 s, so it's no longer the current one, and the deck forgets which instances said hello; the mod's next poll gets 409 to ask for one`), log.at("info").join("\n"));
+		assert.ok(log.at("info").includes(`info UNPOLLED ${HOST}: mod instance "iold" has had no poll open for 0.3 s, so it's no longer the current one; the mod's next poll gets 409 to ask for a hello, and the first instance to say one is made current`), log.at("info").join("\n"));
 		// inew's hello makes it current; its next poll is held, and takes the next command.
 		assert.equal(status(await hello("inew")), 200);
 		const held = poll("inew");
@@ -565,6 +565,18 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.ok(queued.ok, JSON.stringify(queued));
 		assert.deepEqual(json(await within(held, 2000)), { cmds: [{ id: queued.cmd.id, t: "prompt", text: "hi" }] });
 		assert.equal(queued.cmd.inst, "inew");
+		// inew waits with the prompt and polls again. iold then says hello once more, as after one of its fetches rejects:
+		// it said hello before, so that changes nothing. inew's poll stays held, and takes the next command.
+		const waiting = JSON.stringify({ sid: MOD.sid, host: HOST, inst: "inew", id: queued.cmd.id, state: "waiting" });
+		assert.equal(status(await atOnce(port, { token: TOKEN, path: "/v1/result", body: waiting })), 204);
+		const next = poll("inew");
+		await waitFor(() => restarted.commands.polling(HOST), "inew's next poll to be held");
+		assert.equal(status(await hello("iold")), 200);
+		assert.deepEqual(await within(next, 100), { error: "pending" }, "inew's poll is still held");
+		assert.deepEqual([queued.cmd.state, log.lines.filter((l) => l.message.startsWith("RESTART")).length], ["waiting", 1]);
+		const again = restarted.queue(HOST, { t: "prompt", text: "again" });
+		assert.ok(again.ok, JSON.stringify(again));
+		assert.deepEqual(json(await within(next, 2000)), { cmds: [{ id: again.cmd.id, t: "prompt", text: "again" }] });
 	});
 
 	test("a 409 through the bridge is logged at info once, then at debug: a refused hello's, its REQ lines included, and a poll's that asks for a hello", async () => {

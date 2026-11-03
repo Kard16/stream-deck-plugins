@@ -101,6 +101,7 @@ chmod 600 ~/.claude/settings.json
 - **A session shows no details,** only working or idle: it started before the install or the last update. Restart it.
 - **The app asks for permission and the Approve key shows nothing:** the deck couldn't confirm which session asked, or the deck restarted while the request was held. Answer in the app; it always works.
 - **After a Stream Deck or Claude app restart, or after sleep,** the deck and the sessions find each other again within seconds. A held request is lost on a deck restart, and its session shows needs you until you answer it in the app.
+- **A Saved Prompt or Mode press alerts:** the deck's log says why. Often the target has ended, or its last prompt is still waiting. It can also mean the session's plugin hasn't checked in for a minute, as when the session's process was replaced while the deck restarted. The deck sends it nothing until it checks in again, which a live plugin does within a second. Approve and Deny still work meanwhile.
 - **Logs:**
   - The deck: `deck/com.karimdhanji.claude.sdPlugin/logs/com.karimdhanji.claude.0.log`. For more detail, write `debug` to `deck/com.karimdhanji.claude.sdPlugin/log-level.txt` and restart the plugin.
   - The mod: each session's own debug log.

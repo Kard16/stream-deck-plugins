@@ -553,10 +553,12 @@ test('deck: the current instance\'s hello, said again as after a rejected fetch 
     ['ia', true, false, ['cwd', 'model', 'mode', 'effort']], ['ia', true, true, ['cwd', 'model']], ['ia', true, true, ['cwd', 'model']],
   ])
 
-  // A hello that makes an instance current takes all four: a restart's, and one after the deck forgot the session's
-  // instances (a reset here, as a deck restart).
+  // A hello that makes an instance current takes its cwd and model, and its mode and effort unless the deck took them
+  // from a PermissionRequest (PROTOCOL.md, "The deck's session model", as amended for Phase 6, round 4): a restart's
+  // here keeps the PermissionRequest's; one after a reset, as a deck restart, with none since, takes all four.
   hello({ ...A, inst: 'ia2' }, { cwd: '/s3', model: 'm3', mode: 'plan', effort: 'medium' })
-  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host], deck.state().sessions[A.host].hello.cwd], ['ia2', { model: 'm3', effort: 'medium', mode: 'plan' }, '/s3'])
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host], deck.state().sessions[A.host].hello.cwd], ['ia2', { model: 'm3', effort: 'high', mode: 'acceptEdits' }, '/s3'])
+  assert.deepEqual([log.at(-1).kind, log.at(-1).took, log.at(-1).kept], ['hello', ['cwd', 'model'], ['mode', 'effort']])
   deck.reset()
   reg([A, 'busy'])
   hello({ ...A, inst: 'ia2' }, { cwd: '/s4', model: 'm4', mode: 'auto', effort: 'xhigh' })
@@ -566,6 +568,42 @@ test('deck: the current instance\'s hello, said again as after a rejected fetch 
   hello({ ...A, inst: 'ia2' }, { cwd: '/s-old', model: 'm-old', mode: 'default', effort: 'max' })
   assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host], deck.state().sessions[A.host].hello.cwd], ['ia3', { model: 'm5', effort: 'low', mode: 'plan' }, '/s'])
   assert.deepEqual(log.filter((e) => e.kind === 'hello').slice(-2).map((e) => [e.inst, e.madeCurrent, e.again]), [['ia3', true, false], ['ia2', false, false]])
+})
+
+test('deck: the current instance\'s hello, said again, gives only its model wherever the deck took its mode and effort from: a hello, a settings event, or nowhere yet, as well as a PermissionRequest', () => {
+  // PROTOCOL.md, Identity: the current instance's hello, said again, "takes its cwd and model, and nothing else
+  // changes"; "The deck's session model", as amended for Phase 6, round 4: it "gives only its model". That rule stands
+  // apart from round 4's, which keeps a PermissionRequest's mode and effort from a hello that makes an instance
+  // current: the test above has them from a PermissionRequest, where either rule keeps them.
+  const { deck, clock, log, reg, hello, ev, view } = setup()
+  const from = () => deck.state().sessions[A.host].settingsFrom
+  const line = () => {
+    const e = log.filter((x) => x.kind === 'hello').at(-1)
+    return [e.madeCurrent, e.again, e.took]
+  }
+  reg([A, 'busy'])
+  // The effort from the hello that made the instance current, the mode from a settings event since.
+  hello(A, { mode: 'plan', effort: 'high' })
+  ev(A, { t: 'settings', mode: 'acceptEdits' })
+  assert.deepEqual(from(), { model: 'hello', effort: 'hello', mode: 'settings' })
+  hello(A, { cwd: '/s2', model: 'm2', mode: 'default', effort: 'low' })
+  assert.deepEqual([view().settings[A.host], from(), line()], [{ model: 'm2', effort: 'high', mode: 'acceptEdits' }, { model: 'hello', effort: 'hello', mode: 'settings' }, [true, true, ['cwd', 'model']]], 'its model taken; the settings event\'s mode and the first hello\'s effort stay')
+  // 60 s on with no poll, its hello makes it current again and gives its mode and effort, neither from a
+  // PermissionRequest; said again just after, it gives only its model.
+  clock.advance(60_000)
+  assert.equal(deck.state().sessions[A.host].inst, null)
+  hello(A, { model: 'm3', mode: 'auto', effort: 'max' })
+  assert.deepEqual([view().settings[A.host], line()], [{ model: 'm3', effort: 'max', mode: 'auto' }, [true, false, ['cwd', 'model', 'mode', 'effort']]])
+  hello(A, { model: 'm4', mode: 'plan', effort: 'medium' })
+  assert.deepEqual([view().settings[A.host], from(), line()], [{ model: 'm4', effort: 'max', mode: 'auto' }, { model: 'hello', effort: 'hello', mode: 'hello' }, [true, true, ['cwd', 'model']]])
+  // With neither from the plugin yet, as from a mod whose first hello came before it had seen them, the app's record
+  // shows them, and a hello said again doesn't replace it either.
+  deck.reset()
+  reg([A, 'busy'])
+  deck.applyRecord(A.host, { model: 'm-rec', effort: 'medium', permissionMode: 'auto' })
+  hello(A)
+  hello(A, { mode: 'default', effort: 'low' })
+  assert.deepEqual([view().settings[A.host], from(), line()], [{ model: 'm1', effort: 'medium', mode: 'auto' }, { model: 'hello', effort: null, mode: null }, [true, true, ['cwd', 'model']]])
 })
 
 test('deck: a session no instance has said hello for asks for one: every poll gets 409 hello first at once, whatever its inst, until a hello; with a current instance nothing changes', () => {
@@ -610,7 +648,8 @@ test('deck: a session no instance has said hello for asks for one: every poll ge
 test('deck: two live mods for one host across a deck restart: the predecessor\'s hello lands last and is made current; 60 s on with no poll of its own, it stops counting, and the live mod\'s next poll gets 409 and its hello makes it current', () => {
   // PROTOCOL.md, Identity, as amended for Phase 6 (item 1): a restarted process and its lingering predecessor both get
   // 409 hello first after the deck restarts, and both say hello. The mods can't rank themselves (no pid, and a
-  // resumed session keeps its session id), so the deck makes current whichever hello lands last.
+  // resumed session keeps its session id), so the deck makes current whichever hello lands last. Since round 4 the
+  // deck still remembers both once the predecessor stops counting.
   const { deck, clock, log, reg, hello, poll, view } = setup()
   const NEW = { ...A, inst: 'inew' }
   const OLD = { ...A, inst: 'iold' }
@@ -635,7 +674,7 @@ test('deck: two live mods for one host across a deck restart: the predecessor\'s
   clock.advance(999)
   assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts], ['iold', ['inew', 'iold']], '59.999 s')
   clock.advance(1)
-  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts], [null, []], '60 s: no instance counts')
+  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts], [null, ['inew', 'iold']], '60 s: no instance counts, and the deck still remembers both')
   assert.deepEqual(log.filter((e) => e.kind === 'inst-quiet').map((e) => [e.host, e.inst, e.quietMs]), [[A.host, 'iold', 60_000]])
   // A press alerts; the live mod's next poll asks for a hello, and its hello makes it current, with no restart.
   assert.match(deck.prompt({ host: A.host, text: 'Hi.' }).error, /has no current instance/)
@@ -650,6 +689,154 @@ test('deck: two live mods for one host across a deck restart: the predecessor\'s
   // The predecessor's late poll gets none, and leaves the live mod's alone.
   assert.deepEqual(poll(OLD).r.sent, none)
   assert.deepEqual([deck.state().sessions[A.host].inst, view().cmds[c]], ['inew', 'delivered'])
+})
+
+test('deck: once the current instance stops counting, the live mod\'s hello makes it current, and the predecessor\'s later hello changes nothing: no restart, its prompt still waits, its poll stays open', () => {
+  // PROTOCOL.md, Identity, as amended for Phase 6, round 4 (item 1): the flip-flop round 3's review found. Round 3 forgot
+  // which instances had said hello at the 60 s, so a live predecessor's hello after one of its fetches rejected counted
+  // as new: a restart over the live mod, which failed its commands and made it a stray for another minute.
+  const { deck, clock, log, reg, hello, poll, view } = setup()
+  const NEW = { ...A, inst: 'inew' }
+  const OLD = { ...A, inst: 'iold' }
+  const restarts = () => log.filter((e) => e.kind === 'mod-restart').map((e) => [e.from, e.to])
+  reg([A, 'busy'])
+  // As after a deck restart, the predecessor's hello lands last, and it never polls: 60 s on it stops counting.
+  hello(NEW)
+  hello(OLD)
+  clock.advance(60_000)
+  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts, restarts()], [null, ['inew', 'iold'], [['inew', 'iold']]])
+  // The live mod's next poll asks for a hello, and its hello makes it current, with no restart.
+  assert.deepEqual(poll(NEW).r.sent, [{ status: 409, json: { error: 'hello first' } }])
+  hello(NEW)
+  assert.deepEqual([deck.state().sessions[A.host].inst, restarts().length], ['inew', 1])
+  // A prompt goes to it and waits for the turn; its next poll is held.
+  const n1 = poll(NEW)
+  const c = deck.prompt({ host: A.host, text: 'Hi.' }).cmd
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Hi.' }] } }])
+  deck.result({ sid: A.sid, host: A.host, inst: 'inew', id: c, state: 'waiting' })
+  const n2 = poll(NEW)
+  // One of the predecessor's fetches rejects, and it says hello again: answered ok, and nothing changes.
+  assert.deepEqual(hello(OLD, { cwd: '/old', model: 'm-old', mode: 'plan', effort: 'max' }), { v: 1, ok: true })
+  assert.deepEqual([deck.state().sessions[A.host].inst, restarts().length, view().cmds[c], n2.r.sent], ['inew', 1, 'waiting', []], 'no restart: the prompt still waits, and the live mod\'s poll stays open')
+  assert.deepEqual([view().settings[A.host].model, deck.state().sessions[A.host].hello.inst], ['m1', 'inew'], 'nor is anything of it taken')
+  assert.deepEqual(log.filter((e) => e.kind === 'hello').at(-1).madeCurrent, false)
+  // Its polls are answered at once with none, and leave the live mod's alone, which takes the next command.
+  assert.deepEqual(poll(OLD).r.sent, [{ status: 200, json: { cmds: [] } }])
+  const m = deck.mode({ host: A.host, mode: 'plan' }).cmd
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [{ id: m, t: 'mode', mode: 'plan' }] } }])
+  assert.deepEqual([view().cmds[c], view().cmds[m], restarts().length], ['waiting', 'delivered', 1])
+})
+
+test('deck: a lone mod quiet for 60 s is made current again by its own hello, which the deck still remembers: no restart, and its next poll takes commands; with it current, nothing else changes', () => {
+  // PROTOCOL.md, Identity, as amended for Phase 6, round 4: "While a session has no current instance, any instance's
+  // hello makes it current, one the deck has had a hello from before included. That isn't a restart".
+  const { deck, clock, log, reg, hello, poll, view } = setup()
+  const restarts = () => log.filter((e) => e.kind === 'mod-restart').length
+  reg([A, 'idle'])
+  hello(A)
+  // Its poll runs out, and the mod polls no more for a minute: a process that hung, say.
+  poll(A)
+  clock.advance(20_000)
+  clock.advance(60_000)
+  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts], [null, ['ia']], 'it no longer counts, and the deck remembers its hello')
+  assert.equal(deck.prompt({ host: A.host, text: 'Hi.' }).error, 'local_a has no current instance: its last, ia, has had no poll open for 60 s, so it can\'t take commands until an instance of its mod says hello again')
+  // Its next poll asks for a hello; its own hello makes it current again.
+  assert.deepEqual(poll(A).r.sent, [{ status: 409, json: { error: 'hello first' } }])
+  assert.deepEqual(hello(A), { v: 1, ok: true })
+  const line = log.filter((e) => e.kind === 'hello').at(-1)
+  assert.deepEqual([deck.state().sessions[A.host].inst, line.madeCurrent, line.again, line.saidBefore, restarts()], ['ia', true, false, true, 0])
+  const n = poll(A)
+  assert.equal(n.r.sent.length, 0, 'its next poll is held')
+  const c = deck.prompt({ host: A.host, text: 'Hi.' }).cmd
+  assert.deepEqual(n.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Hi.' }] } }])
+  // With it current, as before round 4: its own hello said again is no restart, a new inst's is, and then its own
+  // hello changes nothing.
+  hello(A)
+  assert.deepEqual([log.filter((e) => e.kind === 'hello').at(-1).again, restarts(), view().cmds[c]], [true, 0, 'delivered'])
+  hello({ ...A, inst: 'ia2' })
+  assert.deepEqual([deck.state().sessions[A.host].inst, restarts(), view().cmds[c]], ['ia2', 1, 'failed'])
+  hello(A)
+  assert.deepEqual([deck.state().sessions[A.host].inst, restarts(), log.filter((e) => e.kind === 'hello').at(-1).madeCurrent], ['ia2', 1, false])
+})
+
+test('deck: while none is current, whichever instance says hello first is made current: a predecessor\'s, landing first, makes the live mod a stray until the predecessor stops counting', () => {
+  // PROTOCOL.md, Identity, as amended for Phase 6, round 4: any instance's hello makes it current while none is, and
+  // "From then on the others don't count". Its "Why" accepts the cost: the live mod's polls are answered at once with
+  // none until the predecessor's mod has gone 60 s without one.
+  const { deck, clock, log, reg, hello, poll, view } = setup()
+  const NEW = { ...A, inst: 'inew' }
+  const OLD = { ...A, inst: 'iold' }
+  const first = [{ status: 409, json: { error: 'hello first' } }]
+  const none = [{ status: 200, json: { cmds: [] } }]
+  const restarts = () => log.filter((e) => e.kind === 'mod-restart').map((e) => [e.from, e.to])
+  reg([A, 'busy'])
+  hello(NEW)
+  hello(OLD)
+  clock.advance(60_000)
+  assert.equal(deck.state().sessions[A.host].inst, null)
+  // Both mods' fetches failed in that minute: the predecessor's hello lands first, then the live mod's.
+  hello(OLD)
+  hello(NEW)
+  assert.deepEqual([deck.state().sessions[A.host].inst, restarts()], ['iold', [['inew', 'iold']]], 'the live mod\'s hello is no restart')
+  assert.deepEqual(log.filter((e) => e.kind === 'hello').slice(-2).map((e) => [e.inst, e.madeCurrent]), [['iold', true], ['inew', false]])
+  // The live mod is a stray: its polls are answered at once with none, and a command queued now waits for the
+  // predecessor's poll, which never comes.
+  const q = deck.prompt({ host: A.host, text: 'Queued.' }).cmd
+  for (let i = 0; i < 59; i++) {
+    clock.advance(1_000)
+    assert.deepEqual(poll(NEW).r.sent, none)
+  }
+  assert.deepEqual([view().cmds[q], log.filter((e) => e.kind === 'poll-stale' && e.inst === 'inew').length], ['queued', 59])
+  // A minute after its hello the predecessor, which never polled, stops counting again, and the command fails "not
+  // delivered"; the live mod's next poll asks for a hello, and its hello makes it current.
+  clock.advance(1_000)
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().cmds[q], poll(NEW).r.sent], [null, 'failed', first])
+  hello(NEW)
+  const n = poll(NEW)
+  const c = deck.prompt({ host: A.host, text: 'Hi.' }).cmd
+  assert.deepEqual([deck.state().sessions[A.host].inst, n.r.sent, restarts().length], ['inew', [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Hi.' }] } }], 1])
+  assert.equal(view().cmds[c], 'delivered')
+})
+
+test('deck: while none is current, a new inst\'s hello, as after a hot reload, makes it current with no restart, though the deck remembers another: nothing is failed or forgotten', () => {
+  // PROTOCOL.md, Identity, as amended for Phase 6, round 4: "While a session has no current instance, any instance's
+  // hello makes it current ... That isn't a restart: nothing is failed or forgotten." A restart is a new inst's hello
+  // while another is current, and an instance the deck only remembers, which stopped polling, isn't current.
+  const { deck, clock, log, reg, hello, ev, perm, poll, view } = setup()
+  const NEW = { ...A, inst: 'ia2' }
+  const restarts = () => log.filter((e) => e.kind === 'mod-restart').length
+  reg([A, 'busy'])
+  hello(A)
+  // A call under way, and a request for its tool whose fp differs from the call's: the two pair as a mismatch when
+  // the request ends, unless the mod restarted while it was held, when its own tool.start may never come.
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'tool.start', tool: 'Write', use: 'u1', summary: 'one.txt', fp: 'deadbeef' })
+  const p = perm(A, 'Write', W1)
+  // Its poll runs out, and it polls no more. A prompt queued 30 s on waits for a poll; 60 s after the poll's end the
+  // instance stops counting.
+  poll(A)
+  clock.advance(20_000)
+  clock.advance(30_000)
+  const q = deck.prompt({ host: A.host, text: 'Queued.' }).cmd
+  clock.advance(30_000)
+  assert.deepEqual([deck.state().sessions[A.host].inst, deck.state().sessions[A.host].insts, view().cmds[q]], [null, ['ia'], 'queued'])
+  // The mod reloads, and its new instance says hello: made current, with no restart.
+  assert.deepEqual(hello(NEW), { v: 1, ok: true })
+  const said = log.filter((e) => e.kind === 'hello').at(-1)
+  assert.deepEqual([deck.state().sessions[A.host].inst, said.madeCurrent, said.saidBefore, restarts()], ['ia2', true, false, 0])
+  // Nothing forgotten: the current tool, the held request, and which instances said hello, the new one newest.
+  assert.deepEqual([view().doing[A.host], view().held.map((h) => h.id), p.r.sent, deck.state().sessions[A.host].insts], ['one.txt', [p.id], [], ['ia', 'ia2']])
+  // Nothing failed: the new instance's first poll takes the queued prompt.
+  assert.deepEqual(poll(NEW).r.sent, [{ status: 200, json: { cmds: [{ id: q, t: 'prompt', text: 'Queued.' }] } }])
+  assert.equal(view().cmds[q], 'delivered')
+  // The request, answered, pairs with the one call of its tool, a mismatch: no restart came while it was held.
+  deck.press('approve')
+  const check = log.find((e) => e.kind === 'fp-check' && e.request === p.id)
+  assert.deepEqual([p.r.sent, check.match, check.modFp, check.doubt], [[{ status: 200, json: ALLOW }], false, 'deadbeef', undefined])
+  // From then on the instance that stopped doesn't count: its hello, after one of its fetches rejects say, changes
+  // nothing, and leaves the new instance's poll open.
+  const n = poll(NEW)
+  hello(A, { model: 'm-old' })
+  assert.deepEqual([deck.state().sessions[A.host].inst, restarts(), n.r.sent, view().settings[A.host].model], ['ia2', 0, [], 'm1'])
 })
 
 test('deck: a current instance stops counting only after 60 s with no poll open and none sent: a held poll, or one answered at once, keeps it; another inst\'s polls don\'t', () => {
@@ -712,8 +899,9 @@ test('deck: a current instance stops counting only after 60 s with no poll open 
   assert.equal(current(), null, 'ia\'s polls kept ia2 current not at all')
 })
 
-test('deck: a current instance that stops counting leaves the rest as it was: settings, held requests, commands and seqs; a waiting prompt fails with it', () => {
-  // PROTOCOL.md, Identity: "the deck forgets which instances said hello for the session, and keeps the rest".
+test('deck: a current instance that stops counting leaves the rest as it was, and so does its hello that makes it current again: settings, held requests, commands, the current tool and seqs; a waiting prompt fails with it', () => {
+  // PROTOCOL.md, Identity: "it's no longer current. The deck keeps the rest: settings, held requests, commands, the
+  // current tool, and which instances have said hello."
   const { deck, clock, log, reg, hello, ev, perm, poll, view } = setup()
   reg([A, 'busy'])
   hello(A, { model: 'm1', mode: 'plan', effort: 'high' })
@@ -732,6 +920,7 @@ test('deck: a current instance that stops counting leaves the rest as it was: se
   assert.deepEqual([view().cmds[mode], view().cmds[queued]], ['failed', 'queued'], 'the delivered one on its own 60 s, from delivery; the queued one waits')
   assert.deepEqual([view().held.map((h) => h.id), view().status[A.host], p.r.sent], [[p.id], 'approval', []], 'still held')
   assert.deepEqual([view().settings[A.host], view().context[A.host], view().doing[A.host]], [{ model: 'm1', effort: 'high', mode: 'plan' }, 42, 'a.md'])
+  assert.deepEqual([deck.state().sessions[A.host].insts, deck.state().sessions[A.host].settingsFrom], [['ia'], { model: 'hello', effort: 'permission', mode: 'permission' }], 'and which instances said hello, and where each setting came from')
   // The seqs it has seen stay: a request sent again under seq 1, as a retry, is still dropped.
   deck.events({ sid: A.sid, host: A.host, inst: A.inst, seq: 1, events: [{ t: 'measure', at: clock.now(), context: { percent: 99, window: 10 } }] })
   assert.equal(view().context[A.host], 42, 'seq 1 again: dropped')
@@ -739,8 +928,11 @@ test('deck: a current instance that stops counting leaves the rest as it was: se
   // And the same inst's next events go on from its seq.
   ev(A, { t: 'measure', context: { percent: 43, window: 10 } })
   assert.equal(view().context[A.host], 43)
-  // Its hello makes it current again, and its next poll takes what's queued.
+  // Its hello makes it current again, with no restart: the rest stays as it was, the current tool and the held request
+  // included (Identity: "nothing is failed or forgotten"), and its next poll takes what's queued.
   hello(A)
+  assert.deepEqual([deck.state().sessions[A.host].inst, log.filter((e) => e.kind === 'hello').at(-1).saidBefore, log.filter((e) => e.kind === 'mod-restart').length], ['ia', true, 0])
+  assert.deepEqual([view().doing[A.host], view().held.map((h) => h.id), p.r.sent, view().settings[A.host]], ['a.md', [p.id], [], { model: 'm1', effort: 'high', mode: 'plan' }])
   assert.deepEqual(poll(A).r.sent[0].json.cmds.map((c) => c.id), [queued])
 })
 
@@ -2018,6 +2210,109 @@ test('deck: settings are the latest from hello, settings events and requests, el
   assert.deepEqual(view().settings[A.host], { model: 'm1', effort: 'low', mode: 'default' })
   ev(A, { t: 'settings', mode: 'acceptEdits' })
   assert.deepEqual(view().settings[A.host], { model: 'm1', effort: 'low', mode: 'acceptEdits' })
+})
+
+/** The last hello line's madeCurrent, again, took and kept. */
+const lastHello = (log) => {
+  const e = log.filter((x) => x.kind === 'hello').at(-1)
+  return [e.madeCurrent, e.again, e.took, e.kept]
+}
+
+test('deck: after the 60 s, the hello that makes an instance current again takes its cwd and model, and keeps the mode and effort the deck took from a PermissionRequest', () => {
+  // PROTOCOL.md, "The deck's session model", as amended for Phase 6, round 4 (item 2). A hello's mode and effort are
+  // what its mod has already sent or queued as settings; a PermissionRequest's are the engine's own at that moment.
+  // The Mode dial's press without a turn applies the mode it shows, so an older one put back could be applied.
+  const { deck, clock, log, reg, hello, perm, poll, view } = setup()
+  const NEW = { ...A, inst: 'inew' }
+  reg([A, 'busy'])
+  // The two-processes case: the live mod reported Manual; after a deck restart the predecessor's hello lands last.
+  hello(NEW, { mode: 'default', effort: 'low' })
+  hello({ ...A, inst: 'iold' })
+  // The user changes the mode in the app; a PermissionRequest brings the engine's new mode and effort first.
+  perm(A, 'Write', W1, { extra: { permission_mode: 'acceptEdits', effort: { level: 'high' } } })
+  assert.deepEqual(view().settings[A.host], { model: 'm1', effort: 'high', mode: 'acceptEdits' })
+  // 60 s on, the predecessor stops counting; the live mod's hello, with the mode and effort it last sent, makes it current.
+  clock.advance(60_000)
+  assert.deepEqual(poll(NEW).r.sent, [{ status: 409, json: { error: 'hello first' } }])
+  hello(NEW, { cwd: '/s2', model: 'm2', mode: 'default', effort: 'low' })
+  assert.equal(deck.state().sessions[A.host].inst, 'inew')
+  assert.deepEqual(view().settings[A.host], { model: 'm2', effort: 'high', mode: 'acceptEdits' }, 'its model taken, the PermissionRequest\'s mode and effort kept')
+  assert.deepEqual(lastHello(log), [true, false, ['cwd', 'model'], ['mode', 'effort']])
+  assert.deepEqual([deck.state().sessions[A.host].hello.cwd, deck.state().sessions[A.host].settingsFrom], ['/s2', { model: 'hello', effort: 'permission', mode: 'permission' }])
+  assert.match(log.filter((e) => e.kind === 'hello').at(-1).say, /its mode and effort not taken: the deck took them from a PermissionRequest/)
+})
+
+test('deck: after a deck restart, a PermissionRequest that comes before the mod\'s first hello keeps its mode and effort over that hello\'s', () => {
+  // PROTOCOL.md, "The deck's session model", round 4: "after a deck restart, a PermissionRequest can come before the
+  // mod's first hello". A reset is the fake's deck restart.
+  const { deck, log, reg, hello, perm, view } = setup()
+  reg([A, 'busy'])
+  hello(A, { mode: 'default', effort: 'low' })
+  deck.reset()
+  reg([A, 'busy'])
+  const p = perm(A, 'Write', W1, { extra: { permission_mode: 'acceptEdits', effort: { level: 'high' } } })
+  assert.deepEqual([p.kind, deck.state().sessions[A.host].inst], ['tool', null], 'held, before any hello')
+  // The mod's hello: its quick hello after the reset cut its poll off, or after a 409.
+  hello(A, { mode: 'default', effort: 'low' })
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host]], ['ia', { model: 'm1', effort: 'high', mode: 'acceptEdits' }])
+  assert.deepEqual(lastHello(log), [true, false, ['cwd', 'model'], ['mode', 'effort']])
+  // With no PermissionRequest since the reset, the first hello takes all four, as before.
+  deck.reset()
+  reg([A, 'busy'])
+  hello(A, { model: 'm2', mode: 'plan', effort: 'medium' })
+  assert.deepEqual([view().settings[A.host], lastHello(log)], [{ model: 'm2', effort: 'medium', mode: 'plan' }, [true, false, ['cwd', 'model', 'mode', 'effort'], []]])
+})
+
+test('deck: each setting goes by where the deck took it from: a hello still gives the effort when only the mode came from a PermissionRequest, and the mode when only the effort did', () => {
+  // PROTOCOL.md, "The deck's session model", round 4: "Each field goes by where the deck took it from".
+  const { deck, log, reg, hello, perm, view } = setup()
+  // A PermissionRequest with no effort.level: only its mode is taken.
+  reg([A, 'busy'])
+  perm(A, 'Write', W1, { extra: { permission_mode: 'plan', effort: undefined } })
+  hello(A, { mode: 'default', effort: 'medium' })
+  assert.deepEqual([view().settings[A.host], lastHello(log)], [{ model: 'm1', effort: 'medium', mode: 'plan' }, [true, false, ['cwd', 'model', 'effort'], ['mode']]])
+  assert.deepEqual(deck.state().sessions[A.host].settingsFrom, { model: 'hello', effort: 'hello', mode: 'permission' })
+  // One with no permission_mode: only its effort.
+  deck.reset()
+  reg([A, 'busy'])
+  perm(A, 'Write', W1, { extra: { permission_mode: undefined, effort: { level: 'xhigh' } } })
+  hello(A, { mode: 'acceptEdits', effort: 'low' })
+  assert.deepEqual([view().settings[A.host], lastHello(log)], [{ model: 'm1', effort: 'xhigh', mode: 'acceptEdits' }, [true, false, ['cwd', 'model', 'mode'], ['effort']]])
+  assert.deepEqual(deck.state().sessions[A.host].settingsFrom, { model: 'hello', effort: 'permission', mode: 'hello' })
+  // A restarted mod's first hello carries neither, as its mod has seen none yet: nothing to keep, and both stay.
+  perm(A, 'Write', W1, { extra: { permission_mode: 'plan', effort: { level: 'high' } } })
+  hello({ ...A, inst: 'ia2' }, { model: 'm2' })
+  assert.deepEqual([view().settings[A.host], lastHello(log)], [{ model: 'm2', effort: 'high', mode: 'plan' }, [true, false, ['cwd', 'model'], []]])
+})
+
+test('deck: a settings event, or a later PermissionRequest, replaces a mode or effort the deck took from a PermissionRequest; a restart\'s hello doesn\'t, and replaces one from a settings event', () => {
+  // PROTOCOL.md, "The deck's session model", round 4: "A settings event, or a later PermissionRequest, replaces them as
+  // usual." And "No hello", a restart's included.
+  const { deck, clock, log, reg, hello, ev, perm, poll, view } = setup()
+  const from = () => deck.state().sessions[A.host].settingsFrom
+  reg([A, 'busy'])
+  hello(A, { mode: 'default', effort: 'low' })
+  perm(A, 'Write', W1, { extra: { permission_mode: 'acceptEdits', effort: { level: 'high' } } })
+  // A settings event replaces the PermissionRequest's mode; its effort stays the PermissionRequest's.
+  ev(A, { t: 'settings', mode: 'plan' })
+  assert.deepEqual([view().settings[A.host], from()], [{ model: 'm1', effort: 'high', mode: 'plan' }, { model: 'hello', effort: 'permission', mode: 'settings' }])
+  // So after the 60 s, the hello that makes the instance current again gives the mode, and not the effort.
+  clock.advance(60_000)
+  assert.deepEqual(poll(A).r.sent, [{ status: 409, json: { error: 'hello first' } }])
+  hello(A, { mode: 'default', effort: 'low' })
+  assert.deepEqual([view().settings[A.host], lastHello(log)], [{ model: 'm1', effort: 'high', mode: 'default' }, [true, false, ['cwd', 'model', 'mode'], ['effort']]])
+  // A later PermissionRequest replaces the hello's mode and the earlier PermissionRequest's effort.
+  perm(A, 'Bash', { command: 'ls' }, { extra: { permission_mode: 'auto', effort: { level: 'medium' } } })
+  assert.deepEqual([view().settings[A.host], from()], [{ model: 'm1', effort: 'medium', mode: 'auto' }, { model: 'hello', effort: 'permission', mode: 'permission' }])
+  perm(A, 'Bash', { command: 'pwd' }, { extra: { permission_mode: 'acceptEdits', effort: { level: 'max' } } })
+  assert.deepEqual(view().settings[A.host], { model: 'm1', effort: 'max', mode: 'acceptEdits' }, 'and a PermissionRequest\'s, from an earlier one')
+  // A restart's hello keeps both; then, with the effort from a settings event, the next restart's hello gives it.
+  hello({ ...A, inst: 'ia2' }, { model: 'm2', mode: 'default', effort: 'low' })
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host], lastHello(log)], ['ia2', { model: 'm2', effort: 'max', mode: 'acceptEdits' }, [true, false, ['cwd', 'model'], ['mode', 'effort']]])
+  ev({ ...A, inst: 'ia2' }, { t: 'settings', effort: 'low' })
+  hello({ ...A, inst: 'ia3' }, { model: 'm3', mode: 'plan', effort: 'high' })
+  assert.deepEqual([deck.state().sessions[A.host].inst, view().settings[A.host], lastHello(log)], ['ia3', { model: 'm3', effort: 'high', mode: 'acceptEdits' }, [true, false, ['cwd', 'model', 'effort'], ['mode']]])
+  assert.equal(log.filter((e) => e.kind === 'mod-restart').length, 2)
 })
 
 test('deck: prompts and modes go only to listed sessions that have the plugin', () => {

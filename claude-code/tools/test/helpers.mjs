@@ -132,17 +132,22 @@ export function fakeTimers(start = 1_800_000_000_000) {
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** claude-code/plugin/hooks/bridge.ts's timings, which modLoop plays by. */
-export const MOD = Object.freeze({ RETRY_MS: 100, POLL_MIN_MS: 1000, BACKOFF_MS: [1000, 2000, 5000, 10_000, 30_000] })
+export const MOD = Object.freeze({ RETRY_MS: 100, QUICK_WINDOW_MS: 2000, POLL_MIN_MS: 1000, BACKOFF_MS: [1000, 2000, 5000, 10_000, 30_000] })
 
 /**
  * A mod's hello and long poll as claude-code/plugin/hooks/bridge.ts plays them, on real timers, against `bridge`:
  * - hello, and once one is answered `ok: true`, the poll, again as soon as one answers;
  * - a poll answered under POLL_MIN_MS with no command waits out the rest of that second, with nothing open;
  * - a fetch that rejects, or a poll answered 409 `{"error": "hello first"}` (PROTOCOL.md, "Failure and recovery", as
- *   amended on 2026-11-03), brings a quiet hello RETRY_MS later. A second failure before a poll goes through begins
- *   an outage, with a hello after each of BACKOFF_MS; any other failed hello or poll does too.
+ *   amended on 2026-11-03), brings a quiet hello RETRY_MS later: a quick hello. Until the request that failed goes
+ *   through, a second failure, before that hello's answer or up to QUICK_WINDOW_MS after it, begins an outage, with a
+ *   hello after each of BACKOFF_MS; any other failed hello or poll does too. Once the window has closed, more than
+ *   QUICK_WINDOW_MS after the answer (bridge.ts's openWindow and endQuick), a rejection or a 409 gets a quick hello of
+ *   its own: so a poll the deck held, then abandoned at an Esc or a Deny, gets one.
  * Only the poll's side: no events or results. `trace` lists what it did, `{ms, what, status?, cmds?}` by the time
- * since `start()`, and `cmds` the commands it took. `stop()` drops its open poll and its timers.
+ * since `start()`, a `quick-window-closed` when a quick hello's window closes, and `cmds` the commands it took.
+ * `abandon()` drops its open poll, as the engine abandons a mod's fetches at an interrupt, so the fetch rejects.
+ * `stop()` drops its open poll and its timers.
  */
 export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm' }) {
   const headers = { host: hostHeader(bridge.url), authorization: `Bearer ${token}` }
@@ -155,6 +160,8 @@ export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm
   let attempt = 0
   let outage
   let quick
+  /** The timer that ends the quick hello once QUICK_WINDOW_MS have passed since its answer; null till then. */
+  let quickWindow = null
   let polling = null
   const note = (what, extra = {}) => trace.push({ ms: Math.round(performance.now() - t0), what, ...extra })
   const after = (ms, fn) => {
@@ -163,9 +170,28 @@ export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm
       if (running) fn()
     }, ms)
     timers.add(timer)
+    return timer
+  }
+  const cancel = (timer) => {
+    clearTimeout(timer)
+    timers.delete(timer)
+  }
+  /** The quick hello is over, whatever ended it, and its window with it. */
+  const endQuick = () => {
+    quick = undefined
+    if (quickWindow !== null) cancel(quickWindow)
+    quickWindow = null
+  }
+  /** The quick hello's window opens at its answer, and closes one past QUICK_WINDOW_MS, as bridge.ts's does. */
+  const openWindow = () => {
+    quickWindow = after(MOD.QUICK_WINDOW_MS + 1, () => {
+      quickWindow = null
+      note('quick-window-closed', { channel: quick })
+      endQuick()
+    })
   }
   const through = (channel) => {
-    if (quick === channel) quick = undefined
+    if (quick === channel) endQuick()
     if (outage !== channel) return
     outage = undefined
     attempt = 0
@@ -177,7 +203,7 @@ export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm
   const fail = (channel) => {
     if (outage === undefined) {
       outage = quick ?? channel
-      quick = undefined
+      endQuick()
     }
     const wait = MOD.BACKOFF_MS[Math.min(attempt, MOD.BACKOFF_MS.length - 1)]
     attempt++
@@ -204,6 +230,8 @@ export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm
     if (ep !== epoch || !running) return
     if (r.status >= 200 && r.status < 300 && r.json?.ok === true) {
       through('hello')
+      // A quick hello answered, whose rejected request has yet to go through: its window opens now.
+      if (quick !== undefined) openWindow()
       void poll(ep)
       return
     }
@@ -242,6 +270,10 @@ export function modLoop(bridge, token, { sid, host, inst, cwd = '/s', model = 'm
       t0 = performance.now()
       running = true
       void hello()
+    },
+    /** Drops the open poll with no answer, as the engine abandons a mod's fetches at an Esc or a deck Deny. */
+    abandon() {
+      polling?.abort()
     },
     stop() {
       running = false

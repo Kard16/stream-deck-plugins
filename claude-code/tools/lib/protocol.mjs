@@ -112,8 +112,9 @@ export const PRE_ALLOW = deepFreeze({
 export const NOT_THIS_SESSION = 'not this session'
 
 /**
- * The error a poll gets, with 409, for a session no instance has said hello for (PROTOCOL.md, Identity): after the
- * deck restarts, or forgets the session at release rule 4. The mod takes it as a rejected fetch, and says hello.
+ * The error a poll gets, with 409, for a session with no current instance (PROTOCOL.md, Identity): after the deck
+ * restarts, forgets the session at release rule 4, or its current instance stops polling. The mod takes it as a
+ * rejected fetch, and says hello.
  */
 export const HELLO_FIRST = 'hello first'
 

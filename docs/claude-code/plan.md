@@ -804,6 +804,38 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Accepted as minor:**
     - The plugin's version-stop line JSON-encodes before it hides the token. The deck's token is hex, so nothing changes.
     - A held poll that drops more than 2 s after each quick hello cycles quietly, no faster than about 2 s a round, as the window allows.
+  - **Committed** as cfe4554. CLAUDE.md now runs `plugin test` under a time limit.
+- 2026-11-03, **round 3 live:**
+  - Released the plugin from cfe4554 (0.2.1); `deck-install.mjs status` says installed and current.
+  - Restarted only the Claude deck plugin, on 0.3.1. T2–T4 said hello with plugin 0.2.1 within 30 ms of the bridge listening.
+  - All 8 live checks pass, and nothing reached any session. The log has no warning, loop or stale line.
+- 2026-11-03, **round 4 for Phase 6, built and verified:**
+  - **PROTOCOL.md's amendment "2026-11-03, Phase 6, round 4",** no wire or fixture change:
+    - the forget keeps the hellos, and while no instance is current, any instance's hello makes its own current;
+    - no hello replaces a mode or effort the deck took from a PermissionRequest;
+    - wording: while another is current, a hello from an instance that never said hello is a restart. The bullet on instances that don't count had said it changes nothing.
+  - **Built:** workflow `wf_5907b8c6-531` covered deck and tools; the plugin is untouched. Each was built, reviewed adversarially, then refixed.
+    - **Deck 0.3.2:** `#unpolled` keeps `hellos`. `#makeCurrent` lets any hello make its instance current while none is, and moves it to the newest place. `take()` records where each of mode and effort came from (`from`). The UNPOLLED and 409 lines say which case it is.
+    - **Round 3's nits:** the registry's warn streak ends on any good stat; pins for the current tool kept at the forget, and for one UNPOLLED info line when a waiting prompt fails then.
+    - **Tools:** the fake deck mirrors both rules, with `settingsFrom` in the state. Its mod has the 2 s window, checked against bridge.ts's constants. Registry-missing is said again when the folder goes a second time. The log-kinds test runs on the default 60 s.
+    - **Both reviews passed with minors,** all gaps in the tests: the said-again rule was tested only with a PermissionRequest's mode, so a regression there passed; nothing pinned "nothing is failed or forgotten"; and a PermissionRequest equal to the shown mode wasn't pinned as its source. The fixers added the tests, with no source change.
+    - **I fixed the wording myself:** PROTOCOL.md's bullet on instances that don't count, the tools README's copy of it, and the fake's 409 line after the 60 s.
+  - **Verified on the main thread:**
+    - deck: typecheck; 301 of 301, also at +2 days and −7 days; build; validate.
+    - plugin: tsc; validate; 152 of 152; sync `--check`; sync tests 21 of 21.
+    - tools 218 of 218; install 10 of 10; recheck 32 ok; the fixtures regenerate unchanged.
+    - Eight mutations of my own on a scratch copy, each caught:
+      - the forget clears the hellos: deck 6 fail, fake 7;
+      - a hello replaces a PermissionRequest's mode: deck 7, fake 5;
+      - a listed instance's hello never makes it current: deck 16, fake 15;
+      - no move to the newest place: deck 1;
+      - a settings event recorded as a PermissionRequest's: deck 3.
+  - **Accepted, for the record:** only a PermissionRequest's mode and effort are protected.
+    - While none is current, a predecessor's hello can still replace a mode the live mod sent as `settings`. To do so it must land before the live mod's own hello, which comes within about 1.1 s.
+    - A stray's `settings` event can replace a PermissionRequest's mode. A dying process's engine rarely changes mode.
+    - Both are narrow, and both matter only through the Mode dial's press without a turn, which applies the shown mode. That's a design question for the user.
+  - **Also accepted as nits:** the fake has no test for moving to the newest place, nor for its 2 s window's length, nor for kind mode's source. The real deck has a test for the first. It takes kind mode's mode and effort as any PermissionRequest's, before its kind-mode branch.
+  - `claude-code/README.md`'s "When something's off" now covers a press that alerts because a session's plugin hasn't checked in for a minute.
 
 ## Progress
 
@@ -827,4 +859,10 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [ ] Phase 5: daily use. Started 2026-11-03 as an overnight run; the Log's last entry says where it stands.
   - Installed for the user's sessions, 2026-11-03: release f90bc6f in settings `env`.
   - Still to come: the user's morning checks, then a day of real use.
-- [ ] Phase 6: hardening
+- [ ] Phase 6: hardening. Overnight 2026-11-03; the Log's last entries say where it stands.
+  - Round 3 committed (cfe4554) and live: deck 0.3.1, plugin 0.2.1 released.
+    - It covers stale instances, repeated hellos, status rules 3 and 6, registry failures and the quick hello's window.
+    - It adds tests with 30 sessions, quieter info logs, and recheck checks for the summary loader and the engine's refusal wording.
+  - The guide is `claude-code/README.md`.
+  - Round 4 built and verified: deck 0.3.2. The plugin is unchanged, so 0.2.1 stays released.
+  - Still to come: a reboot (macOS 26's localhost delay), the next Claude app update with recheck, and a day of real use.

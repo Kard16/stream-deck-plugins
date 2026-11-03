@@ -162,14 +162,15 @@ export class RegistryReader {
 
 	async #readOne(key: string, file: string): Promise<RegistrySession | null> {
 		const cached = this.#cache.get(key);
+		let isFile: boolean;
 		let sig: string;
-		let text: string;
+		// Null when the file is unchanged since it was last read, or isn't a file: then it isn't read again.
+		let text: string | null = null;
 		try {
 			const st = await this.#fs.stat(file);
-			if (!st.isFile()) return null;
+			isFile = st.isFile();
 			sig = `${st.mtimeMs}:${st.size}:${st.ino}`;
-			if (cached && cached.sig === sig) return cached.good;
-			text = await this.#fs.readFile(file);
+			if (isFile && cached?.sig !== sig) text = await this.#fs.readFile(file);
 		} catch (err) {
 			// Gone between the listing and the read: the session ended. The next scan drops it.
 			const code = (err as NodeJS.ErrnoException).code ?? describeError(err).split("\n")[0] ?? "unknown";
@@ -180,7 +181,12 @@ export class RegistryReader {
 			}
 			return cached?.good ?? null;
 		}
+		// The stat went through, and so did the read if the file had changed: it reads again, from the file or, unchanged,
+		// from the cache. Whatever kept it from reading is over, so a later failure is warned of afresh, even one with the
+		// same code.
 		this.#fileProblems.delete(key);
+		if (!isFile) return null;
+		if (text === null) return cached?.good ?? null;
 		const parsed = parseSession(key, text);
 		if (parsed) {
 			this.#cache.set(key, { sig, good: parsed, broken: false });

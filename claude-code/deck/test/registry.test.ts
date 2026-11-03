@@ -294,6 +294,34 @@ describe("registry reader (~/.claude/sessions/*.json), against a temp folder", (
 		assert.equal(log.at("warn").length, 3);
 	});
 
+	test("a stat that fails, then succeeds on the unchanged file, ends the streak: the file comes from the cache, unread, and a later failure with the same code is warned of again", async () => {
+		write("1701.json", entry(1701, { status: "busy" }));
+		let fail = false;
+		let reads = 0;
+		const fs: RegistryFs = {
+			...nodeRegistryFs,
+			stat: (f) => (fail ? Promise.reject(Object.assign(new Error(`EACCES: ${f}`), { code: "EACCES" })) : nodeRegistryFs.stat(f)),
+			readFile: (f) => {
+				reads++;
+				return nodeRegistryFs.readFile(f);
+			},
+		};
+		const log = new RecordingLog();
+		const reader = new RegistryReader(dir, { fs, log });
+		const good = await reader.scan();
+		const warning = `warn can't read ${path.join(dir, "1701.json")} (EACCES): keeping its last good reading until it can`;
+		fail = true;
+		assert.deepEqual(await reader.scan(), good);
+		assert.deepEqual(await reader.scan(), good);
+		assert.deepEqual(log.at("warn"), [warning], "once for the streak");
+		fail = false;
+		assert.deepEqual(await reader.scan(), good);
+		assert.equal(reads, 1, "unchanged: from the cache");
+		fail = true;
+		assert.deepEqual(await reader.scan(), good);
+		assert.deepEqual(log.at("warn"), [warning, warning], "a new streak, warned of again");
+	});
+
 	test("the watcher tells listeners only when something changed", async () => {
 		const watcher = new RegistryWatcher(new RegistryReader(dir));
 		const seen: string[][] = [];
