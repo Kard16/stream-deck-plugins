@@ -239,7 +239,42 @@ describe("Mode dial", () => {
 		clock.advance(200);
 		assert.deepEqual(strip(), { target: "Session 2", mode: "—", meta: "— · —" });
 		dials.tap("m", false);
-		assert.equal(alerts(), 2, "nothing to apply, and the session has no plugin");
+		assert.equal(alerts(), 1, "no choice for this target, so the tap applies nothing");
+		assert.equal(model.commands.get("c2"), null);
+	});
+
+	test("a press or tap without a turn does nothing, though the strip shows the target's mode: no command, no alert", () => {
+		const { clock, model, dials, poll, strip, alerts } = modeSetup();
+		clock.advance(200);
+		assert.equal(strip().mode, "Manual");
+		const pressAndTap = (): void => {
+			dials.down("m");
+			dials.up("m");
+			dials.tap("m", false);
+		};
+		pressAndTap();
+		assert.deepEqual([poll.sent, alerts(), model.commands.get("c1")], [[], 0, null], "before any turn");
+		// After a choice goes back, on its own or on long-touch.
+		dials.rotate("m", 2, false);
+		clock.advance(COALESCE_MS + 100);
+		clock.advance(CHOICE_MS);
+		pressAndTap();
+		dials.rotate("m", 1, false);
+		clock.advance(COALESCE_MS + 100);
+		dials.tap("m", true);
+		pressAndTap();
+		assert.deepEqual([poll.sent, alerts(), model.commands.get("c1")], [[], 0, null], "after the choice went back");
+		// After a change is applied: its press sends one command, and the presses after it none.
+		dials.rotate("m", 1, false);
+		clock.advance(COALESCE_MS + 100);
+		dials.tap("m", false);
+		assert.deepEqual(JSON.parse(poll.sent[0] ?? "null"), { cmds: [{ id: "c1", t: "mode", mode: "acceptEdits" }] });
+		model.result({ host: "local_1", inst: "i", id: "c1", state: "done" });
+		model.events({ host: "local_1", inst: "i", seq: 1, events: [{ t: "settings", mode: "acceptEdits" }] });
+		clock.advance(200);
+		assert.equal(strip().mode, "Accept edits");
+		pressAndTap();
+		assert.deepEqual([alerts(), model.commands.get("c2")], [0, null], "after the change was applied");
 	});
 });
 

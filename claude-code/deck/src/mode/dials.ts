@@ -28,7 +28,9 @@ type Dial = {
 
 /**
  * The Mode dial, without the SDK. Turning chooses among Manual, Accept edits, Plan and Auto, one per tick,
- * stopping at either end; press (without turning) or tap asks the target session to change to the mode shown.
+ * stopping at either end; press (without turning) or tap asks the target session to change to the mode turned to.
+ * Without a turn, a press or tap does nothing (the user's choice, 2026-11-03): the dial then shows the target's
+ * own mode, which can lag the engine's for a moment, and applying it could put back an older one, a raise included.
  * The strip shows the target's title, its mode, and its model and effort, which the deck shows and never
  * changes. A change that's refused or fails alerts. Long-touch drops a choice that wasn't applied.
  */
@@ -160,10 +162,10 @@ export class ModeDials {
 			dial.surface.showAlert();
 			return;
 		}
-		const mode = this.#shown(dial);
+		// Only a mode turned to, never the target's own as shown.
+		const mode = dial.choice;
 		if (mode === null) {
-			this.#log.info(`Mode dial ${via}: no mode to apply; turn to choose one`);
-			dial.surface.showAlert();
+			this.#log.info(`Mode dial ${via}: no mode turned to, so nothing to apply`);
 			return;
 		}
 		if (!this.#model.online) {

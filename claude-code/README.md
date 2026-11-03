@@ -15,7 +15,7 @@ The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, d
 - **Sessions:** turn to scroll the running sessions on the strip. Each shows its title, status, context %, model and effort. Press or tap to jump to that session in the app and make it the target.
 - **Mode:** shows the target session's mode, model and effort.
   - Turn to choose Manual, Accept edits, Plan or Auto.
-  - Press or tap to apply it. Long-touch cancels the choice.
+  - Press or tap to apply it. Without a turn, a press or tap does nothing, so it can't re-apply a mode the deck shows a moment late. Long-touch cancels the choice.
   - Model and effort are shown, never changed.
 
 ## The keys

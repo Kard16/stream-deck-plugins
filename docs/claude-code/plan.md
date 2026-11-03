@@ -76,6 +76,7 @@ Facts from this Mac that the research didn't have. They're undocumented unless m
 | Toolchain | Node 24, `@elgato/streamdeck` 3.0.4, `@elgato/cli` 1.10.4 and SDK 3, as for Lightroom. The mod is TypeScript, checked with `tsc` and with the app's own `claude` 2.1.309 (`plugin validate`, `plugin test`), not the 2.1.312 CLI. | CLAUDE.md; kickoff checks |
 | Development safety | The Claude Code plugin loads only in throwaway sessions the main thread starts (open question 1). Never user-wide, never through `~/.claude/settings.json`, never in this session's mods folder. Agents never approve, deny, send a prompt or change a setting in a session the main thread didn't start. | The user, at kickoff |
 | Names | `claude-code/deck/` (`com.karimdhanji.claude.sdPlugin`), `claude-code/plugin/` (`streamdeck-bridge`), `claude-code/protocol/`, `claude-code/tools/`, `claude-code/sandbox/`. | This plan |
+| Mode dial press | A press or tap applies only a mode the dial was turned to. Without a turn it does nothing, so it can't re-apply a mode the deck shows a moment late. | The user, 2026-11-03 |
 
 ## Open questions for the user
 
@@ -858,6 +859,16 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   9. **A design question:** should a Mode dial press without a turn do nothing, rather than apply the mode it shows? That would close the stale-mode residue that round 4 accepted.
   10. **A day of real use,** with the deck's log at debug. Then the main thread reads the logs.
   - To take the plugin back out of the user's sessions: `deck-install.mjs undo`.
+- 2026-11-03, **the Mode dial's press without a turn now does nothing** (checklist item 9, the user's answer):
+  - **Deck 0.3.3:** `#apply` in `src/mode/dials.ts` applies only `choice`, the mode turned to, and never the target's own mode as shown. Without a choice, a press or tap logs one info line and sends nothing, with no alert. That closes round 4's accepted stale-mode residue: a mode the deck shows a moment late can no longer be re-applied.
+  - **Tests:**
+    - A new test covers a press or tap without a turn: before any turn, after a choice goes back on its own or on long-touch, and after an applied change. Each sends nothing and alerts nothing.
+    - The carry-over test now expects a tap for a new target to apply nothing, rather than alert.
+  - **Verified:** typecheck; 302 of 302; build; validate.
+  - **Breaks, each on a scratch copy against an unbroken control (302 of 302):**
+    - re-applying the shown mode fails the new test;
+    - alerting on an unturned press fails both.
+  - `claude-code/README.md`'s Mode dial bullet says so.
 
 ## Progress
 
@@ -887,5 +898,5 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - It adds tests with 30 sessions, quieter info logs, and recheck checks for the summary loader and the engine's refusal wording.
   - The guide is `claude-code/README.md`.
   - Round 4 committed (86054e1) and live: deck 0.3.2; the plugin is unchanged, so 0.2.1 stays released.
-  - The overnight scope is done. The user's checklist is in the Log's last entry.
+  - The overnight scope is done. The user's checklist is in the Log's last entries; item 9 is answered, and deck 0.3.3 does it.
   - Still to come: a reboot (macOS 26's localhost delay), the next Claude app update with recheck, and a day of real use.
