@@ -12,9 +12,10 @@ import test from 'node:test'
 import { controlClient } from '../lib/client.mjs'
 import { EXPECT_SKIPPED, againstFake, interactive } from '../lib/drivers.mjs'
 import { fixtureFiles, parseFixture, readFixture } from '../lib/fixtures.mjs'
+import * as P from '../lib/play.mjs'
 import { play } from '../lib/play.mjs'
 import { ALLOW, DENY, MODE_TOOL, PRE_ALLOW, ROUTES } from '../lib/protocol.mjs'
-import { runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
+import { TOOLS, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const NAMES = fixtureFiles().map((f) => readFixture(f).name)
 
@@ -26,8 +27,8 @@ async function playAgainstFake(t, fx, env = tempEnv(t)) {
   return { r, steps, bridge, env }
 }
 
-test('play: there are 18 fixtures to play', () => {
-  assert.equal(NAMES.length, 18)
+test('play: there are 19 fixtures to play', () => {
+  assert.equal(NAMES.length, 19)
 })
 
 for (const name of NAMES) {
@@ -44,7 +45,7 @@ for (const name of NAMES) {
   })
 }
 
-test('play: all 18 in a row against one fake bridge, reset between fixtures', async (t) => {
+test('play: all 19 in a row against one fake bridge, reset between fixtures', async (t) => {
   const env = tempEnv(t)
   const bridge = await startBridge(t, env)
   const driver = againstFake({ url: bridge.url, token: env.token })
@@ -71,7 +72,7 @@ test('play: all 18 in a row against one fake bridge, reset between fixtures', as
 // on how its own clock compares with them, or the fixtures would pass or fail by the date.
 const T0 = 1793600000000
 for (const [label, offset] of [['a week after', 7 * 86_400_000], ['a week before', -7 * 86_400_000]]) {
-  test(`play: all 18 pass with the bridge's clock ${label} the fixtures' times`, async (t) => {
+  test(`play: all 19 pass with the bridge's clock ${label} the fixtures' times`, async (t) => {
     const env = tempEnv(t)
     const started = Date.now()
     const bridge = await startBridge(t, env, { now: () => T0 + offset + (Date.now() - started) })
@@ -308,6 +309,22 @@ test("play: an answer to a mode check is held to PROTOCOL.md's two bodies, when 
   assert.match(r.error ?? 'passed', /^line 2 \(plugin\): POST \/v1\/pretool: body\.systemMessage: Claude Code acts on it/)
 })
 
+/**
+ * What README.md's ladder step 5 says a fixture still checks against a real deck, from its list "By what each fixture
+ * still checks against such a deck": the text after the clause that names it, `` `a`, `b` and `c`: what they check. ``,
+ * up to the next such clause; null when no clause names it.
+ */
+function step5Says(name) {
+  const readme = fs.readFileSync(path.join(TOOLS, 'README.md'), 'utf8')
+  const list = readme.split('By what each fixture still checks against such a deck:\n')[1]?.split('\n\n')[0] ?? ''
+  for (const line of list.split('\n').filter((l) => l.startsWith('- '))) {
+    for (const m of line.slice(2).matchAll(/((?:`[\w-]+`(?:, | and )?)+): (.*?)(?=(?: (?:`[\w-]+`(?:, | and )?)+: )|$)/g)) {
+      if ([...m[1].matchAll(/`([\w-]+)`/g)].some((x) => x[1] === name)) return m[2]
+    }
+  }
+  return null
+}
+
 /** The replies and presses a play skipped, without the expect lines the interactive driver always skips. */
 const repliesAndPresses = (r) => r.skipped.filter((s) => s.expect === undefined)
 
@@ -539,6 +556,14 @@ test('play: the interactive driver skips and reports every expect line of every 
     const replies = fx.lines.filter((l) => l.kind === 'reply').length
     assert.equal(r.checked + repliesAndPresses(r).filter((s) => s.reply !== undefined).length, replies, `${name}: only replies are checked`)
     expects += expectLines(fx).length
+    // README.md's step-5 list says what each fixture still checks against such a deck: its hello, when one is checked.
+    const routes = new Map(fx.lines.filter((l) => l.kind === 'plugin' && l.value.as).map((l) => [l.value.as, l.value.path.split('?')[0]]))
+    const skippedReplies = new Set(r.skipped.filter((s) => s.reply !== undefined).map((s) => s.reply))
+    const checked = fx.lines.filter((l) => l.kind === 'reply' && !skippedReplies.has(l.value.to)).map((l) => l.value.to)
+    const says = step5Says(name)
+    assert.notEqual(says, null, `README.md's step-5 list names ${name}`)
+    if (checked.some((label) => routes.get(label) === '/v1/hello')) assert.match(says, /hello/, `${name}: README.md says it checks its hello`)
+    assert.equal(/^nothing\b/.test(says), checked.length === 0, `${name}: README.md says "${says}", and it checks ${checked.join(', ') || 'nothing'}`)
   }
   assert.ok(expects >= NAMES.length, `the fixtures have ${expects} expect lines`)
   assert.deepEqual(asked, [], 'no question at all')
@@ -611,6 +636,31 @@ test("play: the interactive driver skips a hook's reply only when it expects a d
   }
 })
 
+test('play: the interactive driver asks for an Approve or Deny press only when a request fake-claude sent has had no answer HOOK_AT_ONCE_MS after it was sent, by its own clock', async (t) => {
+  // A deck that doesn't confirm the request's session answers it {} at once, after one more reading of its registry
+  // at most. A slow reading isn't a held request: the driver doesn't decide by how long it slept after sending.
+  assert.deepEqual([P.HOOK_AT_ONCE_MS, Object.hasOwn(P, 'AT_ONCE_MS')], [500, false], "not to be confused with protocol.mjs's AT_ONCE_MS")
+  const fx = fixtureOf('press', [
+    { plugin: { as: 'p1', method: 'POST', path: '/v1/permission', headers: { 'X-Deck-Host': HOST_A }, body: { session_id: SID_A, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } } } },
+    { press: { approve: {} } },
+    { reply: { to: 'p1', status: 200, body: ALLOW } },
+  ])
+  for (const [delayMs, asked, ok] of [[0, false, true], [250, false, true], [700, true, false]]) {
+    const shown = []
+    const driver = interactive({ ui: { show: (s) => shown.push(s), ask: async () => '' }, pressTimeoutMs: 1500 })
+    const url = await scriptedDeck(t, { [ROUTES.permission]: () => [200, {}, delayMs] })
+    const r = await play(fx, { url, token: 'stub', driver })
+    const pressed = shown.some((s) => s.startsWith('PRESS: press Approve.'))
+    assert.deepEqual([pressed, r.ok], [asked, ok], `{} after ${delayMs} ms: ${r.error}\n${shown.join('\n')}`)
+    if (!asked) {
+      assert.deepEqual(r.skipped.map((s) => s.press ?? s.reply), ['approve', 'p1'])
+      assert.ok(shown.includes('skip: press approve: nothing fake-claude sent is held'))
+    } else {
+      assert.match(r.error, /^line 4 \(reply\): p1: body\.hookSpecificOutput: missing/, 'held past the threshold, then answered {}: checked as it is')
+    }
+  }
+})
+
 test('play: the interactive driver skips a poll\'s 409 hello first only when a skipped registry line removed the session\'s file since its hello; any other is checked', async (t) => {
   // hello-again's n2: the fixture's deck forgot the session when its file went (release rule 4). A deck that reads
   // another registry never did, and holds the poll. A 409 for a session no instance said hello for is checked.
@@ -629,6 +679,12 @@ test('play: the interactive driver skips a poll\'s 409 hello first only when a s
     { registry: { pid: 202, gone: true } }, next('n1'), first('n1'),
   ], [file, { pid: 202, sessionId: 'sid-b', hostSessionId: 'local_test-b', status: 'idle', statusUpdatedAt: T0 }]), { url: bridge.url, token: env.token, driver })
   assert.deepEqual([r.ok, r.checked, r.skipped], [true, 1, []], r.error)
+  // Nor does one that removes one of two files listing this session's host: the other still lists it (release rule 4).
+  r = await play(fixtureOf('one-of-two-gone', [
+    helloLine, { registry: { pid: 101, gone: true } }, next('n1', 0), first('n1'),
+  ], [file, { ...file, pid: 102, startedAt: T0 + 5 }]), { url: bridge.url, token: env.token, driver })
+  assert.deepEqual([r.ok, r.skipped], [false, []], 'checked, not skipped')
+  assert.match(r.error, /^line 5 \(reply\): n1: status: expected 409, got 200 \{"cmds":\[\]\}$/, 'and this deck, which has the hello, answers the poll')
   // Removed, then a hello: the deck has one from the mod again, so a 409 after it is checked too, and this deck, which
   // answers the poll (wait 0) with none, fails it.
   r = await play(fixtureOf('gone-then-hello', [

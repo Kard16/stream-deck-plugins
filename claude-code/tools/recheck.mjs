@@ -1,20 +1,25 @@
 #!/usr/bin/env node
 // recheck: after a Claude app update, says whether the undocumented internals the deck and the plugin rely on
 // still hold (docs/claude-code/plan.md, Phase 6; what each one is and how it was found is in the plan's Log,
-// S0–S5). Five checks:
+// S0–S5). Six checks:
 // 1. Versions: the app's, from its Info.plist, and the Claude Code versions it bundles. It warns when the newest
 //    isn't CHECKED_CC_VERSION, the one claude-code/vendor/mods-api-2.1.309/ and these checks are for.
 // 2. The session registry, ~/.claude/sessions/*.json: every field the deck reads (REGISTRY_FIELDS), by type.
 // 3. The app's session records, claude-code-sessions/<account>/<org>/local_*.json: the same (RECORD_FIELDS),
 //    and whether each running session's record is found by its id, as the deck finds it.
 // 4. The app bundle, app.asar, scanned with Buffer.indexOf: the jump route, the needs-input route, the local_
-//    id pattern and the mode tool (BUNDLE_CHECKS).
+//    id pattern, the mode tool, and the record loader's summary fields and, just after them, its is_noteworthy check
+//    (BUNDLE_CHECKS).
 // 5. The mods API: the newest bundled Claude Code's `plugin validate` and `plugin test` on claude-code/plugin as
 //    committed (git HEAD, since the working tree may be mid-edit), with a fresh CLAUDE_CONFIG_DIR and HOME.
+// 6. The engine's words: how the newest bundled Claude Code words a $.mcp.call it refuses, which the mod reads to
+//    report a refused mode change (ENGINE_CHECKS).
 //
 // Read only. It writes nothing outside a temp folder it removes, never opens the registry's .key files or a
 // transcript, never reads the deck's token, and prints field names and counts, never a value from the
 // registry or the records: they hold session titles and summaries. Node 24, no dependencies.
+//
+// Checks 4 and 6 find strings, not behaviour: after an update, still try one jump and one mode change on the deck.
 
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -61,6 +66,26 @@ export const MODE_NAMES = Object.freeze(['default', 'acceptEdits', 'plan', 'auto
 const DECK = 'claude-code/deck/src'
 const REGISTRY_TS = `${DECK}/registry/registry.ts`
 const RECORDS_TS = `${DECK}/records/records.ts`
+const PROTOCOL = 'claude-code/protocol/PROTOCOL.md'
+const COMMANDS_TS = 'claude-code/plugin/hooks/commands.ts'
+
+/**
+ * The post-turn summary's fields that the app's record loader keeps only when each is missing or a string, in the
+ * order app 4.4212.0 lists them (its `OM` walks the list; PROTOCOL.md, status rule 6). claude-code/tools/lib/
+ * registry.mjs's SUMMARY_FIELDS is the same list, which the tests hold it to.
+ */
+export const SUMMARY_FIELDS = Object.freeze(['title', 'description', 'status_category', 'status_detail', 'recent_action', 'needs_action', 'summarizes_uuid'])
+
+/**
+ * Why the app's record loader drops a post-turn summary, or null when it keeps it: its `OM`. Not an object, an array,
+ * a listed field that's there and not a string (null included), or an is_noteworthy that's there and not a boolean.
+ */
+export function summaryDropped(v) {
+  if (!isObj(v)) return kind(v)
+  for (const f of SUMMARY_FIELDS) if (v[f] !== undefined && typeof v[f] !== 'string') return "object the app's loader drops"
+  if (v.is_noteworthy !== undefined && typeof v.is_noteworthy !== 'boolean') return "object the app's loader drops"
+  return null
+}
 
 const kind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v)
 const isObj = (v) => kind(v) === 'object'
@@ -135,9 +160,11 @@ export const RECORD_FIELDS = Object.freeze([
     check: (v) => aNonEmptyString(v) ?? (MODE_NAMES.includes(v) ? null : 'mode the deck has no name for'),
   },
   {
-    field: 'postTurnSummary', expect: 'object with a string status_category', need: 'required', presence: 'sparse', reads: [RECORDS_TS, 'isObj(o.postTurnSummary)'],
-    why: "Status rule 6, the app's own needs-input indicator, reads its status_category.",
-    check: (v) => (!isObj(v) ? kind(v) : typeof v.status_category === 'string' ? null : 'object without a string status_category'),
+    // The deck reads a summary only as the app's loader keeps it (PROTOCOL.md, status rule 6), so one the loader drops
+    // counts as no summary.
+    field: 'postTurnSummary', expect: 'object with a string status_category', need: 'required', presence: 'sparse', reads: [RECORDS_TS, '(o.postTurnSummary)'],
+    why: "Status rule 6, the app's own needs-input indicator, reads its status_category, from a summary the app's loader keeps.",
+    check: (v) => summaryDropped(v) ?? (typeof v.status_category === 'string' ? null : 'object without a string status_category'),
   },
   {
     field: 'postTurnSummaryFor', expect: 'string', need: 'required', presence: 'sparse', reads: [RECORDS_TS, 'typeof o.postTurnSummaryFor === "string"'],
@@ -172,9 +199,23 @@ export const RECORD_FIELDS = Object.freeze([
 ])
 
 /**
+ * The record loader's summary fields as the app's bundle lists them (`var wM=[…];` in app 4.4212.0), and a pair of them
+ * that a list with a field more still has. Both are in that bundle once, in that list.
+ */
+const SUMMARY_LIST = JSON.stringify(SUMMARY_FIELDS)
+const SUMMARY_PAIR = '"status_category","status_detail"'
+/**
+ * How far after the loader's field list its is_noteworthy check may begin, in bytes: 523 in app 4.4212.0, where the
+ * same check in the app's other summary validator is 14 MB on.
+ */
+export const LOADER_SPAN = 2048
+
+/**
  * What the deck and the mod use from the app's code, as strings in app.asar. Each needle says how bad its absence is:
  * `fail` for the deck's own route or tool, `warn` where the absence alone doesn't prove a change. A `looser` needle
- * found in place of a missing one turns its fail into a warn: the thing is there, changed. `sources` are where the
+ * found in place of a missing one turns its fail into a warn: the thing is there, changed. A needle with `after`
+ * counts only where it lies wholly in the `within` bytes after an occurrence of the first of `after.texts` that the
+ * bundle has, and so does its looser one: the same words elsewhere are another piece of code. `sources` are where the
  * needle comes from (a file and a fragment of its line), cited with their line in the JSON output.
  */
 const PLAN = 'docs/claude-code/plan.md'
@@ -214,6 +255,44 @@ export const BUNDLE_CHECKS = Object.freeze([
       { text: 'ccd_session_mgmt', ifMissing: 'fail', sources: [[`${DECK}/protocol/wire.ts`, 'export const MODE_TOOL'], [PLAN, 'tool_name: mcp__ccd_session_mgmt__set_session_permission_mode']] },
       { text: 'set_session_permission_mode', ifMissing: 'fail', sources: [[`${DECK}/protocol/wire.ts`, 'export const MODE_TOOL'], [PLAN, 'tool_name: mcp__ccd_session_mgmt__set_session_permission_mode']] },
     ],
+  },
+  {
+    id: 'summary-loader', name: 'summary loader',
+    why: "Status rule 6 reads a record's postTurnSummary only as the app's loader keeps it: these seven fields each missing or a string, and is_noteworthy missing or a boolean (PROTOCOL.md, status rule 6).",
+    needles: [
+      // App 4.4212.0's record loader: `var wM=[…];` and its OM, which keeps a summary only when each of these is missing
+      // or a string. A list with a field more or less no longer matches the deck's, though the pair is still there.
+      { text: SUMMARY_LIST, ifMissing: 'fail', looser: SUMMARY_PAIR, sources: [[PROTOCOL, '**A valid summary** is a `postTurnSummary` object']] },
+      // OM's `if(typeof t.is_noteworthy!="boolean")return;`, which follows the list it walks. Only there: the app's other
+      // summary validator has the same words, and still would were OM to stop checking. After the pair when the list
+      // changed, so the check is still looked for where the loader is.
+      {
+        text: 'is_noteworthy!="boolean"', ifMissing: 'fail', looser: 'is_noteworthy',
+        after: { what: 'the field list', texts: [SUMMARY_LIST, SUMMARY_PAIR], within: LOADER_SPAN },
+        sources: [[PROTOCOL, 'whose `is_noteworthy` is missing or a boolean']],
+      },
+    ],
+  },
+])
+
+/**
+ * What the mod reads from the engine's own words, in the newest bundled Claude Code's binary, which embeds its
+ * JavaScript. 2.1.309 refuses a `$.mcp.call` with `${s.plugin}: $.mcp.call(${e}, ${n}) refused: ${q.deny}`, the server
+ * and the tool between the parentheses; the mod finds `$.mcp.call(ccd_session_mgmt, set_session_permission_mode)
+ * refused: ` in a rejection's message to report a mode change the engine refused as `refused`, with its reason
+ * (refusalOf, claude-code/plugin/hooks/commands.ts; PROTOCOL.md, Commands). Worded otherwise, the mod reports it
+ * `failed`, with the whole message, which the deck shows as it shows `refused`: so a change only warns. `template` is
+ * the shape found after each `text`, in at most `within` bytes.
+ */
+export const ENGINE_CHECKS = Object.freeze([
+  {
+    id: 'mcp-refused', name: 'refused $.mcp.call',
+    why: "The mod reports a mode change the engine refuses as refused, with the engine's reason, by finding these words in the rejection (refusalOf in claude-code/plugin/hooks/commands.ts); worded otherwise, it reports failed, with the whole message.",
+    text: '$.mcp.call(',
+    template: /^\$\.mcp\.call\(\$\{[\w$.]{1,40}\}, \$\{[\w$.]{1,40}\}\) refused: \$\{/,
+    refused: ') refused: ',
+    within: 120,
+    sources: [[COMMANDS_TS, 'const MODE_CALL_REFUSED = '], [PROTOCOL, '`$.mcp.call(<server>, <tool>) refused: <reason>` in 2.1.309']],
   },
 ])
 
@@ -556,12 +635,31 @@ export async function checkRecords(root = DEFAULTS.records, hosts = [], { fs: fs
 
 // ---- 4. the app bundle
 
-/** How many times `text` occurs in `buf`, without overlaps. */
-export function countHits(buf, text) {
+/**
+ * How many times `text` occurs in `buf`, without overlaps; with `spans`, `[from, to)` byte ranges, only the times it
+ * lies wholly inside one of them.
+ */
+export function countHits(buf, text, spans = null) {
   const needle = Buffer.from(text, 'utf8')
   let n = 0
-  for (let i = buf.indexOf(needle); i !== -1; i = buf.indexOf(needle, i + needle.length)) n++
+  for (let i = buf.indexOf(needle); i !== -1; i = buf.indexOf(needle, i + needle.length)) {
+    if (spans === null || spans.some(([from, to]) => i >= from && i + needle.length <= to)) n++
+  }
   return n
+}
+
+/**
+ * Where a needle with `after` counts: the `within` bytes after each occurrence of the first of `after.texts` that `buf`
+ * has, as `[from, to)` ranges. None when it has none of them.
+ */
+export function spansAfter(buf, after) {
+  for (const text of after.texts) {
+    const needle = Buffer.from(text, 'utf8')
+    const spans = []
+    for (let i = buf.indexOf(needle); i !== -1; i = buf.indexOf(needle, i + needle.length)) spans.push([i + needle.length, i + needle.length + after.within])
+    if (spans.length) return spans
+  }
+  return []
 }
 
 export async function checkBundle(file = DEFAULTS.asar, { fs: fsys = nodeFs } = {}) {
@@ -575,20 +673,32 @@ export async function checkBundle(file = DEFAULTS.asar, { fs: fsys = nodeFs } = 
   const rows = [row(G, 'bundle', 'app bundle', 'ok', `${tilde(file)}, ${(buf.length / 1e6).toFixed(1)} MB`, { bytes: buf.length })]
   for (const spec of BUNDLE_CHECKS) {
     const needles = spec.needles.map((n) => {
-      const hits = countHits(buf, n.text)
-      const looserHits = hits === 0 && n.looser ? countHits(buf, n.looser) : null
+      const spans = n.after ? spansAfter(buf, n.after) : null
+      const hits = countHits(buf, n.text, spans)
+      const looserHits = hits === 0 && n.looser ? countHits(buf, n.looser, spans) : null
+      // Where it must be, as people read it, and how often it's in the bundle elsewhere when it isn't there.
+      const where = n.after ? ` within ${n.after.within} bytes after ${n.after.what}` : ''
+      const elsewhere = n.after && hits === 0 ? countHits(buf, n.text) : null
       const status = hits ? 'ok' : looserHits ? 'warn' : n.ifMissing
-      return { text: n.text, hits, ...(n.looser ? { looser: n.looser, looserHits } : {}), ifMissing: n.ifMissing, status, sources: n.sources.map(cite) }
+      return {
+        text: n.text, hits, ...(n.after ? { after: n.after.what, within: n.after.within, anchors: spans.length, elsewhere } : {}),
+        ...(n.looser ? { looser: n.looser, looserHits } : {}), ifMissing: n.ifMissing, status, where, sources: n.sources.map(cite),
+      }
     })
     const status = worst(needles.map((n) => n.status))
     let reason
-    if (status === 'ok') reason = needles.map((n) => `${n.text} ×${n.hits}`).join(', ')
+    if (status === 'ok') reason = needles.map((n) => `${n.text} ×${n.hits}${n.where}`).join(', ')
     else {
-      const gone = needles.filter((n) => n.status !== 'ok').map((n) => (n.looserHits ? `${n.text} not found, though ${n.looser} is (×${n.looserHits}), so it changed` : `${n.text} not found`))
-      const there = needles.filter((n) => n.status === 'ok').map((n) => `${n.text} ×${n.hits}`)
+      const gone = needles.filter((n) => n.status !== 'ok').map((n) => {
+        let s = `${n.text} not found${n.where}`
+        if (n.elsewhere) s += `, only elsewhere in the bundle (×${n.elsewhere})`
+        if (n.looserHits) s += `, though ${n.looser} is (×${n.looserHits}), so it changed`
+        return s
+      })
+      const there = needles.filter((n) => n.status === 'ok').map((n) => `${n.text} ×${n.hits}${n.where}`)
       reason = `${gone.join('; ')}${there.length ? ` (found: ${there.join(', ')})` : ''}. ${spec.why}`
     }
-    rows.push(row(G, `bundle.${spec.id}`, `bundle: ${spec.name}`, status, reason, { needles }))
+    rows.push(row(G, `bundle.${spec.id}`, `bundle: ${spec.name}`, status, reason, { needles: needles.map(({ where, ...n }) => n) }))
   }
   return rows
 }
@@ -783,6 +893,57 @@ export async function checkModsApi({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, r
   }
 }
 
+// ---- 6. the engine's words
+
+/**
+ * How often `spec.text` occurs in `buf`, and what follows it, read as Latin-1, in at most `spec.within` bytes:
+ * `template`, the engine's own shape; `near`, `spec.refused` in another shape; and `all` of them.
+ */
+export function engineHits(buf, spec) {
+  const needle = Buffer.from(spec.text, 'utf8')
+  const hits = { all: 0, template: 0, near: 0 }
+  for (let i = buf.indexOf(needle); i !== -1; i = buf.indexOf(needle, i + needle.length)) {
+    hits.all++
+    const after = buf.subarray(i, i + spec.within).toString('latin1')
+    if (spec.template.test(after)) hits.template++
+    else if (after.includes(spec.refused)) hits.near++
+  }
+  return hits
+}
+
+/**
+ * Check 6: the newest bundled Claude Code's binary, which embeds the engine's JavaScript, scanned for the words the
+ * mod reads (ENGINE_CHECKS). Read only, and fast: no process is run.
+ */
+export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs: fsys = nodeFs } = {}) {
+  const G = 'engine'
+  const cc = await findClaudeCode(claudeCodeRoot, { fs: fsys })
+  if (cc.error) return [row(G, 'engine', 'engine', 'fail', `can't list ${tilde(claudeCodeRoot)}: ${cc.error}`)]
+  if (cc.newest === null) return [row(G, 'engine', 'engine', 'fail', `no Claude Code version folder in ${tilde(claudeCodeRoot)}`)]
+  if (cc.binary === null) return [row(G, 'engine', 'engine', 'fail', `no claude binary at ${tilde(path.join(claudeCodeRoot, cc.newest))}/*/claude.app/Contents/MacOS/claude`)]
+  let buf
+  try {
+    buf = await fsys.readFile(cc.binary)
+  } catch (err) {
+    return [row(G, 'engine', 'engine', 'fail', `can't read ${tilde(cc.binary)}: ${errCode(err)}`)]
+  }
+  const rows = [row(G, 'engine', 'engine', 'ok', `Claude Code ${cc.newest}, ${(buf.length / 1e6).toFixed(1)} MB`, { version: cc.newest, binary: cc.binary, bytes: buf.length })]
+  for (const spec of ENGINE_CHECKS) {
+    const hits = engineHits(buf, spec)
+    const shape = `${spec.text}<server>, <tool>${spec.refused}<reason>`
+    let status = 'ok'
+    let reason = `${shape} ×${hits.template}, as the mod reads it`
+    if (!hits.template) {
+      status = 'warn'
+      reason = hits.near
+        ? `${shape} not found, though ${spec.text}…${spec.refused.trim()} is (×${hits.near}), so it changed. ${spec.why}`
+        : `${shape} not found${hits.all ? ` (found: ${spec.text} ×${hits.all})` : ''}. ${spec.why}`
+    }
+    rows.push(row(G, `engine.${spec.id}`, `engine: ${spec.name}`, status, reason, { version: cc.newest, text: spec.text, template: spec.template.source, ...hits, sources: spec.sources.map(cite) }))
+  }
+  return rows
+}
+
 // ---- all of it
 
 /** Runs the checks in order. `paths` overrides DEFAULTS; `skipPlugin` leaves out check 5. */
@@ -797,6 +958,7 @@ export async function recheck({ skipPlugin = false, fs: fsys = nodeFs, tmpRoot, 
   const skipped = []
   if (skipPlugin) skipped.push('mods')
   else checks.push(...(await checkModsApi({ claudeCodeRoot: paths.claudeCodeRoot, repo: paths.repo, tmpRoot, timeoutMs, fs: fsys })))
+  checks.push(...(await checkEngine({ claudeCodeRoot: paths.claudeCodeRoot, fs: fsys })))
   const summary = { ok: 0, warn: 0, fail: 0 }
   for (const c of checks) summary[c.status]++
   return { ok: summary.fail === 0, summary, skipped, paths, checks }
@@ -837,9 +999,13 @@ from the registry or the records.
      newest isn't ${CHECKED_CC_VERSION}, which the vendored mods API reference and these checks are for.
   2. The session registry: each field the deck reads, by type, over the running sessions.
   3. The app's session records: the same, and whether each running session's record is found by its id.
-  4. The app bundle: the jump route, the needs-input route, the local_ id pattern and the mode tool.
+  4. The app bundle: the jump route, the needs-input route, the local_ id pattern, the mode tool, and
+     the record loader's summary fields and, just after them, its is_noteworthy check, which status
+     rule 6 relies on.
   5. The mods API: the newest bundled Claude Code's \`plugin validate\` and \`plugin test\` on
      ${PLUGIN_PATH} as committed (git HEAD), with a fresh CLAUDE_CONFIG_DIR and HOME. About 5 s.
+  6. The engine's words: how the newest bundled Claude Code words a refused $.mcp.call, which the
+     mod reads to report a refused mode change.
 
   --sessions DIR          the session registry (default ${tilde(DEFAULTS.sessions)})
   --records DIR           the app's session records (default ${tilde(DEFAULTS.records)})

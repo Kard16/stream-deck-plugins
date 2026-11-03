@@ -23,6 +23,8 @@
 // permission request must also be exactly one of PROTOCOL.md's three, and one to a mode check one of its two,
 // whatever its reply line expects, since it's what Claude Code acts on, or an error answer when it isn't 2xx.
 
+import { performance } from 'node:perf_hooks'
+
 import { hostHeader, send, within } from './client.mjs'
 import { Bindings, commandIdHook, mismatch, show } from './match.mjs'
 import { ALLOW, DENY, HOOK_ROUTES, MOD_ROUTES, PRE_ALLOW, ROUTES, summary } from './protocol.mjs'
@@ -39,13 +41,14 @@ export class PlayFailure extends Error {
 const MAY_HOLD = new Set([ROUTES.permission, ROUTES.next])
 
 /**
- * How soon an answer to one of Claude Code's requests counts as at once, by the time the client measured from sending
- * it to the answer's end. A deck that doesn't confirm the request's session answers it {} at once, after one more
- * reading of its registry at most ("Desktop sessions only"), which takes milliseconds; a press counts only once its
- * request has been on the key for 1 s ("Held requests"). So an answer this soon wasn't a press's, whenever the runner
- * happened to look, and a slower one is checked as it is.
+ * How soon an answer to one of Claude Code's requests, the hooks', counts as at once, by the time the client measured
+ * from sending it to the answer's end. A deck that doesn't confirm the request's session answers it {} at once, after
+ * one more reading of its registry at most ("Desktop sessions only"), which takes milliseconds; a press counts only
+ * once its request has been on the key for 1 s ("Held requests"). So an answer this soon wasn't a press's, whenever
+ * the runner happened to look, and a slower one is checked as it is. Not protocol.mjs's AT_ONCE_MS, the 60 s after a
+ * turn's end in which the deck answers a session's polls at once.
  */
-export const AT_ONCE_MS = 500
+export const HOOK_AT_ONCE_MS = 500
 
 /** Claude Code's requests, the hooks', whose answers Claude Code acts on. */
 const HOOKS = new Set(HOOK_ROUTES)
@@ -54,6 +57,16 @@ const MODS = new Set(MOD_ROUTES)
 const routeOf = (p) => p.split('?')[0]
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const SKIPPED = new Set(['note', 'mod', 'engine'])
+
+/** Resolves once `promise` settles, either way, or once `ms` have passed, whichever comes first. */
+function settledWithin(promise, ms) {
+  if (!(ms > 0)) return Promise.resolve()
+  let timer
+  const passed = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms)
+  })
+  return Promise.race([promise.then(() => {}, () => {}), passed]).finally(() => clearTimeout(timer))
+}
 
 /**
  * What Claude Code applies along with a PermissionRequest decision: a rewritten tool input, and rules,
@@ -175,12 +188,12 @@ export function replyMismatch(route, expected, actual, bindings, status = 200) {
  * under another sessionId (PROTOCOL.md, "Desktop sessions only"). No registry such a deck reads lists the fixture's
  * sessions, so it answers their hook requests {} at once, and takes a hello the fixture has refused. `entry` is the
  * labeled request, `want` the reply line, `r` the answer, whose `ms` the client measured: at once is within
- * AT_ONCE_MS of sending it.
+ * HOOK_AT_ONCE_MS of sending it.
  */
 function hangsOnRegistry(entry, want, r) {
   const decision = isObject(want.body) && Object.hasOwn(want.body, 'hookSpecificOutput')
   const none = r.status === 200 && isObject(r.json) && Object.keys(r.json).length === 0
-  const atOnce = Number.isFinite(r.ms) && r.ms <= AT_ONCE_MS
+  const atOnce = Number.isFinite(r.ms) && r.ms <= HOOK_AT_ONCE_MS
   if (HOOKS.has(entry.route) && decision && atOnce && none) {
     return "the deck answered {} at once, as it does for a session its registry doesn't confirm, and this mode skips registry lines: no registry it reads lists the fixture's session"
   }
@@ -217,7 +230,7 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
   let commandPressesSkipped = 0
   const result = { name: fx.name, ok: true, checked: 0, skipped: [] }
   const ctx = {
-    fx, bindings, created: [], say, open: () => openHeld(), skip: (s) => result.skipped.push(s),
+    fx, bindings, created: [], say, held: () => heldNow(), skip: (s) => result.skipped.push(s),
     /** Whether command `label` (c1, c2…) can't have been queued: a Saved Prompt or Mode press was skipped, and it isn't bound. */
     unsent: (label) => commandPressesSkipped > 0 && bindings.real('cmd', label) === undefined,
   }
@@ -259,15 +272,22 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     return real
   }
 
-  /** The permission requests still waiting for an answer, oldest first, as the key would show them. */
-  function openHeld() {
-    return [...labeled.values()]
-      .filter((e) => e.route === ROUTES.permission && !e.handle.settled)
-      .map((e) => {
-        const b = isObject(e.line.value.body) ? e.line.value.body : {}
-        const tool = typeof b.tool_name === 'string' ? b.tool_name : '?'
-        return { label: e.line.value.as, host: e.line.value.headers?.['X-Deck-Host'] ?? null, tool, summary: summary(tool, b.tool_input) }
-      })
+  /** The labeled permission requests whose answer hasn't come, oldest first. */
+  const unanswered = () => [...labeled.values()].filter((e) => e.route === ROUTES.permission && !e.handle.settled)
+
+  /**
+   * The permission requests the deck holds, oldest first, as the key would show them: those with no answer
+   * HOOK_AT_ONCE_MS after they were sent, by the client's own clock. It waits for that time to pass for each request
+   * still within it: an answer by then was given at once, as a deck that doesn't confirm the request's session gives
+   * {}, whenever the runner happened to look, and holds nothing for a press.
+   */
+  async function heldNow() {
+    await Promise.all(unanswered().map((e) => settledWithin(e.handle.answer, e.handle.started + HOOK_AT_ONCE_MS - performance.now())))
+    return unanswered().map((e) => {
+      const b = isObject(e.line.value.body) ? e.line.value.body : {}
+      const tool = typeof b.tool_name === 'string' ? b.tool_name : '?'
+      return { label: e.line.value.as, host: e.line.value.headers?.['X-Deck-Host'] ?? null, tool, summary: summary(tool, b.tool_input) }
+    })
   }
 
   /** The kind of the next line that does something, past notes and lines for the plugin side. */

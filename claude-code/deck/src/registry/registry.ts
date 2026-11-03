@@ -89,15 +89,22 @@ type Cached = {
 
 /**
  * Reads the registry folder. Each scan lists it again: new files are added, changed ones re-read, deleted ones
- * dropped. A file that doesn't parse, because it was caught half-written, keeps its last good record; a new
- * file that doesn't parse yet is left out until it does. A missing folder is an empty list.
+ * dropped. A file that doesn't parse, because it was caught half-written, or can't be read, keeps its last good
+ * record; a new one is left out until it reads and parses. A missing folder is an empty list: no sessions. A
+ * folder that can't be listed for any other reason changes nothing: the scan returns the last reading as it was,
+ * so no session ends on its account (PROTOCOL.md, The deck's session model).
  */
 export class RegistryReader {
 	readonly #dir: string;
 	readonly #fs: RegistryFs;
 	readonly #log: Log;
 	readonly #cache = new Map<string, Cached>();
-	#folderProblem: string | null = null;
+	/** What the last scan found wrong with the folder: missing (ENOENT), or unreadable for another reason. */
+	#folderProblem: "missing" | "unreadable" | null = null;
+	/** By key, why a file couldn't be read at the last scan that tried: logged once until it reads again. */
+	readonly #fileProblems = new Map<string, string>();
+	/** The last reading: what a scan returns when it can't list the folder. */
+	#last: RegistrySession[] = [];
 
 	constructor(dir: string, opts: { fs?: RegistryFs; log?: Log } = {}) {
 		this.#dir = dir;
@@ -109,17 +116,31 @@ export class RegistryReader {
 		return this.#dir;
 	}
 
+	/**
+	 * The sessions the folder lists now, oldest first. A folder that doesn't exist lists none. One that can't be listed
+	 * otherwise gives the last reading again. Either problem is warned of once, until a scan lists the folder again,
+	 * which is logged at info.
+	 */
 	async scan(): Promise<RegistrySession[]> {
 		let names: string[];
 		try {
 			names = await this.#fs.readdir(this.#dir);
 		} catch (err) {
-			const code = (err as NodeJS.ErrnoException).code ?? describeError(err);
-			// Logged once per kind of problem, not every second.
-			if (this.#folderProblem !== code) this.#log.warn(`can't list ${this.#dir} (${code}): no sessions`);
-			this.#folderProblem = code;
-			this.#cache.clear();
-			return [];
+			const code = (err as NodeJS.ErrnoException).code ?? describeError(err).split("\n")[0] ?? "unknown";
+			if (code === "ENOENT") {
+				// No folder, no sessions.
+				if (this.#folderProblem !== "missing") this.#log.warn(`can't list ${this.#dir} (ENOENT): no sessions`);
+				this.#folderProblem = "missing";
+				this.#cache.clear();
+				this.#fileProblems.clear();
+				this.#last = [];
+				return [];
+			}
+			// A folder that's there and can't be listed says nothing about the sessions: the last reading stands, so
+			// nothing ends, nothing is released and no command fails on its account.
+			if (this.#folderProblem !== "unreadable") this.#log.warn(`can't list ${this.#dir} (${code}): keeping the last reading, of ${this.#last.length} session(s), until it can`);
+			this.#folderProblem = "unreadable";
+			return [...this.#last];
 		}
 		if (this.#folderProblem !== null) this.#log.info(`${this.#dir} is readable again`);
 		this.#folderProblem = null;
@@ -134,7 +155,9 @@ export class RegistryReader {
 			if (session) sessions.push(session);
 		}
 		for (const key of [...this.#cache.keys()]) if (!seen.has(key)) this.#cache.delete(key);
-		return sessions.sort(compareSessions);
+		for (const key of [...this.#fileProblems.keys()]) if (!seen.has(key)) this.#fileProblems.delete(key);
+		this.#last = sessions.sort(compareSessions);
+		return [...this.#last];
 	}
 
 	async #readOne(key: string, file: string): Promise<RegistrySession | null> {
@@ -149,10 +172,15 @@ export class RegistryReader {
 			text = await this.#fs.readFile(file);
 		} catch (err) {
 			// Gone between the listing and the read: the session ended. The next scan drops it.
-			const code = (err as NodeJS.ErrnoException).code;
-			if (code !== "ENOENT") this.#log.warn(`can't read ${file}: ${code ?? describeError(err)}`);
+			const code = (err as NodeJS.ErrnoException).code ?? describeError(err).split("\n")[0] ?? "unknown";
+			if (code !== "ENOENT") {
+				// Once until it reads again, not every second.
+				if (this.#fileProblems.get(key) !== code) this.#log.warn(`can't read ${file} (${code}): ${cached?.good ? "keeping its last good reading" : "leaving it out"} until it can`);
+				this.#fileProblems.set(key, code);
+			}
 			return cached?.good ?? null;
 		}
+		this.#fileProblems.delete(key);
 		const parsed = parseSession(key, text);
 		if (parsed) {
 			this.#cache.set(key, { sig, good: parsed, broken: false });

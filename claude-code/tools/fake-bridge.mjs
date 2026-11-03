@@ -51,7 +51,8 @@ Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}
   prompt <host> <text>           the Saved Prompt key with that text: queues a prompt for that
                                  session (local_…), or alerts while the key's last prompt is
                                  still queued, delivered or waiting, and for a session whose mod
-                                 has no instance that said hello
+                                 has no current instance: none has said hello, or its last one
+                                 went 60 s without a poll
   mode <host> <mode>             the Mode dial: ${MODES.join(', ')}. Its mode check, and the
                                  PermissionRequest a raise brings, are allowed at once, once each
   rescan                         reads the registry and records now

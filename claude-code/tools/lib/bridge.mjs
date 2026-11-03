@@ -239,19 +239,24 @@ export async function startFakeBridge(options = {}) {
 
   let registryEntries = new Map()
   const recordFiles = new Map()
-  let dirErrorLogged = false
+  // What the last reading of the registry folder found wrong with it, so each is said once until it changes: null, or
+  // 'missing', or 'unreadable'.
+  let dirTrouble = null
   let scanning = Promise.resolve()
 
   async function scanOnce() {
     try {
       const r = await readRegistry(o.registryDir, registryEntries)
       if (!r.ok) {
-        // An unreadable folder isn't every session ending: keep what the deck has.
-        if (!dirErrorLogged) log({ kind: 'registry-unreadable', dir: o.registryDir, error: r.error, say: `registry folder unreadable (${r.error}): ${o.registryDir}` })
-        dirErrorLogged = true
+        // PROTOCOL.md, "The deck's session model": a reading that can't list the folder changes nothing. The deck keeps
+        // its last reading, and warns once until a reading succeeds.
+        if (dirTrouble !== 'unreadable') log({ kind: 'registry-unreadable', dir: o.registryDir, error: r.error, say: `registry folder unreadable (${r.error}), so the last reading stands until one succeeds: ${o.registryDir}` })
+        dirTrouble = 'unreadable'
         return
       }
-      dirErrorLogged = false
+      // A folder that doesn't exist is no sessions: said once, and every session it listed ends (release rule 4).
+      if (r.missing && dirTrouble !== 'missing') log({ kind: 'registry-missing', dir: o.registryDir, say: `registry folder missing, so no sessions: ${o.registryDir}` })
+      dirTrouble = r.missing ? 'missing' : null
       registryEntries = r.entries
       deck.applyRegistry(registryEntries.values())
       const listed = new Set(deck.listed)

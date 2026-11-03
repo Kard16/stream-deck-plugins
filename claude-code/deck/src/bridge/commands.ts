@@ -48,6 +48,7 @@ export interface PollReply extends Responder {
  * it's waiting with: the engine holds a prompt until the session's turn ends, which can take far longer than
  * this. Such a prompt ends with its final result, the mod's restart or the session's end instead, or fails with
  * "no result" once its session has gone this long without an open poll, since a live mod always keeps one open.
+ * At that same moment the session's current mod instance stops counting (PROTOCOL.md, Identity): see `watch`.
  */
 export const IN_FLIGHT_MS = 60_000;
 
@@ -57,14 +58,17 @@ const KEEP = 200;
 /** A held poll, from the session's current mod instance: only that instance's polls take commands. */
 type Poll = { host: string; inst: string; reply: PollReply; timer: TimerHandle | null };
 
-/** A session's time without an open poll: since when, and the timer that then fails its waiting prompts. */
+/**
+ * A session's time without an open poll: since when, and the timer that then fails its waiting prompts and lets
+ * its watched instance go.
+ */
 type Unpolled = { since: number; timer: TimerHandle | null };
 
 /**
  * The commands the deck queues for sessions when the user presses a key, and the mod's long polls for them.
  * One open poll per session. A queued command waits up to 60 s for a poll to take it; a command answered to a
  * poll is in flight until its final result, or for 60 s without one, a limit a prompt's `waiting` lifts for as
- * long as its session keeps a poll open.
+ * long as its session keeps a poll open. The same 60 s without a poll ends a session's watch (`watch`).
  */
 export class CommandQueue {
 	readonly #clock: Clock;
@@ -74,7 +78,10 @@ export class CommandQueue {
 	readonly #polls = new Map<string, Poll>();
 	readonly #timers = new Map<string, TimerHandle>();
 	readonly #unpolled = new Map<string, Unpolled>();
+	/** The sessions with a current mod instance, whose time without a poll the queue watches (`watch`). */
+	readonly #watched = new Set<string>();
 	readonly #listeners = new Set<() => void>();
+	readonly #unpolledListeners = new Set<(host: string) => void>();
 	#nextId = 1;
 
 	constructor(opts: { clock?: Clock; log?: Log; inFlightMs?: number } = {}) {
@@ -86,6 +93,36 @@ export class CommandQueue {
 	onChange(listener: () => void): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
+	}
+
+	/**
+	 * Called with a watched session's host once it has gone IN_FLIGHT_MS with no poll open and none sent, at the
+	 * moment its waiting prompts fail; the session is no longer watched by then (`watch`).
+	 */
+	onUnpolled(listener: (host: string) => void): () => void {
+		this.#unpolledListeners.add(listener);
+		return () => this.#unpolledListeners.delete(listener);
+	}
+
+	/**
+	 * The session has a current mod instance from now, made so by its hello: its time without a poll counts from
+	 * now, unless a poll is open, and once it has gone IN_FLIGHT_MS with no poll open and none sent, the queue
+	 * stops watching it and tells the `onUnpolled` listeners, at the moment its waiting prompts fail (PROTOCOL.md,
+	 * Identity; Commands). Every poll the queue takes counts, one answered at once included; the session model
+	 * passes it only the current instance's polls, so a stray's never counts.
+	 */
+	watch(host: string): void {
+		this.#watched.add(host);
+		if (!this.#polls.has(host)) {
+			this.#stopUnpolled(host);
+			this.#unpolled.set(host, { since: this.#clock.now(), timer: null });
+		}
+		this.#watchPolls(host);
+	}
+
+	/** Whether the queue watches the session's time without a poll (`watch`). */
+	watching(host: string): boolean {
+		return this.#watched.has(host);
 	}
 
 	get(id: string): Command | null {
@@ -181,7 +218,10 @@ export class CommandQueue {
 			this.#stopTimer(cmd.id);
 		} else return ignore("not a state");
 		this.#watchPolls(host);
-		this.#log.info(`RESULT ${cmd.id} ${cmd.state}${cmd.error ? `: ${quote(cmd.error, 120)}` : ""}`);
+		// The outcome at info; `waiting`, a step on the way to it, at debug.
+		const line = `RESULT ${cmd.id} ${cmd.state}${cmd.error ? `: ${quote(cmd.error, 120)}` : ""}`;
+		if (cmd.state === "waiting") this.#log.debug(line);
+		else this.#log.info(line);
 		this.#emit();
 		return true;
 	}
@@ -253,6 +293,7 @@ export class CommandQueue {
 			this.#endPoll(poll);
 			send(poll.reply, []);
 		}
+		this.#watched.delete(host);
 		this.#stopUnpolled(host);
 		this.#unpolled.delete(host);
 		if (any) this.#emit();
@@ -266,6 +307,7 @@ export class CommandQueue {
 		this.#timers.clear();
 		for (const host of this.#unpolled.keys()) this.#stopUnpolled(host);
 		this.#unpolled.clear();
+		this.#watched.clear();
 	}
 
 	#queuedFor(host: string): Command[] {
@@ -284,25 +326,43 @@ export class CommandQueue {
 	}
 
 	/**
-	 * Arms the session's no-poll limit while it has a waiting prompt and no open poll, and disarms it otherwise.
-	 * IN_FLIGHT_MS after its last poll ended, its waiting prompts fail with "no result" (PROTOCOL.md, Commands).
+	 * Arms the session's no-poll limit while it has no open poll, and a waiting prompt or a watched instance, and
+	 * disarms it otherwise. IN_FLIGHT_MS after its last poll ended, or after `watch` started the count, its waiting
+	 * prompts fail with "no result" (PROTOCOL.md, Commands), and at that same moment its watch ends and the
+	 * `onUnpolled` listeners hear of it (PROTOCOL.md, Identity).
 	 */
 	#watchPolls(host: string): void {
-		if (this.#polls.has(host) || this.#waitingPrompts(host).length === 0) {
+		if (this.#polls.has(host) || (!this.#watched.has(host) && this.#waitingPrompts(host).length === 0)) {
 			this.#stopUnpolled(host);
 			return;
 		}
-		// A waiting prompt was delivered by a poll that has since ended, so `since` is set; now is only a fallback.
+		// A waiting prompt was delivered by a poll that has since ended, and `watch` starts the count, so `since` is
+		// set; now is only a fallback.
 		const unpolled = this.#unpolled.get(host) ?? { since: this.#clock.now(), timer: null };
 		this.#unpolled.set(host, unpolled);
 		if (unpolled.timer !== null) return;
 		unpolled.timer = this.#clock.setTimeout(() => {
 			unpolled.timer = null;
-			const waiting = this.#polls.has(host) ? [] : this.#waitingPrompts(host);
-			if (waiting.length === 0) return;
-			this.#log.info(`UNPOLLED ${host}: no open poll for ${this.#inFlightMs / 1000} s, so its waiting prompts fail`);
-			for (const cmd of waiting) this.#fail(cmd, "no result");
-			this.#emit();
+			if (this.#polls.has(host)) return;
+			const waiting = this.#waitingPrompts(host);
+			const watched = this.#watched.delete(host);
+			if (waiting.length > 0) {
+				// For a watched session, the listener's line says it at info: one line for one moment.
+				const line = `UNPOLLED ${host}: no open poll for ${this.#inFlightMs / 1000} s, so its waiting prompts fail`;
+				if (watched) this.#log.debug(line);
+				else this.#log.info(line);
+				for (const cmd of waiting) this.#fail(cmd, "no result");
+			}
+			if (watched) {
+				for (const listener of [...this.#unpolledListeners]) {
+					try {
+						listener(host);
+					} catch (err) {
+						this.#log.error(`an unpolled listener threw: ${describeError(err)}`);
+					}
+				}
+			}
+			if (waiting.length > 0) this.#emit();
 		}, unpolled.since + this.#inFlightMs - this.#clock.now());
 	}
 
@@ -326,7 +386,8 @@ export class CommandQueue {
 		}
 		send(reply, cmds);
 		if (cmds.length > 0) {
-			this.#log.info(`DELIVERED ${cmds.map((c) => c.id).join(", ")} to ${host}`);
+			// At debug: QUEUED and the final RESULT, or FAILED, say at info how the command went.
+			this.#log.debug(`DELIVERED ${cmds.map((c) => c.id).join(", ")} to ${host}`);
 			this.#emit();
 		}
 	}

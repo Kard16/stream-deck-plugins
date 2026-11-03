@@ -22,8 +22,9 @@ export function hostHeader(base) {
 
 /**
  * Sends one request. `headers` go as given, by lowercased name; a null value leaves the header out (Host
- * included). `body` is the text to send. Returns `{answer, abort, settled}`: `answer` resolves to
- * `{status, headers, text, json, ms}` and rejects if the connection fails or is dropped.
+ * included). `body` is the text to send. Returns `{answer, abort, settled, started}`: `answer` resolves to
+ * `{status, headers, text, json, ms}` and rejects if the connection fails or is dropped; `ms` counts from `started`,
+ * the performance.now() when it was sent.
  */
 export function send(base, { method = 'GET', path = '/', headers = {}, body } = {}) {
   const u = new URL(base)
@@ -45,7 +46,7 @@ export function send(base, { method = 'GET', path = '/', headers = {}, body } = 
   }
   const started = performance.now()
   let req
-  const handle = { settled: false, result: undefined, error: undefined }
+  const handle = { settled: false, result: undefined, error: undefined, started }
   handle.answer = new Promise((resolve, reject) => {
     req = http.request({ host: u.hostname, port: u.port || 80, method, path, headers: out, setHost, agent: false }, (res) => {
       const chunks = []

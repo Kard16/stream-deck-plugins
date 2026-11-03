@@ -105,14 +105,14 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
   }
 })
 
-test('cli: fake-claude --against-fake plays all 18 fixtures against the fake bridge\'s own CLI', async (t) => {
+test('cli: fake-claude --against-fake plays all 19 fixtures against the fake bridge\'s own CLI', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
   const r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile], { env: home })
   assert.equal(r.code, 0, `${r.out}${r.err}`)
-  assert.match(r.out, /18 passed, 0 failed \(against-fake\)/)
-  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 18)
+  assert.match(r.out, /19 passed, 0 failed \(against-fake\)/)
+  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 19)
 
   const one = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, '--verbose', 'two-held'], { env: home })
   assert.equal(one.code, 0, one.out)

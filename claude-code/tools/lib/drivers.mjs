@@ -303,7 +303,10 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
       if (sessions.length) ui.show(`The fixture's sessions: ${sessions.join('; ')}. Registry lines are skipped: the deck reads the real registry, so it won't list them, and nothing of them shows on it. Expect lines are skipped too.`)
     },
 
-    /** Gives the deck a moment to take a held request, since there's no control route to ask. */
+    /**
+     * Gives the deck a moment to take a held request, since there's no control route to ask. Whether it holds one for
+     * a press is another matter, which the press decides by play.mjs's HOOK_AT_ONCE_MS (ctx.held).
+     */
     async taken() {
       await sleep(100)
     },
@@ -318,7 +321,9 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
         ui.show(`skip: press ${key}: it would send the fixture's ${what} to whichever of your own sessions the dial is on`)
         return
       }
-      const open = ctx.open()
+      // What fake-claude sent that the deck holds: no answer within HOOK_AT_ONCE_MS of sending it, by fake-claude's own
+      // clock, however long the deck's answer at once took to come.
+      const open = await ctx.held()
       if ((key === 'approve' || key === 'deny') && open.length === 0) {
         // Approve and Deny act on the oldest held request, whosever it is: with none of fake-claude's held, a press
         // could only land on a real session's.

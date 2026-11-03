@@ -238,11 +238,12 @@ const fixtures = {}
   const a = session(A)
   const read = { file_path: `${CWD}/notes.md` }
   fixtures.status = [
-    note("A turn that reads a file. The deck shows working with the file name, then done, with the context %. When the turn ends, the bridge answers the open poll with no commands, and the mod's next poll at once while the registry still says busy: Claude Code keeps the session busy until a moment when the mod has no request open (Phase 4)."),
+    note("A turn that reads a file. The deck shows working from the turn's start, before the registry says busy (status rule 3), then with the file name, then done, with the context %. When the turn ends, the bridge answers the open poll with no commands, and the mod's next poll at once while the registry still says busy: Claude Code keeps the session busy until a moment when the mod has no request open (Phase 4)."),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Summarise notes.md'),
     a.ev({ t: 'turn.start', turn: 't1' }),
+    { expect: { status: { [A.host]: 'working' }, doing: { [A.host]: null } } },
     a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
     a.tool('Read', 'u1', read),
     a.ev(toolStart('Read', 'u1', read)),
@@ -405,6 +406,21 @@ const fixtures = {}
     reply('p1', {}),
     a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
     { expect: { held: [], status: { [A.host]: 'working' } } },
+  ]
+}
+
+{
+  const C = { sid: '3fa86955-0000-4000-8000-00000000000c', host: 'local_test-c', inst: 'ic', pid: 103, name: 'Deck test C' }
+  const base = setup([A, B, C])
+  const summary = { title: 'Pick a colour', description: 'Asked which colour to use.', status_category: 'need_input', status_detail: 'Waiting for a choice', recent_action: 'Asked a question', needs_action: 'Choose red or blue', is_noteworthy: true }
+  const asks = (S, last, extra) => ({ ...base.setup.records[S.host], postTurnSummary: { ...summary, summarizes_uuid: last, ...extra }, postTurnSummaryFor: last, lastAssistantUuid: last })
+  base.setup.records[A.host] = asks(A, 'msg-a', {})
+  base.setup.records[B.host] = asks(B, 'msg-b', { is_noteworthy: 'yes' })
+  base.setup.records[C.host] = asks(C, 'msg-c', { status_detail: null })
+  fixtures['needs-you-record'] = [
+    note("Status rule 6 reads the app's record as its loader does. The three sessions are idle, none with the plugin, and each record's summary asks for input and is for its last assistant message. A's shows needs-you. B's summary has an is_noteworthy that isn't a boolean, and C's a status_detail that's null, so the app's loader drops both, and B and C show idle. No mod lines: the plugin side skips this fixture."),
+    base,
+    { expect: { sessions: [A.host, B.host, C.host], status: { [A.host]: 'needs-you', [B.host]: 'idle', [C.host]: 'idle' } } },
   ]
 }
 

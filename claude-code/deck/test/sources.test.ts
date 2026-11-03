@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
 import { connectSources } from "../src/model/sources.js";
+import { RecordingLog } from "./helpers/recording-log.js";
 
 /** An HTTP answer the test can read. */
 class FakeReply implements PollReply {
@@ -55,6 +57,119 @@ describe("the model's sources, wired as the plugin wires them (connectSources)",
 			assert.ok(hello instanceof Promise, "it reads the registry once more");
 			assert.deepEqual(await hello, { status: 200, body: { v: 1, ok: true } });
 			assert.deepEqual([model.session("local_b")?.plugin, model.session("local_b")?.model], [true, "claude-haiku-5-5"]);
+		} finally {
+			registry.stop();
+			records.stop();
+			model.dispose();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a registry folder that can't be listed changes nothing: no session ends, no request is released, no command fails, and the poll stays open; once it can be listed again, a file's going ends its session", async () => {
+		const root = mkdtempSync(path.join(os.tmpdir(), "claude-deck-sources-"));
+		const registryDir = path.join(root, "sessions");
+		mkdirSync(registryDir);
+		mkdirSync(path.join(root, "records"));
+		const file = path.join(registryDir, "101.json");
+		writeFileSync(file, JSON.stringify({ pid: 101, sessionId: "sid-a", hostSessionId: "local_a", name: "Session 101", status: "busy", statusUpdatedAt: 1, startedAt: 101 }));
+		const log = new RecordingLog();
+		const { registry, records, model } = connectSources({ registryDir, recordsDir: path.join(root, "records"), logs: { registry: log, sessions: log } });
+		try {
+			await registry.scanNow();
+			assert.deepEqual(await model.hello({ v: 1, sid: "sid-a", host: "local_a", inst: "ia", model: "m" }), { status: 200, body: { v: 1, ok: true } });
+			const poll = (): FakeReply => {
+				const reply = new FakeReply();
+				model.next(new URLSearchParams({ sid: "sid-a", host: "local_a", inst: "ia", wait: "20" }), reply);
+				return reply;
+			};
+			const queued = model.queue("local_a", { t: "prompt", text: "hi" });
+			assert.ok(queued.ok);
+			assert.equal(poll().answers.length, 1, "delivered");
+			const open = poll();
+			const request = new FakeReply();
+			await model.permission({ session_id: "sid-a", tool_name: "Bash", tool_input: { command: "make" } }, "local_a", request);
+			assert.equal(model.held.size, 1);
+
+			chmodSync(registryDir, 0o000);
+			try {
+				// The test's own check that the folder can't be listed now (it can, for root).
+				await assert.rejects(readdir(registryDir), { code: "EACCES" });
+				for (let i = 0; i < 3; i++) await registry.scanNow();
+				assert.deepEqual(model.sessions().map((s) => [s.key, s.status, s.plugin]), [["local_a", "approval", true]]);
+				assert.deepEqual([request.answers, open.answers, queued.cmd.state, model.commands.polling("local_a")], [[], [], "delivered", true]);
+				assert.deepEqual(
+					log.at("warn").filter((l) => l.includes("can't list")),
+					[`warn can't list ${registryDir} (EACCES): keeping the last reading, of 1 session(s), until it can`],
+				);
+			} finally {
+				chmodSync(registryDir, 0o755);
+			}
+			await registry.scanNow();
+			assert.ok(log.at("info").includes(`info ${registryDir} is readable again`), log.at("info").join("\n"));
+			assert.deepEqual([request.answers, open.answers, queued.cmd.state], [[], [], "delivered"]);
+			rmSync(file);
+			await registry.scanNow();
+			assert.deepEqual(model.sessions(), []);
+			assert.deepEqual([request.answers, open.answers.length, queued.cmd.state, queued.cmd.error], [[{ status: 200, body: {} }], 1, "failed", "the session ended"]);
+		} finally {
+			registry.stop();
+			records.stop();
+			model.dispose();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a registry folder that can't be listed keeps the latest reading, not the first: a session that started since stays, with its held request, its command and its poll", async () => {
+		const root = mkdtempSync(path.join(os.tmpdir(), "claude-deck-sources-"));
+		const registryDir = path.join(root, "sessions");
+		mkdirSync(registryDir);
+		mkdirSync(path.join(root, "records"));
+		const starts = (pid: number, host: string, sid: string): void =>
+			writeFileSync(path.join(registryDir, `${pid}.json`), JSON.stringify({ pid, sessionId: sid, hostSessionId: host, name: `Session ${pid}`, status: "busy", statusUpdatedAt: 1, startedAt: pid }));
+		starts(101, "local_a", "sid-a");
+		const log = new RecordingLog();
+		const { registry, records, model } = connectSources({ registryDir, recordsDir: path.join(root, "records"), logs: { registry: log, sessions: log } });
+		try {
+			await registry.scanNow();
+			// A second session starts after the first reading, and the next reading lists it.
+			starts(102, "local_b", "sid-b");
+			await registry.scanNow();
+			assert.deepEqual(await model.hello({ v: 1, sid: "sid-b", host: "local_b", inst: "ib", model: "m" }), { status: 200, body: { v: 1, ok: true } });
+			const poll = (): FakeReply => {
+				const reply = new FakeReply();
+				model.next(new URLSearchParams({ sid: "sid-b", host: "local_b", inst: "ib", wait: "20" }), reply);
+				return reply;
+			};
+			const queued = model.queue("local_b", { t: "prompt", text: "hi" });
+			assert.ok(queued.ok);
+			assert.equal(poll().answers.length, 1, "delivered");
+			const open = poll();
+			const request = new FakeReply();
+			await model.permission({ session_id: "sid-b", tool_name: "Bash", tool_input: { command: "make" } }, "local_b", request);
+			assert.equal(model.held.size, 1);
+			const shown = (): unknown[] => model.sessions().map((s) => [s.key, s.status, s.plugin]);
+			assert.deepEqual(shown(), [
+				["local_a", "working", false],
+				["local_b", "approval", true],
+			]);
+
+			chmodSync(registryDir, 0o000);
+			try {
+				await assert.rejects(readdir(registryDir), { code: "EACCES" });
+				for (let i = 0; i < 3; i++) await registry.scanNow();
+				assert.deepEqual(shown(), [
+					["local_a", "working", false],
+					["local_b", "approval", true],
+				]);
+				assert.deepEqual([request.answers, open.answers, queued.cmd.state, model.commands.polling("local_b")], [[], [], "delivered", true]);
+				assert.ok(!log.lines.some((l) => l.message.startsWith("ENDED")), log.at("info").join("\n"));
+				assert.deepEqual(
+					log.at("warn").filter((l) => l.includes("can't list")),
+					[`warn can't list ${registryDir} (EACCES): keeping the last reading, of 2 session(s), until it can`],
+				);
+			} finally {
+				chmodSync(registryDir, 0o755);
+			}
 		} finally {
 			registry.stop();
 			records.stop();

@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { type Command, CommandQueue, type CommandSpec, type PollReply } from "../bridge/commands.js";
+import { type Command, CommandQueue, type CommandSpec, IN_FLIGHT_MS, type PollReply } from "../bridge/commands.js";
 import { HeldRequests } from "../bridge/held.js";
 import type { BridgeRoutes, BridgeState, RouteAnswer } from "../bridge/server.js";
 import { fingerprint, summary } from "../protocol/fingerprint.js";
@@ -60,8 +60,11 @@ export type SessionView = {
 
 export type QueueResult = { ok: true; cmd: Command } | { ok: false; why: string };
 
-/** A turn of the main loop. `endedAt` is when the deck got its `turn.end`, by the wall clock; null until then. */
-type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean; endedAt: number | null };
+/**
+ * A turn of the main loop. `startedAt` is when the deck got its `turn.start`, and `endedAt` its `turn.end`, by the
+ * wall clock: `endedAt` null until then, and `startedAt` null for a turn whose start the deck didn't get.
+ */
+type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean; startedAt: number | null; endedAt: number | null };
 type RunningTool = { use: string | null; tool: string; summary: string; fp: string | null };
 
 /** What the bridge has heard about one session, from its mod and from its PermissionRequests. */
@@ -75,14 +78,21 @@ type BridgeSession = {
 	/**
 	 * The current mod instance: the last to say hello that hadn't before. Null until one does, and only a hello
 	 * makes one current (PROTOCOL.md, Identity). Only its polls are held and get commands. While it's null, every
-	 * poll for the session gets 409 `hello first` (#noHello).
+	 * poll for the session gets 409 `hello first` (#noHello). It goes back to null when the session ends, and when
+	 * it has gone IN_FLIGHT_MS with no poll open and none sent (#unpolled).
 	 */
 	inst: string | null;
 	/**
 	 * The instances that have said hello for the session, oldest first, the last HELLOS_KEPT of them: a hello from
-	 * one of these never counts as a restart again. They go with the rest when the session ends.
+	 * one of these never counts as a restart again. Empty whenever no instance is current: they go with the rest
+	 * when the session ends, and alone when the current one stops polling (#unpolled).
 	 */
 	hellos: Set<string>;
+	/**
+	 * The instance that was current until it went IN_FLIGHT_MS with no poll open and none sent (#unpolled); null
+	 * once a hello makes an instance current again. A press says so while it's set.
+	 */
+	unpolled: string | null;
 	/**
 	 * The mod instance whose poll, events or result came last while no instance was current ("" for one without an
 	 * inst), or null if none has: read only while none is, when it means the session's mod is there, and has been
@@ -144,6 +154,10 @@ export type SessionModelOptions = {
 	clock?: Clock;
 	/** Wall-clock ms, compared with the registry's `statusUpdatedAt` and the records' `lastFocusedAt`. */
 	wallNow?: () => number;
+	/**
+	 * The protocol's 60 s (IN_FLIGHT_MS), shorter in tests: the command queue's limits, and how long the current
+	 * mod instance may go with no poll open and none sent before it stops counting (PROTOCOL.md, Identity).
+	 */
 	inFlightMs?: number;
 	/**
 	 * Reads the registry again now, rather than at its next scan, and resolves once setRegistry has had any change
@@ -167,6 +181,7 @@ export class SessionModel implements BridgeRoutes {
 	readonly #log: Log;
 	readonly #clock: Clock;
 	readonly #wallNow: () => number;
+	readonly #inFlightMs: number;
 	readonly #rescan: (() => Promise<void>) | null;
 	/** Refused hellos and unconfirmed hook requests, keyed by route and reason (Phase 6's quiet logs). */
 	readonly #refusals: QuietLog;
@@ -204,8 +219,10 @@ export class SessionModel implements BridgeRoutes {
 		this.#noHellos = new QuietLog(this.#log, { clock: this.#clock });
 		this.held = new HeldRequests({ log: this.#log });
 		this.commands = new CommandQueue({ clock: this.#clock, log: this.#log, inFlightMs: opts.inFlightMs });
+		this.#inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
 		this.held.onChange(() => this.#emit());
 		this.commands.onChange(() => this.#emit());
+		this.commands.onUnpolled((host) => this.#unpolled(host));
 	}
 
 	onChange(listener: () => void): () => void {
@@ -231,11 +248,13 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * A new list from the registry. Release rules 2–4 run on what changed: a session leaving `waiting` lets its
-	 * only held request go if it came before the change; `idle` with a later `statusUpdatedAt` lets go every
-	 * request that came before; a session whose file disappeared has ended. A session whose status changed, or
-	 * that's new, has its first reading of that status now. A session whose reading turns `busy` while its polls are
-	 * answered at once has the poll it held answered with none.
+	 * A new list from the registry. Two files for one host, as for a moment when a session's process restarts: the
+	 * one with the later `startedAt` is shown, and either confirms its session id. Release rules 2–4 run on what
+	 * changed: a session leaving `waiting` lets its only held request go if it came before the change; `idle` with
+	 * a later `statusUpdatedAt` lets go every request that came before; a session no file lists any more has ended.
+	 * A session whose status changed, or that's new, has its first reading of that status now. A session whose
+	 * reading turns `busy` while its polls are answered at once has the poll it held answered with none. A reading
+	 * that couldn't list the folder never gets here: the reader gives the last one again (RegistryReader's `scan`).
 	 */
 	setRegistry(sessions: readonly RegistrySession[]): void {
 		const now = this.#wallNow();
@@ -513,9 +532,12 @@ export class SessionModel implements BridgeRoutes {
 		if (!view) return { ok: false, why: `${this.#pickedTitle && key === this.#picked ? quote(this.#pickedTitle) : key} has ended` };
 		if (view.host === null) return { ok: false, why: `${quote(view.title)} has no app id` };
 		if (!view.plugin) {
+			const b = this.#bridge.get(view.host);
+			// Its current instance stopped polling, so none is current until a hello, which its mod's next poll asks for.
+			if ((b?.unpolled ?? null) !== null) return { ok: false, why: `${quote(view.title)}'s mod has had no poll open for ${this.#inFlightMs / 1000} s, so it can't take commands until it says hello again` };
 			// Its mod talks, but hasn't said hello to this deck yet: it has the plugin, and can't take commands until its
 			// hello, which its next poll asks for (#noHello).
-			const talking = (this.#bridge.get(view.host)?.noHelloFrom ?? null) !== null;
+			const talking = (b?.noHelloFrom ?? null) !== null;
 			return { ok: false, why: talking ? `${quote(view.title)}'s mod hasn't said hello to this deck, so it can't take commands until it does` : `${quote(view.title)} doesn't have the plugin` };
 		}
 		return { ok: true, cmd: this.commands.queue(view.host, spec) };
@@ -527,7 +549,8 @@ export class SessionModel implements BridgeRoutes {
 		switch (e.t) {
 			case "turn.start":
 				if (e.agent !== null) return;
-				b.turn = { id: e.turn, ended: false, reason: null, failed: false, endedAt: null };
+				// When the deck got it, on its wall clock: status rule 3 compares it with when the registry's idle began.
+				b.turn = { id: e.turn, ended: false, reason: null, failed: false, startedAt: this.#wallNow(), endedAt: null };
 				b.tools = [];
 				b.pollsAtOnceUntil = null;
 				return;
@@ -535,7 +558,7 @@ export class SessionModel implements BridgeRoutes {
 				if (e.agent !== null) return;
 				// A `failed` for this same turn stays: the status says failed, whatever the reason.
 				const same = b.turn !== null && (e.turn === null || b.turn.id === null || b.turn.id === e.turn);
-				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false), endedAt: this.#wallNow() };
+				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false), startedAt: same ? (b.turn?.startedAt ?? null) : null, endedAt: this.#wallNow() };
 				b.tools = [];
 				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
 				this.#answerPoll(b, "the turn ended");
@@ -543,7 +566,7 @@ export class SessionModel implements BridgeRoutes {
 			}
 			case "failed":
 				if (e.agent !== null) return;
-				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, endedAt: b.turn?.endedAt ?? null };
+				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, startedAt: b.turn?.startedAt ?? null, endedAt: b.turn?.endedAt ?? null };
 				b.tools = [];
 				this.#log.info(`FAILED turn in ${b.host}${e.error ? `: ${quote(e.error, 120)}` : ""}`);
 				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
@@ -622,15 +645,16 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * A mod request for a session with no current instance: none has said hello since the deck started, or since
-	 * release rule 4 forgot the session after a registry reading that missed it. Its mod is there all the same, and
-	 * nothing it sent need have failed: between a poll answered within a second and its next, as after every turn's
-	 * end, the mod waits out the rest of that second with nothing open, so a deck that restarts then fails none of
-	 * its requests, and nor does a reading that misses the session. So the deck asks for a hello: it answers each of
-	 * the session's polls at once with 409 `hello first` (`next`), which the mod takes as a fetch that rejected, with
-	 * a quiet hello about 100 ms later (PROTOCOL.md, Identity; Failure and recovery). The 409 goes only to a session
-	 * with no current instance, so it never displaces one. The session's events and results are still taken, and
-	 * until a hello makes an instance current, a press on it is refused, saying its mod hasn't said hello.
+	 * A mod request for a session with no current instance: none has said hello since the deck started, since
+	 * release rule 4 forgot the session after a registry reading that missed it, or since the current one went
+	 * IN_FLIGHT_MS without a poll (#unpolled), as a restarted process's predecessor does. Its mod is there all the
+	 * same, and nothing it sent need have failed: between a poll answered within a second and its next, as after
+	 * every turn's end, the mod waits out the rest of that second with nothing open, so a deck that restarts then
+	 * fails none of its requests, and nor does a reading that misses the session. So the deck asks for a hello: it
+	 * answers each of the session's polls at once with 409 `hello first` (`next`), which the mod takes as a fetch
+	 * that rejected, with a quiet hello about 100 ms later (PROTOCOL.md, Identity; Failure and recovery). The 409
+	 * goes only to a session with no current instance, so it never displaces one. The session's events and results
+	 * are still taken, and until a hello makes an instance current, a press on it is refused, saying why.
 	 *
 	 * The log says the deck asked: a poll's 409 at info the first time, then at most once in 10 minutes with the
 	 * count since, and the rest at debug; afresh once a hello makes an instance current, or the session ends. Events
@@ -662,30 +686,39 @@ export class SessionModel implements BridgeRoutes {
 		}
 		const b = this.#bridgeFor(host);
 		if (h.sid) b.sids.add(h.sid);
-		if (!this.#makeCurrent(b, h.inst)) {
+		const current = this.#makeCurrent(b, h.inst);
+		if (current === null) {
 			// Its events and results are still taken, but its hello's settings may be stale, and its polls get none.
 			this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)}, which ${h.inst === null ? "has no inst" : "said hello before"}: taken, but not the current instance, which stays ${quote(b.inst, 40)}`);
 			return { status: 200, body: { v: PROTOCOL_VERSION, ok: true } };
 		}
 		if (h.cwd) b.cwd = h.cwd;
 		if (h.model) b.settings.model = h.model;
-		if (h.mode) b.settings.mode = h.mode;
-		if (h.effort) b.settings.effort = h.effort;
-		this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)} plugin ${quote(h.plugin, 20)} cc ${quote(h.cc, 20)}${this.#listing(host, h.sid) === "none" ? "; the registry doesn't list it yet" : ""}`);
+		if (current === "again") {
+			// The current instance's hello, said again, as after every rejected fetch (each Deny, each Esc): its mode and
+			// effort are what the mod has already sent or queued as `settings`, while the deck may since have taken a
+			// newer one from a PermissionRequest, so they stay the deck's (PROTOCOL.md, Identity). Normal use: debug.
+			this.#log.debug(`HELLO ${b.host} inst ${quote(h.inst, 40)} again: its cwd and model taken, its mode and effort not`);
+		} else {
+			if (h.mode) b.settings.mode = h.mode;
+			if (h.effort) b.settings.effort = h.effort;
+			this.#log.info(`HELLO ${b.host} inst ${quote(h.inst, 40)} plugin ${quote(h.plugin, 20)} cc ${quote(h.cc, 20)}${this.#listing(host, h.sid) === "none" ? "; the registry doesn't list it yet" : ""}`);
+		}
 		this.#emit();
 		return { status: 200, body: { v: PROTOCOL_VERSION, ok: true } };
 	}
 
 	/**
-	 * Makes a hello's instance the session's current one, unless it has said hello before; returns whether it's
-	 * the current one now. A new instance replacing another means the mod restarted: the session's current tool
-	 * and in-flight commands are forgotten, and a poll the old instance left open is answered with none
-	 * (PROTOCOL.md, Identity).
+	 * Makes a hello's instance the session's current one, unless it has said hello before: "new" when it's made
+	 * current now, "again" when it was already, null when it isn't. A new instance replacing another means the mod
+	 * restarted: the session's current tool and in-flight commands are forgotten, and a poll the old instance left
+	 * open is answered with none (PROTOCOL.md, Identity). An instance made current, by its first hello or a restart,
+	 * has its time without a poll counted from now (CommandQueue's `watch`); a hello said again doesn't reset it.
 	 */
-	#makeCurrent(b: BridgeSession, inst: string | null): boolean {
-		if (inst === null) return false;
-		if (inst === b.inst) return true;
-		if (b.hellos.has(inst)) return false;
+	#makeCurrent(b: BridgeSession, inst: string | null): "new" | "again" | null {
+		if (inst === null) return null;
+		if (inst === b.inst) return "again";
+		if (b.hellos.has(inst)) return null;
 		if (b.inst !== null) {
 			this.#log.info(`RESTART ${b.host}: mod instance ${quote(inst, 40)} replaces ${quote(b.inst, 40)}; its current tool and in-flight commands are forgotten, and any poll the old one left open is answered`);
 			b.tools = [];
@@ -693,13 +726,41 @@ export class SessionModel implements BridgeRoutes {
 		}
 		b.inst = inst;
 		b.hellos.add(inst);
+		b.unpolled = null;
 		// A mod the deck asked for a hello (#noHello) has said one: should that happen again, its first 409 goes at info.
 		this.#noHellos.forget(b.host);
 		for (const old of b.hellos) {
 			if (b.hellos.size <= HELLOS_KEPT) break;
 			b.hellos.delete(old);
 		}
-		return true;
+		this.commands.watch(b.host);
+		return "new";
+	}
+
+	/**
+	 * The session's current instance has gone IN_FLIGHT_MS with no poll open and none sent, so it stops counting
+	 * (PROTOCOL.md, Identity), at the moment the command queue fails the session's waiting prompts. The deck forgets
+	 * which instances said hello for the session, so none is current and the hellos are empty, as after release
+	 * rule 4, and keeps the rest: settings, held requests, queued and in-flight commands, and seqs. A press on the
+	 * session then alerts, its mod's next poll gets 409 `hello first` (#noHello), and that mod's hello makes its
+	 * instance current, which isn't a restart, since none was. Without this, the predecessor of a restarted process
+	 * whose hello landed last after a deck restart would stay current for good, and the live mod's polls would be
+	 * answered at once with none.
+	 *
+	 * One line at info; at debug for a session the registry doesn't list, which takes no presses, such as a spare
+	 * process that went before it was claimed.
+	 */
+	#unpolled(host: string): void {
+		const b = this.#bridge.get(host);
+		if (!b || b.inst === null) return;
+		const was = b.inst;
+		b.inst = null;
+		b.hellos.clear();
+		b.unpolled = was;
+		const line = `UNPOLLED ${host}: mod instance ${quote(was, 40)} has had no poll open for ${this.#inFlightMs / 1000} s, so it's no longer the current one, and the deck forgets which instances said hello; the mod's next poll gets 409 to ask for one`;
+		if (this.#registry.has(host)) this.#log.info(line);
+		else this.#log.debug(line);
+		this.#emit();
 	}
 
 	/**
@@ -815,6 +876,7 @@ export class SessionModel implements BridgeRoutes {
 				sids: new Set(),
 				inst: null,
 				hellos: new Set(),
+				unpolled: null,
 				noHelloFrom: null,
 				lastSeq: new Map(),
 				cwd: null,
@@ -839,16 +901,16 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * Release rule 4: the registry file disappeared, so the session has ended. What the bridge knew of it goes, its
-	 * instances included, so should its mod still be there, its next poll gets 409 and its hello makes it current
-	 * again (#noHello).
+	 * Release rule 4: no registry file lists the session's host any more, so the session has ended. What the bridge
+	 * knew of it goes, its instances included, so should its mod still be there, its next poll gets 409 and its
+	 * hello makes it current again (#noHello).
 	 */
 	#ended(host: string): void {
-		for (const h of this.held.forHost(host)) this.held.release(h.id, "the session's registry file disappeared (rule 4)");
+		for (const h of this.held.forHost(host)) this.held.release(h.id, "no registry file lists the session any more (rule 4)");
 		this.commands.failHost(host, "the session ended");
 		this.#bridge.delete(host);
 		this.#noHellos.forget(host);
-		this.#log.info(`ENDED ${host}: its registry file disappeared`);
+		this.#log.info(`ENDED ${host}: no registry file lists it any more`);
 	}
 
 	#view(s: RegistrySession): SessionView {

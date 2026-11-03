@@ -21,7 +21,7 @@ test('hello goes first, with the ids, cwd, model and versions; then one poll, wi
     inst: expect.any(String),
     cwd: '/sandbox',
     model: MODEL,
-    plugin: '0.2.0',
+    plugin: '0.2.1',
     cc: '2.1.309',
   })
   expect(poll?.method).toBe('GET')

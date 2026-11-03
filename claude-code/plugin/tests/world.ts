@@ -3,7 +3,7 @@
 // how it behaves through the returned object, never with `on`: the kit takes no hooks after the first call on `$`.
 
 import type { On } from 'claude-code'
-import { mock } from 'claude-code/testing'
+import { expect, mock } from 'claude-code/testing'
 
 export const TOKEN = 'tok-0123456789abcdef'
 export const HOST = 'local_test-1'
@@ -44,6 +44,29 @@ export const HELLO_FIRST: Reply = { status: 409, body: { error: 'hello first' } 
 /** How the fake bridge behaves: answering, refusing connections (down), or taking requests it leaves unanswered (hang). */
 export type Mode = 'up' | 'down' | 'hang'
 
+/**
+ * The most requests the fake bridge takes at one time on the clock, whatever their routes. It answers most of them at
+ * once (a hello, an event or a result as set, a refusal while it's down, a 409 hello first, a set `poll`, a hold of
+ * 0), so a mod that sends again at once without end would run on promises alone: no timer, the test's timeout
+ * included, would fire again, and `claude plugin test` would hang. Such a loop: polls again at once after a 409
+ * taken for an answer, a line that never takes its head off, hellos that don't wait out the outage's backoff.
+ *
+ * The request past this many fails the check in the fetch hook, which fails the test, and the hook's throw rejects
+ * its fetch. From then on, at any time, the bridge stops the mod: it answers a hello as a deck on another protocol
+ * version does (STOPPED), so the mod stops for good, and leaves every other request unanswered, so a loop awaiting
+ * one stops there. Unanswered alone isn't enough: about 5 s on, the kit lets go of a request still open and its fetch
+ * fails, the test over by then, and a mod that then says hello again at once spins where no hook sees it. So a mod
+ * that tries again at once whenever a fetch fails can still hang the run, after any test that ends with a request
+ * open (a held poll, say), whatever the fake does.
+ *
+ * The busiest test so far sends 13 at one time. At 200 a loop's failures stay small enough for the kit to report: at
+ * 1000, a file of them came back as "the file did not load".
+ */
+export const MAX_AT_ONCE = 200
+
+/** How the bridge answers a hello once it has seen a busy loop: as a deck on another protocol version (MAX_AT_ONCE). */
+const STOPPED: Reply = { status: 200, body: { v: 0, ok: false, error: 'version' } }
+
 export type WorldOptions = {
   /** The environment `$.env.get` reads; one not listed is unset. By default DESKTOP_ENV. */
   env?: Readonly<Record<string, string>>
@@ -56,6 +79,12 @@ export type WorldOptions = {
   mcp?: (e: { server: string; tool: string; args: Record<string, unknown> }) => unknown
   /** Refuses every tool call at the permission check beneath the mod, with this reason, as a session's dialog does. */
   refuse?: string
+  /**
+   * Takes the busy-loop check's failure (MAX_AT_ONCE) in place of the test, with its message, and the request past
+   * MAX_AT_ONCE is refused with it; the bridge stops the mod all the same. Only the check's own test sets it, to watch
+   * the check fail without failing.
+   */
+  onBusyLoop?: (what: string) => void
 }
 
 const answer = (status: number, body?: unknown): Answer => ({
@@ -72,6 +101,12 @@ export function world(on: On, o: WorldOptions = {}) {
   const abandoned = new Map<string, number>()
   /** Whether the deck has forgotten the session (forget()) and had no hello since: it asks each poll for one. */
   let forgotten = false
+  /** The clock's time of the latest request, and how many came then, in all and by route (MAX_AT_ONCE). */
+  let burstAt = Number.NaN
+  let burstSize = 0
+  const burst = new Map<string, number>()
+  /** Whether the bridge has seen a busy loop, and so stops the mod (MAX_AT_ONCE, STOPPED). */
+  let looped = false
   const bridge = {
     mode: o.mode ?? ('up' as Mode),
     hello: { status: 200, body: { v: 1, ok: true } as unknown },
@@ -154,6 +189,27 @@ export function world(on: On, o: WorldOptions = {}) {
       at: clock.now(),
     }
     sent.push(req)
+    // A busy loop seen: the mod stops at its next hello, and nothing else is answered.
+    if (looped) return req.route === '/v1/hello' ? answer(STOPPED.status, STOPPED.body) : new Promise<Answer>(() => {})
+    // Every request counts against MAX_AT_ONCE, whatever its route and however it's answered.
+    if (req.at !== burstAt) {
+      burstAt = req.at
+      burstSize = 0
+      burst.clear()
+    }
+    burstSize++
+    burst.set(req.route, (burst.get(req.route) ?? 0) + 1)
+    if (burstSize > MAX_AT_ONCE) {
+      looped = true
+      const routes = [...burst].map(([route, n]) => `${n} to ${route}`).join(', ')
+      const loop = `${burstSize} requests at ${req.at} ms on the clock, as in a busy loop (${routes})`
+      if (o.onBusyLoop !== undefined) {
+        o.onBusyLoop(loop)
+        return { deny: loop }
+      }
+      // A check that fails in a hook fails the test, and the hook's throw rejects this fetch.
+      expect(burstSize, loop).toBeLessThanOrEqual(MAX_AT_ONCE)
+    }
     if (`${url.protocol}//${url.host}` !== BRIDGE) return { deny: `not the bridge: ${e.url}` }
     const left = abandoned.get(req.route) ?? 0
     if (left > 0) {

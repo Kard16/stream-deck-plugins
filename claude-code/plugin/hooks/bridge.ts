@@ -6,14 +6,17 @@
 // fake). A fetch that rejects, with no answer at all, is followed 100 ms later by a quick hello, quietly: the engine
 // abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still there, and a
 // deck that restarts can be back within those 100 ms, and must hear hello before anything else. So is a poll answered
-// 409 hello first: the deck has had no hello from this instance, as when it restarted, or forgot the session at
-// release rule 4, while the mod had nothing open to fail. A failed request (a failure of that hello or of what
-// follows it, a second 409 before a poll goes through, a 5xx, a request the bridge takes and leaves unanswered 35 s)
-// starts an outage: one log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello
-// is answered, the poll starts again and the queued requests go out in order, a failed one again with its own seq.
-// The outage ends only when the request that began it, or began the quick hello it grew from, goes through, so a
-// bridge that answers hello and fails that request again doesn't start the waits over. Each hello opens an epoch,
-// and a send or poll left over from an older one changes nothing when it settles.
+// 409 hello first: no instance has said hello for the session, as after the deck restarted, or forgot which had
+// (release rule 4, or a current instance that stopped polling), while the mod had nothing open to fail. Until the
+// request that failed goes through, a failure of that hello, or of what follows it up to 2 s after the hello's
+// answer, a second 409 included, is the second failure. Past those 2 s a rejection or a 409 is a first failure again,
+// with a quick hello of its own, so a poll the deck held, then abandoned at an Esc or a Deny, gets one. A failed
+// request (that second failure, a 5xx, a request the bridge takes and leaves unanswered 35 s) starts an outage: one
+// log line, then hello again after 1, 2, 5, 10 and 30 s and every 30 s after that. Once a hello is answered, the poll
+// starts again and the queued requests go out in order, a failed one again with its own seq. The outage ends only
+// when the request that began it, or began the quick hello it grew from, goes through, so a bridge that answers hello
+// and fails that request again doesn't start the waits over. Each hello opens an epoch, and a send or poll left over
+// from an older one changes nothing when it settles.
 
 import { whyQuiet, type Read } from './desktop'
 import { changed, type DeckEvent, type Settings } from './events'
@@ -22,7 +25,7 @@ import { redact } from './redact'
 export const BRIDGE_URL = 'http://127.0.0.1:47600'
 export const PROTOCOL_VERSION = 1
 /** The plugin's version for the hello, kept in step with .claude-plugin/plugin.json: `$.plugin` has none. */
-export const PLUGIN_VERSION = '0.2.0'
+export const PLUGIN_VERSION = '0.2.1'
 export const BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10_000, 30_000]
 /** How long the bridge may hold a poll (PROTOCOL.md, "Rates"). */
 export const POLL_WAIT_S = 20
@@ -34,17 +37,31 @@ export const POLL_WAIT_S = 20
 export const STALL_MS = 35_000
 /**
  * A fetch that rejects, with no answer at all, is followed this long after by a hello, with no log line and no
- * outage yet, and so is a poll answered 409 hello first: only a failure of that hello, or of what follows it, begins
- * one (PROTOCOL.md, "Failure and recovery").
+ * outage yet, and so is a poll answered 409 hello first. Only a second failure begins that outage: of the hello, or
+ * of what follows it until the failed request goes through, up to QUICK_WINDOW_MS after the hello's answer
+ * (PROTOCOL.md, "Failure and recovery").
  * - The engine abandons a mod's fetches when a turn is interrupted, a deck Deny included, while the bridge is still
  *   there (ladder step 4).
  * - `streamdeck restart` brought the deck back 85 ms after it stopped (Phase 4), so the failed request sent again on
  *   its own would have been the new deck's first, with no hello and no version check.
- * - A deck that restarted, or forgot the session, while the mod had nothing open to fail asks for a hello with the
- *   409 (PROTOCOL.md, "Identity"): after a poll answered within a second, as at every turn's end, the mod waits out
- *   the rest of that second with no request open.
+ * - A deck asks for a hello with the 409 while no instance has said hello for the session (PROTOCOL.md, "Identity"):
+ *   after it restarted, or forgot which had, while the mod had nothing open to fail. After a poll answered within a
+ *   second, as at every turn's end, the mod waits out the rest of that second with no request open.
  */
 export const RETRY_MS = 100
+/**
+ * How long after a quick hello's answer a failure is still the second one (PROTOCOL.md, "Failure and recovery"):
+ * until the request whose rejection, or 409, asked for that hello goes through, a failure before the answer or up
+ * to this long after it, this long included, begins the outage the quick hello held off, and the outage is that
+ * request's. A rejection or a 409 that comes later is a first failure again, with a quick hello of its own; any
+ * other failure then begins an outage of its own request's.
+ * - A poll the deck holds after a quick hello, then abandoned at an Esc or a Deny, as the engine abandons a mod's
+ *   fetches at every interrupt, gets a quick hello and not an outage.
+ * - A deck that answers each hello and fails what follows it at once, such as a 409 to the poll after every hello,
+ *   still meets the outage and its waits.
+ * Timed on the host's clock, from the answer.
+ */
+export const QUICK_WINDOW_MS = 2000
 /**
  * A poll answered sooner than this with no command to run, none or only ones it skips, waits out the rest before
  * the next one. The bridge holds a poll until a command comes, the main loop's turn ends or the wait ends. So an
@@ -181,10 +198,13 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   let outage: Channel | undefined
   /**
    * The channel whose rejected fetch, or poll answered 409 hello first, began a quick hello; undefined when none is
-   * on, and always while an outage is. Until that request goes through, any failure is the second one, another 409
-   * included: it begins the outage the rejection held off, and that outage is still the rejected request's.
+   * on, and always while an outage is. While it's on, any failure is the second one, another 409 included: it begins
+   * the outage the rejection held off, and that outage is still the rejected request's. It ends when that request
+   * goes through, or once more than QUICK_WINDOW_MS have passed since the quick hello's answer (`quickWindow`).
    */
   let quick: Channel | undefined
+  /** The timer that ends the quick hello once QUICK_WINDOW_MS have passed since its answer; undefined till then. */
+  let quickWindow: Timer | undefined
   let retry: Timer | undefined
   /** The epoch whose sender is working through the queue, or -1. */
   let sending = -1
@@ -333,6 +353,8 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   function connected(ep: number, model: string | undefined): void {
     phase = 'up'
     through('hello')
+    // A quick hello answered, whose rejected request has yet to go through: its window opens now.
+    if (quick !== undefined) openWindow()
     // A deck that restarted may hand out its command ids again.
     ran.clear()
     // The deck now has the hello's model, or none if it restarted and the hello had none, until a settings event
@@ -346,11 +368,12 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
 
   /**
    * A request on `channel` had no answer at all in the current epoch, its fetch rejected; or the poll was answered
-   * 409 hello first, the bridge having had no hello from this instance. Unless an outage or a quick hello is on,
-   * that's no failure yet (PROTOCOL.md, "Failure and recovery"): the epoch ends quietly, with no log line and the
-   * outage's waits untouched, and hello goes RETRY_MS later, ahead of the request, for a deck that restarted or
-   * forgot the session meanwhile. Otherwise it fails as any request does, for the reason `why` gives: the second
-   * failure after a quick hello, a second 409 among them, or one more in an outage.
+   * 409 hello first, no instance having said hello for the session. Unless an outage or a quick hello is on, that's
+   * no failure yet (PROTOCOL.md, "Failure and recovery"): the epoch ends quietly, with no log line and the outage's
+   * waits untouched, and hello goes RETRY_MS later, ahead of the request, for a deck that restarted or forgot the
+   * session meanwhile. Otherwise it fails as any request does, for the reason `why` gives: the second failure after
+   * a quick hello, before its answer or within QUICK_WINDOW_MS of it, a second 409 among them; or one more in an
+   * outage. A quick hello past its window is over, so a rejection or a 409 after that has a quick hello of its own.
    */
   function rejected(channel: Channel, why: unknown): void {
     if (silent()) return
@@ -363,6 +386,28 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   }
 
   /**
+   * The quick hello's window opens at its answer (QUICK_WINDOW_MS), on the host's clock, and ends the quick hello
+   * when it closes. A failure at its last millisecond is still in it, so the timer runs one past: the clock counts
+   * whole milliseconds. None is open now: whatever ended the last quick hello closed its window (endQuick()).
+   */
+  function openWindow(): void {
+    quickWindow = timer(QUICK_WINDOW_MS + 1, () => {
+      quickWindow = undefined
+      endQuick()
+    })
+  }
+
+  /**
+   * The quick hello is over, whatever ended it, and its window with it: a window left open would end the next quick
+   * hello early.
+   */
+  function endQuick(): void {
+    quick = undefined
+    quickWindow?.cancel()
+    quickWindow = undefined
+  }
+
+  /**
    * A request on `channel` failed in the current epoch: end the epoch, start an outage with its one log line unless
    * one is on, and hello again after the outage's next wait.
    */
@@ -371,7 +416,7 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     if (outage === undefined) {
       // During a quick hello this is the second failure: the outage begins, and it's the rejected request's.
       outage = quick ?? channel
-      quick = undefined
+      endQuick()
       say(`The Stream Deck bridge at ${BRIDGE_URL} isn't answering (${why}); retrying in the background.`)
     }
     const wait = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)] ?? 30_000
@@ -397,7 +442,7 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
    * hello is that one, unless MAX_QUEUED piled up behind it and pushed it out.
    */
   function through(channel: Channel): void {
-    if (quick === channel) quick = undefined
+    if (quick === channel) endQuick()
     if (outage !== channel) return
     outage = undefined
     attempt = 0
@@ -476,8 +521,10 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
 
   /**
    * The long poll: one open at a time, again as soon as one answers (PROTOCOL.md, "Commands"). A 2xx answer's
-   * commands run. An answer of 409 hello first goes the way of a fetch that rejected, through rejected(): a quick
-   * hello, or the second failure. Any other answer that isn't 2xx is a failure.
+   * commands run. An answer that comes once its epoch has ended changes nothing past its commands, a 409 hello first
+   * included: a hello has opened a newer epoch, or is due to. Otherwise an answer of 409 hello first goes the way of
+   * a fetch that rejected, through rejected(): a quick hello, or, while one is on (before its answer, or within
+   * QUICK_WINDOW_MS of it), the second failure. Any other answer that isn't 2xx is a failure.
    */
   async function poll(ep: number): Promise<void> {
     while (phase === 'up' && ep === epoch) {

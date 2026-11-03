@@ -82,11 +82,14 @@ function newSession(host) {
      */
     sid: null,
     sids: new Set(),
-    /** The current instance: the last inst that said hello for the session and hadn't before. Only a hello sets it. */
+    /**
+     * The current instance: the last inst that said hello for the session and hadn't before. Only a hello sets it.
+     * It's null again once the current instance has gone IN_FLIGHT_MS with no poll open and none sent (#armPollGap).
+     */
     inst: null,
     /**
      * Every inst that has said hello for the session: one of them never counts as a restart again, nor, once
-     * replaced, as current.
+     * replaced, as current. Forgotten with the current instance when it stops polling (#instanceQuiet).
      */
     insts: new Set(),
     /** True once anything has come from its mod: hello, events, a poll or a result. */
@@ -104,11 +107,11 @@ function newSession(host) {
     fpCalls: [],
     /**
      * The main loop's current or last turn: its id, did the deck see it end, how, did it fail, when the deck got its
-     * turn.end, as a #seenTick (status rule 3), and when it got the turn's last end, a turn.end or failed: by the
-     * wall clock for people (`endedAt`), and by the monotonic clock for the polls answered at once (`endedMono`,
-     * #afterTurnEnd).
+     * turn.start and its turn.end, each as a #seenTick (status rule 3: `startSeen`, `endSeen`), and when it got the
+     * turn's last end, a turn.end or failed: by the wall clock for people (`endedAt`), and by the monotonic clock for
+     * the polls answered at once (`endedMono`, #afterTurnEnd).
      */
-    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null, endedMono: null },
+    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, startSeen: null, endSeen: null, endedAt: null, endedMono: null },
     context: null,
     /** The latest model, effort and mode from the plugin: hello, settings events, PermissionRequests. */
     settings: { model: null, effort: null, mode: null },
@@ -116,9 +119,16 @@ function newSession(host) {
     onScreen: false,
     ended: null,
     poll: null,
-    /** When the session's last open poll ended, by the monotonic clock; null while one is open or before its first. */
+    /**
+     * When the session last had a poll of its current instance's open or answered, by the monotonic clock: when its
+     * last open poll ended, or one was answered at once, or else when a hello made its instance current. Null while a
+     * poll is open, or before any of these.
+     */
     pollEndedAt: null,
-    /** Fails the session's waiting prompts once it has gone IN_FLIGHT_MS without an open poll. */
+    /**
+     * Once the session has gone IN_FLIGHT_MS without an open poll: fails its waiting prompts, and has its current
+     * instance stop counting (#armPollGap).
+     */
     gapTimer: null,
     lastSeen: null,
   }
@@ -147,6 +157,10 @@ export class FakeDeck {
    * what confirms a hook's request or a hello ("Desktop sessions only"). A file with no sessionId adds none.
    */
   #listed = new Map()
+  /**
+   * sessionId → host, from the files the deck shows (#registry), one per host: what places a mod's request with no
+   * host (#hostFor), as the real deck's #hostForSid looks only at those. A lingering old file's sessionId places none.
+   */
   #registryBySid = new Map()
   /**
    * host → when the deck read the session's current status, as a #seenTick: the reading where its `status` or
@@ -205,9 +219,9 @@ export class FakeDeck {
   }
 
   /**
-   * The host a mod's request is for: its own `host`, else its `sid` looked up in the registry, then among every sid
-   * and host pair the bridge has seen from mods (PROTOCOL.md, Identity). The hooks' requests are never placed so:
-   * only the registry confirms them (#confirmed).
+   * The host a mod's request is for: its own `host`, else its `sid` looked up in the registry's shown files, then
+   * among every sid and host pair the bridge has seen from mods (PROTOCOL.md, Identity). The hooks' requests are never
+   * placed so: only the registry confirms them (#confirmed).
    */
   #hostFor(sid, host) {
     const h = hostValue(host)
@@ -343,16 +357,18 @@ export class FakeDeck {
    * PROTOCOL.md, Routes, Identity and "Desktop sessions only". A hello on another version is refused first. One from
    * a host the registry lists, in no file with its sid, throws NotThisSession, for a 409, and is taken no further:
    * nothing of it is kept. Any other is taken, a spare's for a host the registry doesn't list yet included. Only a
-   * hello makes an inst the session's current one: one that hasn't said hello for the session before, and then the
-   * mod restarted if another was current.
+   * hello makes an inst the session's current one: one that hasn't said hello for the session before, or since the
+   * deck forgot which had (a reset, release rule 4, or a current instance that stopped polling), and then the mod
+   * restarted if another was current. A hello that makes its inst current takes its cwd, model, mode and effort, and
+   * is the session's hello in the state; the inst's time without an open poll starts from it (#armPollGap).
    *
-   * The current instance's own hello, said again, is taken as the real deck takes it (#makeCurrent and #greet in
-   * claude-code/deck/src/model/sessions.ts): its cwd, model, mode and effort, and it's the session's hello in the
-   * state, with no restart and nothing else changed. The mod says one after a fetch that rejected, as when an Esc or
-   * a deck Deny abandons its fetches, and in an outage. Once a hello is answered ok, the mod takes the deck to have
-   * the hello's model, and sends a settings event only for another (connected() in claude-code/plugin/hooks/
-   * bridge.ts), so a model changed since its last report reaches the deck only in that hello. PROTOCOL.md's Identity
-   * can be read either way here, which README.md notes.
+   * The current instance's own hello, said again, takes its cwd and model only (PROTOCOL.md, Identity, as amended on
+   * 2026-11-03 for Phase 6), with no restart and nothing else changed: its time without a poll goes on, since a hello
+   * isn't a poll (#armPollGap). The mod says one after a fetch that rejected, as when an Esc or a deck Deny abandons
+   * its fetches, and in an outage. Its model is the mod's own reading, which the mod takes the deck to have once the
+   * hello is answered ok (connected() in claude-code/plugin/hooks/bridge.ts).
+   * Its mode and effort are only what the mod has already sent, or queued to send, as settings, while the deck may
+   * since have taken a newer one from a PermissionRequest, as after every Deny: so the deck keeps its own.
    *
    * Any other hello, from an inst that said hello before and isn't current, or with no inst, is answered ok and
    * changes nothing: its model, mode and effort aren't taken, nor is it the session's hello in the state, as the
@@ -388,16 +404,28 @@ export class FakeDeck {
       })
       return { v: VERSION, ok: true }
     }
-    if (!again) {
-      if (s.inst !== null) this.#modRestarted(s, inst)
-      s.insts.add(inst)
-      s.inst = inst
+    if (again) {
+      // Its cwd and model only: its mode and effort are the mod's last report, which a PermissionRequest's may have
+      // overtaken since. A field it leaves out, as a model the mod can't read, is kept.
+      s.hello = { ...s.hello, againAt: this.#now(), cwd: str(cwd) ?? s.hello?.cwd ?? null, model: str(model) ?? s.hello?.model ?? null }
+      if (str(model)) s.settings.model = model
+      this.#log({
+        kind: 'hello', ok: true, current: s.inst, madeCurrent: true, again, took: ['cwd', 'model'], host: s.host, inst, plugin, cc, model,
+        say: `hello ${s.host} inst ${inst} (plugin ${plugin ?? '?'}, cc ${cc ?? '?'}, ${model ?? '?'}), again from the current instance: its cwd and model taken, its mode and effort not, with no restart`,
+      })
+      return { v: VERSION, ok: true }
     }
+    if (s.inst !== null) this.#modRestarted(s, inst)
+    s.insts.add(inst)
+    s.inst = inst
     s.hello = { at: this.#now(), inst, cwd, model, mode, effort, plugin, cc }
     for (const k of ['model', 'mode', 'effort']) if (str(b[k])) s.settings[k] = b[k]
+    // A new current instance has had no poll yet: its time without one starts now.
+    if (!s.poll) s.pollEndedAt = this.#mono()
+    this.#armPollGap(s)
     this.#log({
-      kind: 'hello', ok: true, current: s.inst, madeCurrent: true, again, host: s.host, inst, plugin, cc, model,
-      say: `hello ${s.host} inst ${inst} (plugin ${plugin ?? '?'}, cc ${cc ?? '?'}, ${model ?? '?'})${again ? ', again from the current instance: taken, with no restart' : ''}`,
+      kind: 'hello', ok: true, current: s.inst, madeCurrent: true, again, took: ['cwd', 'model', 'mode', 'effort'], host: s.host, inst, plugin, cc, model,
+      say: `hello ${s.host} inst ${inst} (plugin ${plugin ?? '?'}, cc ${cc ?? '?'}, ${model ?? '?'})`,
     })
     return { v: VERSION, ok: true }
   }
@@ -433,8 +461,9 @@ export class FakeDeck {
     switch (e.t) {
       case 'turn.start':
         if (main) {
-          // A new turn: the last one's end no longer has the polls answered at once (#afterTurnEnd).
-          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null, endedMono: null }
+          // A new turn: the last one's end no longer has the polls answered at once (#afterTurnEnd). When the deck got
+          // its start, as a #seenTick, is what status rule 3's turn.start compares the registry's idle with (#status).
+          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, startSeen: ++this.#seenTick, endSeen: null, endedAt: null, endedMono: null }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -446,8 +475,8 @@ export class FakeDeck {
           const id = str(e.turn)
           const same = id === null || s.turn.id === null || id === s.turn.id
           s.turn = {
-            id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, endSeen: ++this.#seenTick,
-            endedAt: this.#now(), endedMono: this.#mono(),
+            id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, startSeen: s.turn.startSeen,
+            endSeen: ++this.#seenTick, endedAt: this.#now(), endedMono: this.#mono(),
           }
           this.#clearMainTools(s)
         }
@@ -749,10 +778,12 @@ export class FakeDeck {
     const id = ++this.#pollSeq
     if (s.inst === null) {
       // PROTOCOL.md, Identity: a session no instance has said hello for asks for one, whatever the poll's inst. That's
-      // after a reset, the deck's restart, or after release rule 4 forgot the session. The mod takes the 409 as a
-      // rejected fetch: it says hello about 100 ms later, and polls again. A mod that had no request open then, waiting
-      // out its second after a poll answered at once, would otherwise have nothing fail to tell it so, and poll on
-      // unheard. The 409 never goes to a session with a current instance, so it never displaces one.
+      // after a reset, the deck's restart, after release rule 4 forgot the session, or once its current instance went
+      // IN_FLIGHT_MS with no poll open (#instanceQuiet). The mod takes the 409 as a rejected fetch: it says hello about
+      // 100 ms later, and polls again. A mod that had no request open then, waiting out its second after a poll answered
+      // at once, would otherwise have nothing fail to tell it so, and poll on unheard; and after a deck restart, a live
+      // mod whose lingering predecessor's hello landed last would have its polls answered at once for good. The 409
+      // never goes to a session with a current instance, so it never displaces one.
       responder.send(409, { error: HELLO_FIRST })
       this.#log({
         kind: 'poll-hello-first', host: s.host, poll: id, inst: str(inst),
@@ -850,23 +881,50 @@ export class FakeDeck {
   }
 
   /**
-   * PROTOCOL.md, "Commands": a waiting prompt has no 60 s clock of its own, since the engine holds it until
-   * the turn ends (S3). It fails with "no result" once its session has gone IN_FLIGHT_MS without an open
-   * poll, as a live mod always keeps one open. Called whenever the session's poll or its waiting prompts change.
+   * A session's time without an open poll, on the monotonic clock, as the deck times it. A live mod always keeps one
+   * open, and a poll answered at once counts as one sent; a poll from an inst that isn't current doesn't count. Once
+   * the session has gone IN_FLIGHT_MS without one, from when its last poll ended or a hello made its instance current:
+   * - PROTOCOL.md, "Commands": its waiting prompts fail with "no result". A waiting prompt has no 60 s clock of its
+   *   own, since the engine holds it until the turn ends (S3).
+   * - PROTOCOL.md, Identity, as amended on 2026-11-03 for Phase 6: its current instance stops counting
+   *   (#instanceQuiet). A lingering predecessor whose hello landed last after a deck restart is made current, and then
+   *   never polls; the live mod's polls, answered at once as an older instance's, don't count.
+   * Called whenever the session's poll, its current instance or its waiting prompts change.
    */
   #armPollGap(s) {
     this.#clearTimer(s.gapTimer)
     s.gapTimer = null
     if (s.poll) return
     const waiting = () => [...this.#commands.values()].filter((c) => c.host === s.host && c.t === 'prompt' && c.state === 'waiting')
-    if (!waiting().length) return
+    if (s.inst === null && !waiting().length) return
     const expire = () => {
       s.gapTimer = null
       for (const c of waiting()) this.#finish(c, 'failed', { error: 'no result' })
+      if (s.inst !== null) this.#instanceQuiet(s)
     }
     const left = (s.pollEndedAt ?? this.#mono()) + this.#inFlightMs - this.#mono()
     if (left <= 0) expire()
     else s.gapTimer = this.#setTimer(expire, left)
+  }
+
+  /**
+   * PROTOCOL.md, Identity: a current instance that has gone IN_FLIGHT_MS with no poll open and none sent stops
+   * counting. The deck forgets which instances said hello for the session, and keeps the rest: settings, held
+   * requests, commands, the seqs it has seen, and the main loop's turn, so how it ended still shows and the polls after
+   * its end are still answered at once. With no current instance, a prompt or mode press on the session alerts
+   * (#cannotSend), while Approve and Deny still answer its held requests (press), as in the real deck; its mod's next
+   * poll gets 409 hello first (poll), and that mod's hello makes it current, with no restart, since none is current
+   * then (hello).
+   */
+  #instanceQuiet(s) {
+    const was = s.inst
+    const quietMs = s.pollEndedAt === null ? null : this.#mono() - s.pollEndedAt
+    s.inst = null
+    s.insts.clear()
+    this.#log({
+      kind: 'inst-quiet', host: s.host, inst: was, quietMs,
+      say: `${s.host}: inst ${was} has had no poll open for ${this.#inFlightMs / 1000} s, so it no longer counts: the deck forgets which instances said hello, and the mod's next poll gets 409 hello first`,
+    })
   }
 
   #deliver(cmds, s) {
@@ -937,7 +995,9 @@ export class FakeDeck {
   /**
    * Approve or Deny (PROTOCOL.md, "Held requests"): acts on the oldest held request across sessions. `shown`
    * is the request the key showed when pressed: undefined skips the check, null means it showed none. A
-   * `tool` request gets Allow or Deny; on an `ask` request either press jumps and answers nothing.
+   * `tool` request gets Allow or Deny; on an `ask` request either press jumps and answers nothing. Whether the
+   * request's session has a current instance doesn't matter, as in the real deck: only a prompt or mode press needs
+   * one (#cannotSend).
    */
   press(key, { shown } = {}) {
     if (key !== 'approve' && key !== 'deny') throw new BadRequest(`no key ${key}`)
@@ -1057,11 +1117,12 @@ export class FakeDeck {
    * Release rule 3: a reading shows the session `idle` and the one before showed it otherwise, so the change came
    * after every request held now arrived. A request is held only for a session the registry confirmed as it came
    * ("Desktop sessions only"), so the reading that releases it is never the session's first. Status rule 3 is
-   * judged by what the bridge saw too: a `busy` began before the main loop's last turn.end when the reading where
-   * the session's `status` or `statusUpdatedAt` last changed, or its first, came before the bridge got that
-   * turn.end (#status). So a rewritten `statusUpdatedAt` is a new `busy`, as it would be by the times, and a new
-   * `name` or a missing `statusUpdatedAt` isn't. Comparing arrivals with `statusUpdatedAt` instead would mix the
-   * bridge's clock with the registry's, which differ in the fixtures (their times are made up).
+   * judged by what the bridge saw too: a `busy` began before the main loop's last turn.end, and an `idle` before its
+   * latest turn.start, when the reading where the session's `status` or `statusUpdatedAt` last changed, or its first,
+   * came before the bridge got that turn.end or turn.start (#status). So a rewritten `statusUpdatedAt` is a new
+   * status, as it would be by the times, and a new `name` or a missing `statusUpdatedAt` isn't. Comparing arrivals
+   * with `statusUpdatedAt` instead would mix the bridge's clock with the registry's, which differ in the fixtures
+   * (their times are made up).
    */
   applyRegistry(entries) {
     const next = new Map()
@@ -1074,10 +1135,11 @@ export class FakeDeck {
       if (!other || showsOver(f, other)) next.set(host, f)
       const sids = listed.get(host) ?? new Set()
       listed.set(host, sids)
-      if (!str(f.sessionId)) continue
-      sids.add(f.sessionId)
-      bySid.set(f.sessionId, host)
+      if (str(f.sessionId)) sids.add(f.sessionId)
     }
+    // A mod's request with no host is placed only by a shown file's sessionId, as the real deck's #hostForSid looks
+    // only at the files it shows; of two shown files that list one sessionId, by the first read.
+    for (const [host, f] of next) if (str(f.sessionId) && !bySid.has(f.sessionId)) bySid.set(f.sessionId, host)
     const prev = this.#registry
     this.#registry = next
     this.#listed = listed
@@ -1101,7 +1163,7 @@ export class FakeDeck {
     for (const [host, p] of prev) {
       if (next.has(host)) continue
       this.#log({ kind: 'registry', change: 'removed', host, last: p, say: `registry - ${host}` })
-      for (const h of this.#heldOf(host)) this.#release(h, 4, 'the session\'s registry file disappeared')
+      for (const h of this.#heldOf(host)) this.#release(h, 4, 'no registry file lists the session\'s host any more')
       this.#sessionEnded(host)
     }
     for (const [host, f] of next) {
@@ -1168,6 +1230,11 @@ export class FakeDeck {
     // ended `aborted` (applyRegistry): the rules after it take the session as idle.
     const stale = reg === 'busy' && s?.turn.lastEnd === 'aborted' && this.#statusSeen.get(host) < s.turn.endSeen
     if (reg === 'busy' && !stale) return 'working'
+    // Rule 3's turn.start: the main loop's latest turn has started and not ended, a turn.end or a failed, and the deck
+    // read the registry's idle before it got that turn.start. Claude Code writes busy a moment into the turn, and the
+    // deck reads the registry once a second. An idle read since, a new one by its status or statusUpdatedAt, means the
+    // turn ended unseen: it doesn't count.
+    if (reg === 'idle' && s && s.turn.startSeen !== null && !s.turn.sawEnd && this.#statusSeen.get(host) < s.turn.startSeen) return 'working'
     if (reg === 'idle' || reg === undefined || stale) {
       if (s?.turn.failed) return 'failed'
       if (s?.turn.lastEnd === 'aborted') return 'interrupted'
@@ -1250,6 +1317,8 @@ export class FakeDeck {
         tools: [...s.tools].map(([use, t]) => ({ use, tool: t.tool, summary: t.summary, fp: t.fp, agent: t.agent })),
         turn: s.turn, statusSeen: this.#statusSeen.get(host) ?? null, context: s.context, settings: s.settings, onScreen: s.onScreen, attachAt: s.attachAt, ended: s.ended,
         poll: s.poll ? { id: s.poll.id, inst: s.poll.inst, openMs: this.#mono() - s.poll.since } : null,
+        // How long the session has gone without an open poll, which a current instance may for less than IN_FLIGHT_MS.
+        noPollMs: s.poll || s.pollEndedAt === null ? null : this.#mono() - s.pollEndedAt,
         lastSeenMs: s.lastSeen === null ? null : now - s.lastSeen,
       }
     }

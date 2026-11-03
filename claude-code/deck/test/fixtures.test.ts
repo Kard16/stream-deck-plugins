@@ -314,8 +314,8 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 describe("fixtures, deck side (claude-code/protocol/fixtures/*.jsonl)", () => {
 	const fixtures = loadFixtures();
 
-	test("all 18 fixtures are here", () => {
-		assert.equal(fixtures.length, 18, fixtures.map((f) => f.name).join(", "));
+	test("all 19 fixtures are here", () => {
+		assert.equal(fixtures.length, 19, fixtures.map((f) => f.name).join(", "));
 	});
 
 	for (const fixture of fixtures) {

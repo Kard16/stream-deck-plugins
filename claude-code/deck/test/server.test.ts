@@ -526,6 +526,47 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.equal(restarted.session(HOST)?.plugin, true);
 	});
 
+	test("two live mods for one host after a deck restart, through the bridge, with the limit shortened to 300 ms: the predecessor's hello lands last, and once it has gone the limit without a poll, the live mod's next poll gets 409, its hello makes it current, and its held poll takes the next command", async () => {
+		const log = new RecordingLog();
+		const restarted = new SessionModel({ log, inFlightMs: 300 });
+		model = restarted;
+		restarted.setRegistry([LISTED]);
+		server = new BridgeServer({ port: 0, token: TOKEN, routes: restarted, log });
+		const port = await server.listen();
+		const hello = (inst: string) => atOnce(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, sid: MOD.sid, host: HOST, inst, cwd: "/x", plugin: "0.3.0", cc: "2.1.309" }) });
+		const poll = (inst: string) => send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${inst}&wait=20` }).outcome;
+		// Each mod's next poll asks for a hello, and each says one. The predecessor's lands last, and replaces the live one's.
+		for (const inst of ["inew", "iold"]) {
+			const answer = await within(poll(inst), 2000);
+			assert.deepEqual([status(answer), json(answer)], [409, { error: "hello first" }], inst);
+		}
+		assert.equal(status(await hello("inew")), 200);
+		assert.equal(status(await hello("iold")), 200);
+		const started = Date.now();
+		// iold polls no more. inew polls every 20 ms or so, a stray's poll answered at once with none, until one asks
+		// for a hello.
+		let strays = 0;
+		for (;;) {
+			const answer = await within(poll("inew"), 2000);
+			if (status(answer) === 409) break;
+			assert.deepEqual([status(answer), json(answer)], [200, { cmds: [] }]);
+			strays++;
+			assert.ok(Date.now() - started < 3000, "never asked for a hello");
+			await sleep(20);
+		}
+		const after = Date.now() - started;
+		assert.ok(after >= 250 && strays > 0, `asked for a hello ${after} ms after iold's, after ${strays} stray polls`);
+		assert.ok(log.at("info").includes(`info UNPOLLED ${HOST}: mod instance "iold" has had no poll open for 0.3 s, so it's no longer the current one, and the deck forgets which instances said hello; the mod's next poll gets 409 to ask for one`), log.at("info").join("\n"));
+		// inew's hello makes it current; its next poll is held, and takes the next command.
+		assert.equal(status(await hello("inew")), 200);
+		const held = poll("inew");
+		await waitFor(() => restarted.commands.polling(HOST), "inew's poll to be held");
+		const queued = restarted.queue(HOST, { t: "prompt", text: "hi" });
+		assert.ok(queued.ok, JSON.stringify(queued));
+		assert.deepEqual(json(await within(held, 2000)), { cmds: [{ id: queued.cmd.id, t: "prompt", text: "hi" }] });
+		assert.equal(queued.cmd.inst, "inew");
+	});
+
 	test("a 409 through the bridge is logged at info once, then at debug: a refused hello's, its REQ lines included, and a poll's that asks for a hello", async () => {
 		const { log, port } = await start();
 		// A claude started inside the session, with the session's host and its own session id.

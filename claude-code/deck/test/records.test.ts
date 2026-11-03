@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
 
 import { sessionStatus } from "../src/model/status.js";
-import { nodeRecordsFs, parseRecord, RecordsReader, type RecordsFs, RecordsWatcher } from "../src/records/records.js";
+import { nodeRecordsFs, parseRecord, RecordsReader, type RecordsFs, RecordsWatcher, SUMMARY_STRING_FIELDS, validSummary } from "../src/records/records.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const A = "local_5e3575bb-5693-4e5e-8e5e-47ddebcaa318";
@@ -192,10 +192,95 @@ describe("status rule 6, the app's own needs-input indicator (its _D, Dw and jM)
 		assert.deepEqual(read({ turnWrapUp: { description: "", needsUser: "" }, postTurnSummary: completed, postTurnSummaryFor: "8c2e0000-0000-4000-8000-0000000000bb", lastAssistantUuid: LAST }), { category: "blocked", status: "needs-you" });
 	});
 
+	test("postTurnSummaryFor and lastAssistantUuid count only as strings, both of them", () => {
+		const asks = { status_category: "need_input" };
+		assert.deepEqual(read({ postTurnSummary: asks, postTurnSummaryFor: LAST, lastAssistantUuid: LAST }), { category: "need_input", status: "needs-you" });
+		for (const [forId, last] of [
+			[7, 7],
+			[true, true],
+			[null, null],
+			[LAST, null],
+			[null, LAST],
+			[LAST, [LAST]],
+			[[LAST], LAST],
+		]) {
+			assert.deepEqual(read({ postTurnSummary: asks, postTurnSummaryFor: forId, lastAssistantUuid: last }), { category: null, status: "idle" }, JSON.stringify([forId, last]));
+		}
+	});
+
 	test("need_input counts, as blocked does; other categories don't", () => {
 		assert.deepEqual(read({ postTurnSummary: { status_category: "need_input", needs_action: "" }, ...forLast }), { category: "need_input", status: "needs-you" });
 		assert.deepEqual(read({ postTurnSummary: { status_category: "review_ready", needs_action: "Review it." }, ...forLast }), { category: "review_ready", status: "idle" });
 		assert.deepEqual(read({ postTurnSummary: { status_category: "completed", needs_action: "Merge it?" }, ...forLast }), { category: "completed", status: "idle" });
 		assert.deepEqual(read({ postTurnSummary: { needs_action: "Merge it?" }, ...forLast }), { category: null, status: "idle" });
+	});
+});
+
+describe("status rule 6 reads only a summary the app's record loader keeps (its OM)", () => {
+	/** A summary that asks for input, with every field the loader checks, each valid. */
+	const asks = {
+		title: "Pick a colour",
+		description: "Asked which colour to use.",
+		status_category: "need_input",
+		status_detail: "Waiting for a choice",
+		recent_action: "Asked a question",
+		needs_action: "Choose red or blue",
+		summarizes_uuid: LAST,
+		is_noteworthy: true,
+	};
+	const forLast = { postTurnSummaryFor: LAST, lastAssistantUuid: LAST };
+	/** The status of an idle session the bridge knows nothing of, from a record with this summary for its last message. */
+	const statusOf = (summary: unknown): string => {
+		const category = parseRecord(A, JSON.stringify({ postTurnSummary: summary, ...forLast }))?.turnCategory ?? null;
+		return sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category });
+	};
+	/** The category of a record whose wrap-up asks the user something, and whose summary says failed: failed if the summary is kept, blocked if it's dropped. */
+	const withWrapUp = (summary: unknown): string | null => parseRecord(A, JSON.stringify({ postTurnSummary: summary, turnWrapUp: { description: "x", needsUser: "Retry?" } }))?.turnCategory ?? null;
+	const notStrings: unknown[] = [null, 7, true, false, {}, ["x"]];
+
+	test("a summary with every field valid is kept, and so is one with any of them missing; other fields don't matter", () => {
+		assert.ok(validSummary(asks));
+		assert.equal(statusOf(asks), "needs-you");
+		for (const field of [...SUMMARY_STRING_FIELDS, "is_noteworthy"]) {
+			const without: Record<string, unknown> = { ...asks };
+			delete without[field];
+			assert.ok(validSummary(without), field);
+			if (field !== "status_category") assert.equal(statusOf(without), "needs-you", field);
+		}
+		assert.ok(validSummary({}));
+		assert.ok(validSummary({ ...asks, anything: null, other: [1] }));
+		assert.equal(statusOf({ ...asks, anything: null, other: [1] }), "needs-you");
+	});
+
+	for (const field of SUMMARY_STRING_FIELDS) {
+		test(`${field}: missing or a string, empty included; null, a number, a boolean, an object or an array drops the whole summary`, () => {
+			assert.ok(validSummary({ ...asks, [field]: "" }), "an empty string");
+			for (const bad of notStrings) {
+				const summary = { ...asks, [field]: bad };
+				assert.equal(validSummary(summary), null, JSON.stringify(bad));
+				assert.equal(statusOf(summary), "idle", `dropped, so no category: ${JSON.stringify(bad)}`);
+				assert.equal(withWrapUp({ ...summary, status_category: field === "status_category" ? bad : "failed" }), "blocked", `a wrap-up with needsUser alone decides: ${JSON.stringify(bad)}`);
+			}
+			assert.equal(withWrapUp({ ...asks, status_category: "failed" }), "failed", "kept, a failed summary stays failed");
+		});
+	}
+
+	test("is_noteworthy: missing or a boolean; null, a string, a number, an object or an array drops the whole summary", () => {
+		assert.ok(validSummary({ ...asks, is_noteworthy: false }));
+		assert.equal(statusOf({ ...asks, is_noteworthy: false }), "needs-you");
+		for (const bad of [null, "yes", "true", 1, 0, {}, [true]]) {
+			const summary = { ...asks, is_noteworthy: bad };
+			assert.equal(validSummary(summary), null, JSON.stringify(bad));
+			assert.equal(statusOf(summary), "idle", JSON.stringify(bad));
+			assert.equal(withWrapUp({ ...summary, status_category: "failed" }), "blocked", JSON.stringify(bad));
+		}
+	});
+
+	test("a summary that isn't an object, or is an array, is dropped", () => {
+		for (const bad of [null, "need_input", 7, true, [asks], []]) {
+			assert.equal(validSummary(bad), null, JSON.stringify(bad));
+			assert.equal(statusOf(bad), "idle", JSON.stringify(bad));
+			assert.equal(withWrapUp(bad), "blocked", JSON.stringify(bad));
+		}
 	});
 });

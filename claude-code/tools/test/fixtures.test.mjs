@@ -4,9 +4,9 @@ import test from 'node:test'
 
 import { FIXTURES_DIR, FixtureError, fixtureFiles, parseFixture, readFixture, resolveFixture } from '../lib/fixtures.mjs'
 
-test('fixtures: all 18 parse, each with a setup, and every reply checks an earlier labeled request', () => {
+test('fixtures: all 19 parse, each with a setup, and every reply checks an earlier labeled request', () => {
   const files = fixtureFiles()
-  assert.equal(files.length, 18)
+  assert.equal(files.length, 19)
   for (const file of files) {
     const fx = readFixture(file)
     assert.ok(fx.setup.session?.host, `${fx.name} has a setup session`)

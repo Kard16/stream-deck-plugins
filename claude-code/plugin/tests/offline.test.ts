@@ -1,8 +1,9 @@
 // The mod with the bridge down, gone, stuck or on another version (PROTOCOL.md, "Failure and recovery"): a fetch
-// that rejects, or a poll answered 409 hello first, is followed 100 ms later by a quick hello, quietly, and a failed
-// request backs off 1, 2, 5, 10 and 30 s, then every 30 s, with a hello each time, until the request that failed
-// goes through; it logs once per outage, and never holds up the session. The clock is the kit's mock, so the waits
-// are exact.
+// that rejects, or a poll answered 409 hello first, is followed 100 ms later by a quick hello, quietly. A failure
+// after that hello, until its request goes through or more than 2 s pass from its answer, is the second, and a failed
+// request backs off 1, 2, 5, 10 and 30 s, then every 30 s, with a hello each time, until the request that failed goes
+// through; it logs once per outage, and never holds up the session. The clock is the kit's mock, so the waits are
+// exact.
 
 import { expect, test } from 'claude-code/testing'
 import { HELLO_FIRST, HOST, MODEL, START, TOKEN, world, type Reply } from './world'
@@ -232,7 +233,7 @@ test("a deck that restarted, or forgot the session, while the mod had nothing op
   await w.settle()
   // The turn the prompt started ends 500 ms on: the deck answers the poll empty, and the mod waits out the rest of
   // that poll's second with no request open. In that second the deck restarts, or a registry reading misses the
-  // session (release rule 4): either way it has had no hello from this instance, and no request of the mod fails.
+  // session (release rule 4): either way no instance has said hello for the session, and no request of the mod fails.
   await w.clock.advance(500)
   w.deliver([])
   await w.settle()
@@ -262,7 +263,7 @@ test("a deck that restarted, or forgot the session, while the mod had nothing op
   expect(w.logs).toEqual([])
 })
 
-test('a second 409 hello first before a poll goes through is a failed request: the outage begins, with its one log line, and hello backs off 1, 2, 5 and 10 s; a poll held and answered at last ends it, so the next 409 has a quick hello again', async ($, on) => {
+test('a second 409 hello first, right after the quick hello is answered and before a poll goes through, is a failed request: the outage begins, with its one log line, and hello backs off 1, 2, 5 and 10 s; a poll held and answered at last ends it, so the next 409 has a quick hello again', async ($, on) => {
   const w = world(on)
   // A deck that asks each poll for a hello, and takes none of them.
   w.bridge.poll = HELLO_FIRST
@@ -510,6 +511,201 @@ test("a quick hello that is itself rejected, or answered 5xx, is the second fail
   expect(w.logs).toHaveLength(2)
 })
 
+// The quick hello's window (PROTOCOL.md, "Failure and recovery"): until the request whose rejection, or 409, asked
+// for a quick hello goes through, a failure up to 2 s after that hello's answer is still the second, and begins the
+// outage. A rejection or a 409 that comes later is a first failure again, with a quick hello of its own.
+
+/** How long after a quick hello's answer a failure comes, and whether it's still the second. */
+const WINDOW: readonly { after: number; second: boolean }[] = [
+  { after: 1000, second: true },
+  { after: 2000, second: true },
+  { after: 2001, second: false },
+  { after: 5000, second: false },
+]
+
+const SECOND = 'is still the second failure: the outage begins, with its one log line and hello 1 s later'
+const FIRST_AGAIN = 'is a first failure again: a quick hello of its own 100 ms later, with no log line and no outage'
+
+for (const c of WINDOW) {
+  test(`a poll the deck holds after a quick hello, abandoned ${c.after} ms after that hello's answer at an Esc or a Deny, ${c.second ? SECOND : FIRST_AGAIN}`, async ($, on) => {
+    const w = world(on)
+    await $.session.start(START)
+    await w.settle()
+    // A Deny abandons the open poll: a quick hello 100 ms later, whose answer opens the poll again, and the deck
+    // holds it.
+    w.abandonOpen()
+    await w.clock.advance(100)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+    expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100])
+    // The next interrupt abandons that poll, still held, so the request the quick hello was for hasn't gone through.
+    await w.clock.advance(c.after)
+    const at = 100 + c.after
+    w.abandonOpen()
+    await w.settle()
+    if (c.second) {
+      expect(w.logs).toHaveLength(1)
+      expect(w.logs[0]).toMatch(/isn't answering \(.*aborted/)
+      await w.clock.advance(999)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+      await w.clock.advance(1)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, at + 1000])
+      expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100, at + 1000])
+      expect(w.logs).toHaveLength(1)
+    } else {
+      expect(w.logs).toEqual([])
+      await w.clock.advance(99)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+      await w.clock.advance(1)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, at + 100])
+      expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100, at + 100])
+      // No outage: the poll that hello opened is held its 20 s, and so are the ones after it, with no hello between.
+      await w.clock.advance(60_000)
+      expect(w.to('/v1/hello')).toHaveLength(3)
+      expect(w.to('/v1/next').map(r => r.at).slice(2)).toEqual([at + 100, at + 20_100, at + 40_100, at + 60_100])
+      expect(w.logs).toEqual([])
+    }
+  })
+}
+
+for (const c of WINDOW) {
+  test(`a poll answered 409 hello first ${c.after} ms after a quick hello's answer, while the event that hello was for is still unanswered, ${c.second ? SECOND : FIRST_AGAIN}`, async ($, on) => {
+    const w = world(on)
+    await $.session.start(START)
+    await w.settle()
+    // An event's fetch is abandoned: a quick hello 100 ms later. The deck takes the event that goes again after it
+    // and leaves it unanswered, so the event doesn't go through, and only the window can end the quick hello.
+    w.abandon('/v1/events')
+    await $.turn.start({ text: 'a', turnId: 't1' })
+    await w.settle()
+    w.bridge.events = 'hang'
+    await w.clock.advance(100)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+    expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+      [1, 0],
+      [1, 100],
+    ])
+    // The deck forgets the session (release rule 4, or a current instance that stopped polling): it answers the poll
+    // it holds with no commands, and the poll after it, at once, with 409 hello first.
+    await w.clock.advance(c.after)
+    const at = 100 + c.after
+    w.forget()
+    await w.settle()
+    expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100, at])
+    if (c.second) {
+      expect(w.logs).toHaveLength(1)
+      expect(w.logs[0]).toMatch(/isn't answering \(a poll was answered 409 hello first\)/)
+      await w.clock.advance(999)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+      await w.clock.advance(1)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, at + 1000])
+      expect(w.logs).toHaveLength(1)
+    } else {
+      expect(w.logs).toEqual([])
+      await w.clock.advance(99)
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+      await w.clock.advance(1)
+      // The same hello, then the poll, which the deck holds again, and the event once more under its seq.
+      expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, at + 100])
+      expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100, at, at + 100])
+      expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+        [1, 0],
+        [1, 100],
+        [1, at + 100],
+      ])
+      expect(w.logs).toEqual([])
+    }
+  })
+}
+
+test("the quick hello's own failure is the second whenever it comes, since the window opens only at its answer: a quick hello the deck takes, leaves unanswered and drops 5 s later begins the outage, with its one log line and hello 1 s later", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // A Deny abandons the open poll, and the deck takes the quick hello 100 ms later and leaves it unanswered.
+  w.bridge.mode = 'hang'
+  w.abandonOpen()
+  await w.clock.advance(100)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+  expect(w.logs).toEqual([])
+  // 5 s on, the connection drops with that hello still unanswered.
+  await w.clock.advance(5000)
+  w.bridge.mode = 'up'
+  w.abandonOpen()
+  await w.settle()
+  expect(w.logs).toHaveLength(1)
+  expect(w.logs[0]).toMatch(/isn't answering \(.*aborted/)
+  await w.clock.advance(999)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+  await w.clock.advance(1)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 6100])
+  expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 6100])
+  expect(w.logs).toHaveLength(1)
+})
+
+test("a quick hello whose request went through is over, its window with it: a later quick hello's window runs from its own answer, so a poll abandoned 0.9 s after that answer, though 2.4 s after the first one's, begins the outage", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // An event's fetch is abandoned: a quick hello 100 ms later, then the event goes again and through.
+  w.abandon('/v1/events')
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.clock.advance(100)
+  expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+    [1, 0],
+    [1, 100],
+  ])
+  // 1.4 s on, a Deny abandons the poll that hello opened: a first failure, since the event went through, so a quick
+  // hello 100 ms later.
+  await w.clock.advance(1400)
+  w.abandonOpen()
+  await w.clock.advance(100)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1600])
+  expect(w.logs).toEqual([])
+  // 0.9 s after that hello's answer, 2.4 s after the first's, an Esc abandons the poll it opened: the second failure.
+  await w.clock.advance(900)
+  w.abandonOpen()
+  await w.settle()
+  expect(w.logs).toHaveLength(1)
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1600, 3500])
+  expect(w.logs).toHaveLength(1)
+})
+
+test("a quick hello that met its second failure is over, its window with it: once that outage ends, a later quick hello's window runs from its own answer, so a poll abandoned 1 s after that answer, though 2.2 s after the first one's, begins an outage", async ($, on) => {
+  const w = world(on)
+  await $.session.start(START)
+  await w.settle()
+  // An event's fetch is abandoned: a quick hello 100 ms later, and the event that goes again after it is answered
+  // 503, the second failure: an outage, with its line and hello 1 s later. The event goes through after that hello.
+  w.abandon('/v1/events')
+  w.bridge.events = 503
+  await $.turn.start({ text: 'a', turnId: 't1' })
+  await w.clock.advance(100)
+  expect(w.logs).toHaveLength(1)
+  w.bridge.events = 204
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1100])
+  expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+    [1, 0],
+    [1, 100],
+    [1, 1100],
+  ])
+  // A Deny abandons the poll that hello opened: a first failure, since the outage is over, so a quick hello.
+  await w.clock.advance(100)
+  w.abandonOpen()
+  await w.clock.advance(100)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1100, 1300])
+  expect(w.logs).toHaveLength(1)
+  // 1 s after that hello's answer, 2.2 s after the first's, an Esc abandons the poll it opened: the second failure.
+  await w.clock.advance(1000)
+  w.abandonOpen()
+  await w.settle()
+  expect(w.logs).toHaveLength(2)
+  await w.clock.advance(1000)
+  expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100, 1100, 1300, 3300])
+  expect(w.logs).toHaveLength(2)
+})
+
 test('a rejection ends its epoch, so the poll left open in it changes nothing when its 35 s run out before the quick hello: no outage, and the poll the hello opens has 35 s of its own', async ($, on) => {
   const w = world(on)
   w.bridge.pollHold = Number.POSITIVE_INFINITY
@@ -532,6 +728,45 @@ test('a rejection ends its epoch, so the poll left open in it changes nothing wh
   expect(w.logs).toHaveLength(1)
   expect(w.logs[0]).toMatch(/a poll had no answer after 35 s/)
 })
+
+/** Late answers to a poll from an epoch that has ended: the check for its epoch comes before the 409's. */
+const LATE: readonly { what: string; reply: Reply }[] = [
+  { what: '409 hello first', reply: HELLO_FIRST },
+  { what: '503', reply: { status: 503, body: { error: 'starting' } } },
+]
+
+for (const late of LATE) {
+  test(`a poll answered ${late.what} once another request's rejection has ended its epoch changes nothing: the quick hello that rejection asked for comes alone, 100 ms on, with no log line and no outage`, async ($, on) => {
+    const w = world(on, { mode: 'hang' })
+    await $.session.start(START)
+    await w.settle()
+    // The deck answers the hello late, then takes the poll after it and leaves it unanswered.
+    w.answerHung(200, { v: 1, ok: true })
+    await w.settle()
+    expect(w.to('/v1/next').map(r => r.at)).toEqual([0])
+    // An event's fetch is abandoned, which ends the epoch that poll is open in.
+    w.bridge.mode = 'up'
+    w.abandon('/v1/events')
+    await $.turn.start({ text: 'a', turnId: 't1' })
+    await w.settle()
+    // The poll's answer comes before the quick hello, from an epoch that's over.
+    w.answerHung(late.reply.status, late.reply.body)
+    await w.settle()
+    expect(w.logs).toEqual([])
+    await w.clock.advance(99)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0])
+    await w.clock.advance(1)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+    expect(w.to('/v1/next').map(r => r.at)).toEqual([0, 100])
+    expect(w.to('/v1/events').map(r => [r.body.seq, r.at])).toEqual([
+      [1, 0],
+      [1, 100],
+    ])
+    await w.clock.advance(60_000)
+    expect(w.to('/v1/hello').map(r => r.at)).toEqual([0, 100])
+    expect(w.logs).toEqual([])
+  })
+}
 
 test('after a quick hello, the request that goes again fails as any request does: answered 5xx, the outage begins as the answer comes; left unanswered, 35 s after it went again', async ($, on) => {
   const w = world(on)

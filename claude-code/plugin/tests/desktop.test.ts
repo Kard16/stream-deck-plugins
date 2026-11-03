@@ -121,6 +121,20 @@ test('the log line hides the token, even inside another variable', async ($, on)
   expect(w.logs[0]?.includes(TOKEN)).toBe(false)
 })
 
+test('a token holding characters JSON escapes, quotes and backslashes, is hidden before the value is quoted: neither it nor its escaped form reaches the log', async ($, on) => {
+  // Escaped, it has no run of 8 characters in common with the token, so a value quoted first would hide nothing.
+  const token = 'a"b\\c"d\\e"f\\g"h'
+  const escaped = JSON.stringify(token).slice(1, -1)
+  const w = world(on, { env: desktopWith({ DECK_TOKEN: token, CLAUDE_CODE_TAGS: `fork ${token} recap` }) })
+  await aTurn($, w)
+  expect(w.sent).toEqual([])
+  expect(w.logs).toHaveLength(1)
+  const line = w.logs[0] ?? ''
+  expect(line).toMatch(/: CLAUDE_CODE_TAGS is set \("fork <token> recap"\)\.$/)
+  expect(line.includes(token)).toBe(false)
+  expect(line.includes(escaped)).toBe(false)
+})
+
 test('a long value is cut short in the log line', async ($, on) => {
   const w = world(on, { env: desktopWith({ CLAUDE_CODE_TAGS: 'x'.repeat(5000) }) })
   await aTurn($, w)
@@ -162,7 +176,7 @@ for (const t of TALKS) {
     const [hello, poll] = w.sent
     expect(hello?.route).toBe('/v1/hello')
     expect(hello?.headers.authorization).toBe(`Bearer ${TOKEN}`)
-    expect(hello?.body).toMatchObject({ v: 1, sid: SID, host: env.CLAUDE_CODE_HOST_SESSION_ID, plugin: '0.2.0' })
+    expect(hello?.body).toMatchObject({ v: 1, sid: SID, host: env.CLAUDE_CODE_HOST_SESSION_ID, plugin: '0.2.1' })
     expect(poll?.route).toBe('/v1/next')
     expect(poll?.query).toMatchObject({ sid: SID, host: env.CLAUDE_CODE_HOST_SESSION_ID })
     expect(w.sent).toHaveLength(2)

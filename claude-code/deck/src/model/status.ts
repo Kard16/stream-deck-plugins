@@ -20,9 +20,10 @@ export type StatusInput = {
 	firstReadingAt: number | null;
 	/**
 	 * The main loop's last turn, as the mod reported it; null when the deck saw none. A subagent's never counts.
-	 * `endedAt` is when the deck got its `turn.end`; null until then.
+	 * `startedAt` is when the deck got its `turn.start`, null when it didn't; `endedAt` when it got its `turn.end`,
+	 * null until then. `ended` covers a `failed` too, which ends the main loop's turn as a `turn.end` does.
 	 */
-	turn: { ended: boolean; reason: string | null; failed: boolean; endedAt: number | null } | null;
+	turn: { ended: boolean; reason: string | null; failed: boolean; startedAt: number | null; endedAt: number | null } | null;
 	/**
 	 * The category of the last turn as the app's needs-input indicator reads it from the app's record; null when the
 	 * indicator ignores the record, or there's none (turnCategory, src/records/records.ts).
@@ -39,6 +40,8 @@ export function sessionStatus(i: StatusInput): SessionStatus {
 	// session as idle.
 	const staleBusy = i.registry === "busy" && beganBeforeAbort(i);
 	if (i.registry === "busy" && !staleBusy) return "working";
+	// The main loop's turn has started, and the registry's reading still shows the idle from before it.
+	if (i.registry === "idle" && idleBeforeStart(i)) return "working";
 	if (i.registry === "idle" || staleBusy) {
 		if (i.turn?.failed) return "failed";
 		if (i.turn?.ended && i.turn.reason === "aborted") return "interrupted";
@@ -59,4 +62,17 @@ function beganBeforeAbort(i: StatusInput): boolean {
 	const abortedAt = i.turn?.ended && i.turn.reason === "aborted" ? i.turn.endedAt : null;
 	const began = i.statusUpdatedAt ?? i.firstReadingAt;
 	return abortedAt !== null && began !== null && began <= abortedAt;
+}
+
+/**
+ * Whether the main loop's latest `turn.start` has no `turn.end` (nor `failed`) yet, and the registry's status, an
+ * `idle` here, began at or before the moment the deck got that `turn.start`: by its `statusUpdatedAt`, else by the
+ * deck's first reading of it, as for the `busy` above. The plugin's `turn.start` arrives within milliseconds, while
+ * the deck reads the registry once a second and Claude Code writes `busy` a moment into the turn. An `idle` that
+ * began later means the turn ended unseen, and doesn't count (PROTOCOL.md, status rule 3).
+ */
+function idleBeforeStart(i: StatusInput): boolean {
+	const startedAt = i.turn !== null && !i.turn.ended ? i.turn.startedAt : null;
+	const began = i.statusUpdatedAt ?? i.firstReadingAt;
+	return startedAt !== null && began !== null && began <= startedAt;
 }

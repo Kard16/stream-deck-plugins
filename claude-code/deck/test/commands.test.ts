@@ -391,6 +391,52 @@ describe("command queue and long poll", () => {
 		assert.deepEqual(dying.answers, []);
 	});
 
+	test("a watched session's listener hears once it has gone 60 s with no poll open and none sent, counted from the watch or its last poll's end; held polls and ones answered at once both count", () => {
+		const { queue, clock } = setup();
+		const heard: string[] = [];
+		queue.onUnpolled((host) => heard.push(host));
+		queue.watch("local_a");
+		assert.equal(queue.watching("local_a"), true);
+		clock.advance(IN_FLIGHT_MS - 1);
+		queue.poll("local_a", "ia", 0, new FakePoll());
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.deepEqual(heard, [], "a poll answered at once counts");
+		let held = new FakePoll();
+		queue.poll("local_a", "ia", 20, held);
+		for (let i = 0; i < 10; i++) {
+			clock.advance(20_000);
+			assert.deepEqual(held.answers, [{ cmds: [] }]);
+			held = new FakePoll();
+			queue.poll("local_a", "ia", 20, held);
+		}
+		assert.deepEqual(heard, [], "held polls count");
+		// The last one runs out, and no other follows.
+		clock.advance(20_000);
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.deepEqual(heard, []);
+		clock.advance(1);
+		assert.deepEqual([heard, queue.watching("local_a")], [["local_a"], false]);
+		clock.advance(5 * IN_FLIGHT_MS);
+		assert.deepEqual(heard, ["local_a"], "once");
+		assert.equal(clock.pendingTimers, 0);
+	});
+
+	test("a session's end ends its watch, and dispose ends every watch; a session not watched has no timer for it", () => {
+		const { queue, clock } = setup();
+		const heard: string[] = [];
+		queue.onUnpolled((host) => heard.push(host));
+		queue.poll("local_c", "ic", 0, new FakePoll());
+		assert.equal(clock.pendingTimers, 0, "not watched, nothing waiting");
+		queue.watch("local_a");
+		queue.failHost("local_a", "the session ended");
+		assert.equal(queue.watching("local_a"), false);
+		queue.watch("local_b");
+		queue.dispose();
+		assert.equal(clock.pendingTimers, 0);
+		clock.advance(2 * IN_FLIGHT_MS);
+		assert.deepEqual(heard, []);
+	});
+
 	test("dispose stops every timer", () => {
 		const { queue, clock } = setup();
 		queue.queue("local_a", { t: "prompt", text: "hi" });

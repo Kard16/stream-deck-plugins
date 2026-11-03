@@ -48,19 +48,36 @@ function wrapUp(v: unknown): { needsUser: string | null } | null {
 	return typeof v.needsUser === "string" ? { needsUser: v.needsUser } : null;
 }
 
+/** The post-turn summary's fields that the app's record loader keeps only when each is missing or a string. */
+export const SUMMARY_STRING_FIELDS = ["title", "description", "status_category", "status_detail", "recent_action", "needs_action", "summarizes_uuid"] as const;
+
+/**
+ * A post-turn summary as the app's record loader keeps it (its `OM`): an object, not an array, whose
+ * SUMMARY_STRING_FIELDS are each missing or a string, and whose `is_noteworthy` is missing or a boolean; `null` is
+ * neither. The loader drops any other, so it's null here, as if the record had none (PROTOCOL.md, status rule 6).
+ * Other fields don't matter.
+ */
+export function validSummary(v: unknown): Obj | null {
+	if (!isObj(v)) return null;
+	for (const field of SUMMARY_STRING_FIELDS) if (v[field] !== undefined && typeof v[field] !== "string") return null;
+	if (v.is_noteworthy !== undefined && typeof v.is_noteworthy !== "boolean") return null;
+	return v;
+}
+
 /**
  * The category of the record's last turn as the app's needs-input indicator reads it (app 4.4212.0's `_D`, with its
- * `Dw`; PROTOCOL.md, status rule 6). The indicator ignores a record with neither a valid wrap-up nor a summary written
- * for its last assistant message (`postTurnSummaryFor` equal to `lastAssistantUuid`): null. The category is the
- * summary's `status_category`, which a valid wrap-up changes: a failed summary stays failed; otherwise a wrap-up with
- * `needsUser`, even an empty one, makes it blocked, and one without turns blocked or need_input into review_ready.
+ * `Dw`, and the record loader's `OM` and `jM`; PROTOCOL.md, status rule 6). The indicator ignores a record with
+ * neither a valid wrap-up nor a summary written for its last assistant message (`postTurnSummaryFor` equal to
+ * `lastAssistantUuid`, both strings): null. The category is the valid summary's `status_category`, or none, which a
+ * valid wrap-up changes: a failed summary stays failed; otherwise a wrap-up with `needsUser`, even an empty one, makes
+ * it blocked, and one without turns blocked or need_input into review_ready.
  */
 function turnCategory(o: Obj): string | null {
 	const w = wrapUp(o.turnWrapUp);
-	const forLast = typeof o.postTurnSummaryFor === "string" && o.postTurnSummaryFor === o.lastAssistantUuid;
+	const forLast = typeof o.postTurnSummaryFor === "string" && typeof o.lastAssistantUuid === "string" && o.postTurnSummaryFor === o.lastAssistantUuid;
 	if (w === null && !forLast) return null;
-	const summary = isObj(o.postTurnSummary) ? o.postTurnSummary : {};
-	const category = typeof summary.status_category === "string" ? summary.status_category : null;
+	const summary = validSummary(o.postTurnSummary);
+	const category = typeof summary?.status_category === "string" ? summary.status_category : null;
 	if (w === null || category === "failed") return category;
 	if (w.needsUser !== null) return "blocked";
 	return category === "blocked" || category === "need_input" ? "review_ready" : category;

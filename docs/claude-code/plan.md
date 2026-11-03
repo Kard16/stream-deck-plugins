@@ -771,6 +771,39 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - As the route research said, this session's Bash picked up both keys, while the tools and tests read neither. CLAUDE.md now says to run `claude` with `env -u`, records where the plugin loads, and lists the install commands. The root README has the guide's link.
   - **The user's sessions load it when they next start.** The running ones are untouched.
   - **Next:** round 3, the hardening and the decisions above.
+- 2026-11-03, **round 3 for Phase 6**, built and verified:
+  - **PROTOCOL.md's amendment "2026-11-03, Phase 6",** no wire change:
+    - a current instance that stops polling stops counting, after 60 s with no poll open and none sent;
+    - the current instance's repeated hello takes `cwd` and `model` only;
+    - status rule 3 shows `working` from the main loop's `turn.start`;
+    - status rule 6 reads only a summary the app's loader `OM` would keep;
+    - the registry: `startedAt`, two files for one host, release rule 4 once no file lists the host, and a reading that can't list the folder keeps the last one (until now it ended every session at once);
+    - the quick hello's window closes 2 s after its answer;
+    - wording: `refused` covers the engine's refusal, and `plugin.json` declares nothing.
+  - **Fixtures:** `status` expects `working` right after its `turn.start`, and `needs-you-record` is new (19 in all). A scan of every fixture found no expect the new rule 3 changes.
+  - **Before the build:** the deck fails 3 of 246 tests, the plugin passes 137 of 137, and the tools fail 9 of 193.
+  - **Built:** workflow `wf_1ed8c2df-844` covers deck, plugin and tools, each built, reviewed adversarially, then refixed (9 agents, about 90 minutes). It also covers many-sessions tests, quiet info logs, recheck checks for the summary loader and the engine's refusal wording, the round 2 nits, and versions deck 0.3.1 and plugin 0.2.1.
+    - All three reviews: pass with minors. The refixes closed the test gaps they found.
+    - recheck now looks for the loader's `is_noteworthy` check only next to its field list: the app has a second copy in another validator, which hid a change to the loader.
+    - The plugin tests' fake deck now fails a test after 200 requests at one clock time, whatever the route, instead of hanging `claude plugin test`. A mod that retries at once after the test kit gives up on a request can still hang it, so the checks run it under a time limit.
+  - **Verified on the main thread:**
+    - deck: typecheck; 286 of 286 tests, also with the clock 2 days ahead and a week back; build; validate.
+    - plugin: tsc; validate; 152 of 152 tests; sync `--check`; its 21 tests.
+    - tools 207 of 207; install 10 of 10; recheck 32 ok; the fixtures regenerate unchanged.
+    - Five mutations in scratch copies, each caught: no watch at the hello (13 fail), the repeated hello takes the mode (1), rule 3's new clause off (5), the fake's `is_noteworthy` unchecked (4), and the quick hello's window never ending (4).
+  - **Measured:** one registry reading of 30 files takes about 8 ms cold and 0.4 ms warm. Info lines across the 19 fixtures went from 107 to 98.
+  - **Wording settled from the reviews** (Phase 6 item 7), matching what the code already did:
+    - a restart is a new instance replacing a current one;
+    - the 60 s count from the later of the last poll's end and the hello, and only polls count;
+    - after them a prompt or mode press alerts, while Approve and Deny still answer;
+    - rule 3's turn ends at a `failed` too;
+    - past the quick hello's window, only a rejection or a 409 gets its own quick hello.
+  - **Two decisions for round 4,** each reproduced by both the deck and tools reviews:
+    - **The forget drops the predecessor too.** A predecessor still alive that says one more hello after the live mod is current again counts as new. That's a restart over the live mod: its commands fail and it's a stray for another minute. Round 4 keeps the list of hellos at the forget, and lets any hello make its instance current while none is. The deck fixer tried it in scratch: all 286 tests pass, and the flip-flop is gone.
+    - **A hello's mode can be older than a PermissionRequest's.** The hello put back an older mode in two cases: after the forget, and after a deck restart when a PermissionRequest comes before the mod's first hello. The Mode dial's press without a turn applies what it shows, so the stale mode could be applied. Round 4: no hello replaces a mode or effort the deck took from a PermissionRequest. That fixes both paths, and 1 test changes.
+  - **Accepted as minor:**
+    - The plugin's version-stop line JSON-encodes before it hides the token. The deck's token is hex, so nothing changes.
+    - A held poll that drops more than 2 s after each quick hello cycles quietly, no faster than about 2 s a round, as the window allows.
 
 ## Progress
 

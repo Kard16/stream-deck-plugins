@@ -12,6 +12,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { SUMMARY_FIELDS, validSummary } from '../lib/registry.mjs'
 import * as R from '../recheck.mjs'
 
 const TOOLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -39,7 +40,7 @@ function record(i, over = {}) {
   }
 }
 
-/** The strings check 4 looks for, as app 4.4212.0's bundle has them. A test blanks one to take it out. */
+/** The strings check 4 looks for, as app 4.4212.0's bundle has them, in its order. A test blanks one to take it out. */
 const PARTS = Object.freeze({
   continueUrl: 'url:"claude://code/continue?session=last&source=desktop_action"',
   continueRoute: 'let e=a.pathname==="/continue"?"code_continue":"code_needs_input",n=a.searchParams.get("session")',
@@ -48,6 +49,11 @@ const PARTS = Object.freeze({
   hostPattern: 'var lmr=/^local_[A-Za-z0-9-]{1,64}$/;',
   modeServer: 'xJi="ccd_session_mgmt"',
   modeTool: 'CJi="set_session_permission_mode"',
+  summaryFields: 'var wM=["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid"];',
+  // The record loader's OM, just after the list it walks: 523 bytes after it in 4.4212.0.
+  noteworthy: 'if(t.is_noteworthy!==void 0){if(typeof t.is_noteworthy!="boolean")return;n.is_noteworthy=t.is_noteworthy}',
+  // The app's other summary validator, 14 MB on in 4.4212.0: the same check, which isn't the loader's.
+  otherValidator: `${' '.repeat(16_384)}e.needs_action!==void 0&&typeof e.needs_action!="string"||e.is_noteworthy!==void 0&&typeof e.is_noteworthy!="boolean"||e.summarizes_uuid!==void 0&&typeof e.summarizes_uuid!="string")`,
 })
 const asarWith = (over = {}) => Buffer.concat([Buffer.alloc(2048, 0), Buffer.from(Object.values({ ...PARTS, ...over }).join('\n')), Buffer.alloc(2048, 0)])
 
@@ -90,14 +96,26 @@ const TEST_FAIL = {
 const sh = (lines) => lines.map((l) => `echo '${l.replace(/'/g, "'\\''")}'`).join('\n')
 
 /**
+ * What the engine's JavaScript says when it refuses a `$.mcp.call`, as 2.1.309's binary has it (check 6), and the
+ * same words in another shape. The stand-in binary carries one of them in a comment.
+ */
+const ENGINE_WORDS = Object.freeze({
+  template: 'throw new He(`${s.plugin}: $.mcp.call(${e}, ${n}) refused: ${q.deny}`)',
+  otherwise: 'throw new He(`${s.plugin}: $.mcp.call(${e} / ${n}) refused: ${q.deny}`)',
+  none: 'throw new He(`${s.plugin}: the call was denied: ${q.deny}`)',
+})
+
+/**
  * A stand-in for Claude Code's binary at `<root>/<version>/<hash>/claude.app/Contents/MacOS/claude`. It says what it was
  * given, refuses to go on with what it mustn't get (DECK_TOKEN, the real HOME, a config folder that isn't fresh, no
- * plugin), then answers as told. `sleep` makes validate hang, for the timeout.
+ * plugin), then answers as told. `sleep` makes validate hang, for the timeout. `engine` is which of ENGINE_WORDS its
+ * comment carries.
  */
-function fakeClaude(f, version, { validate = VALIDATE_OK, test: tests = TEST_OK, sleep = false, hash = 'abc123def456' } = {}) {
+function fakeClaude(f, version, { validate = VALIDATE_OK, test: tests = TEST_OK, sleep = false, hash = 'abc123def456', engine = 'template' } = {}) {
   const bin = path.join(f.claudeCodeRoot, version, hash, 'claude.app', 'Contents', 'MacOS', 'claude')
   fs.mkdirSync(path.dirname(bin), { recursive: true })
   fs.writeFileSync(bin, `#!/bin/sh
+# ${ENGINE_WORDS[engine]}
 echo "args: $1 $2"
 echo "plugin: $3"
 echo "home: $HOME"
@@ -392,11 +410,33 @@ test('recheck: record fields of another type, a mode the deck has no name for, o
   assert.match(byId(rows, 'records').reason, /^3 records in 1 account\/org folder of .*; 1 more didn't parse as a JSON object .*; 1 local_\*\.json whose id the deck's HOST_PATTERN refuses$/)
   assert.match(byId(rows, 'records.permissionMode').reason, /^2\/3 mode name: default 2; 1 mode the deck has no name for\. /)
   assert.match(byId(rows, 'records.turnWrapUp').reason, /^2\/3 object with a string description; 1 object without a string description\. /)
-  assert.match(byId(rows, 'records.postTurnSummary').reason, /^2\/3 object with a string status_category; 1 object without a string status_category\. /)
+  assert.match(byId(rows, 'records.postTurnSummary').reason, /^2\/3 object with a string status_category; 1 object the app's loader drops\. /)
   assert.match(byId(rows, 'records.title').reason, /^2\/3 non-empty string; 1 empty string\. /)
   assert.match(byId(rows, 'records.lastFocusedAt').reason, /^2\/3 number; 1 string\. /)
   assert.match(byId(rows, 'records.summary-for-last').reason, /^0\/3 records with both have them equal\. Status rule 6/)
   assert.match(byId(rows, 'records.lookup').reason, /^3\/4 running sessions' records found/)
+})
+
+test('recheck: a record\'s summary counts only as the app\'s loader keeps it, as status rule 6 reads it: one the loader drops warns', async (t) => {
+  // PROTOCOL.md, status rule 6, as amended for Phase 6: the loader (its OM) keeps a summary whose seven fields are each
+  // missing or a string and whose is_noteworthy is missing or a boolean. Other fields don't matter.
+  const f = fixture(t, { sessions: 0 })
+  const summaries = [
+    { status_category: 'need_input', is_noteworthy: true, extra: 7 },
+    { status_category: 'need_input', is_noteworthy: 'yes' },
+    { status_category: 'need_input', status_detail: null },
+    { status_category: 'need_input', summarizes_uuid: 7 },
+    { title: 'Kept, with no category' },
+    ['need_input'],
+  ]
+  summaries.forEach((postTurnSummary, i) => writeRecord(f, i + 1, record(i + 1, { postTurnSummary })))
+  const row = byId(await R.checkRecords(f.records, []), 'records.postTurnSummary')
+  assert.equal(row.status, 'warn')
+  assert.match(row.reason, /^1\/6 object with a string status_category; 3 object the app's loader drops, 1 object without a string status_category, 1 array\. Status rule 6/)
+  // The same reading as the fake deck's, which plays the fixtures' records (claude-code/tools/lib/registry.mjs).
+  for (const s of [...summaries, null, 'blocked', {}, { is_noteworthy: false }, { needs_action: 'x', recent_action: 'y' }]) {
+    assert.equal(R.summaryDropped(s) === null, validSummary(s) !== null, JSON.stringify(s))
+  }
 })
 
 test('recheck: a needed record field missing from every record fails, as do no records, no folder and no running session\'s record', async (t) => {
@@ -433,9 +473,18 @@ test('recheck: a needed record field missing from every record fails, as do no r
 test('recheck: the bundle is ok with every string, warns when only a corroborating one or a looser pattern is left, and fails when a route or the tool is gone', async (t) => {
   const f = fixture(t)
   let rows = await R.checkBundle(f.asar)
-  assert.deepEqual(statuses(rows), { bundle: 'ok', 'bundle.jump': 'ok', 'bundle.needs-input': 'ok', 'bundle.local-id': 'ok', 'bundle.mode-tool': 'ok' })
+  assert.deepEqual(statuses(rows), { bundle: 'ok', 'bundle.jump': 'ok', 'bundle.needs-input': 'ok', 'bundle.local-id': 'ok', 'bundle.mode-tool': 'ok', 'bundle.summary-loader': 'ok' })
   assert.equal(byId(rows, 'bundle.jump').reason, 'claude://code/continue?session= ×1, "/continue" ×1')
   assert.equal(byId(rows, 'bundle.local-id').reason, '^local_[A-Za-z0-9-]{1,64}$ ×1')
+  // The validator's is_noteworthy check, far from the list, doesn't count.
+  assert.equal(byId(rows, 'bundle.summary-loader').reason, '["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid"] ×1, is_noteworthy!="boolean" ×1 within 2048 bytes after the field list')
+  assert.deepEqual(
+    byId(rows, 'bundle.summary-loader').details.needles.map(({ text, hits, after, within, anchors, elsewhere, status }) => ({ text, hits, after, within, anchors, elsewhere, status })),
+    [
+      { text: JSON.stringify(SUMMARY_FIELDS), hits: 1, after: undefined, within: undefined, anchors: undefined, elsewhere: undefined, status: 'ok' },
+      { text: 'is_noteworthy!="boolean"', hits: 1, after: 'the field list', within: 2048, anchors: 1, elsewhere: null, status: 'ok' },
+    ],
+  )
   assert.match(byId(rows, 'bundle').reason, / 0\.0 MB$/)
 
   const cases = [
@@ -446,6 +495,18 @@ test('recheck: the bundle is ok with every string, warns when only a corroborati
     [{ hostPattern: 'var lmr=/^session_[a-z]+$/;' }, 'bundle.local-id', 'fail', /^\^local_\[A-Za-z0-9-\]\{1,64\}\$ not found\. The app's route ignores/],
     [{ modeTool: 'CJi="set_session_mode"' }, 'bundle.mode-tool', 'fail', /^set_session_permission_mode not found \(found: ccd_session_mgmt ×1\)\. The Mode dial/],
     [{ modeServer: '' }, 'bundle.mode-tool', 'fail', /^ccd_session_mgmt not found/],
+    // The loader's list with a field more: the pair is still there, so it changed. Its check is looked for after the pair.
+    [{ summaryFields: 'var wM=["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid","priority"];' }, 'bundle.summary-loader', 'warn', /^\["title",.*"summarizes_uuid"\] not found, though "status_category","status_detail" is \(×1\), so it changed \(found: is_noteworthy!="boolean" ×1 within 2048 bytes after the field list\)\. Status rule 6 reads/],
+    // Its fields kept in another order, or gone: there's no list to look after.
+    [{ summaryFields: 'var wM=["status_detail","title","status_category"];' }, 'bundle.summary-loader', 'fail', /^\["title",.*"summarizes_uuid"\] not found; is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×2\)\. Status rule 6 reads/],
+    // OM no longer checks is_noteworthy as a boolean, though it still copies it, as the review took it out of the app's
+    // own bundle: the validator's check, still there, doesn't make it ok.
+    [{ noteworthy: 'if(t.is_noteworthy!==void 0){n.is_noteworthy=t.is_noteworthy}' }, 'bundle.summary-loader', 'warn', /^is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×1\), though is_noteworthy is \(×3\), so it changed \(found: \["title",/],
+    [{ noteworthy: 'n.is_noteworthy=t.is_noteworthy===!0' }, 'bundle.summary-loader', 'warn', /^is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×1\), though is_noteworthy is \(×2\), so it changed \(found: \["title",/],
+    // OM no longer reads is_noteworthy at all.
+    [{ noteworthy: '' }, 'bundle.summary-loader', 'fail', /^is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×1\) \(found: \["title",/],
+    // Its check moved away from the list: the check can't tell it's still the loader's, so it fails, for a look.
+    [{ noteworthy: `${' '.repeat(2048)}${PARTS.noteworthy}` }, 'bundle.summary-loader', 'fail', /^is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×2\) \(found: \["title",/],
   ]
   for (const [over, id, status, reason] of cases) {
     fs.writeFileSync(f.asar, asarWith(over))
@@ -461,6 +522,13 @@ test('recheck: the bundle is ok with every string, warns when only a corroborati
 
   assert.equal(R.countHits(Buffer.from('aaaa'), 'aa'), 2, 'hits don\'t overlap')
   assert.equal(R.countHits(Buffer.from('xx"/continue"yy"/continue"'), '"/continue"'), 2)
+  // With spans, only the hits wholly inside one; spans after the first anchor text the bundle has.
+  assert.equal(R.countHits(Buffer.from('ab-xy-xy'), 'xy', [[2, 5]]), 1)
+  assert.equal(R.countHits(Buffer.from('ab-xy'), 'xy', [[2, 4]]), 0, 'one that runs past the span')
+  assert.equal(R.countHits(Buffer.from('xy'), 'xy', []), 0)
+  assert.deepEqual(R.spansAfter(Buffer.from('ab-cd-ab'), { texts: ['zz', 'ab'], within: 3 }), [[2, 5], [8, 11]])
+  assert.deepEqual(R.spansAfter(Buffer.from('ab-cd-ab'), { texts: ['cd', 'ab'], within: 2 }), [[5, 7]])
+  assert.deepEqual(R.spansAfter(Buffer.from('nothing'), { texts: ['zz'], within: 3 }), [])
 })
 
 // ---- 5. the mods API
@@ -563,6 +631,48 @@ test('recheck: check 5 fails without a version, a binary, a plugin at HEAD or in
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 
+// ---- 6. the engine's words
+
+test('recheck: check 6 finds the engine\'s words for a refused $.mcp.call in the newest bundled Claude Code: ok, warn when worded otherwise or gone, and fail with no binary', async (t) => {
+  // The older version keeps the words; only the newest is read.
+  const f = fixture(t, { cc: ['2.1.300', '2.1.309'] })
+  const run = (claudeCodeRoot = f.claudeCodeRoot) => R.checkEngine({ claudeCodeRoot })
+  let rows = await run()
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok' })
+  assert.match(byId(rows, 'engine').reason, /^Claude Code 2\.1\.309, 0\.0 MB$/)
+  assert.equal(byId(rows, 'engine.mcp-refused').reason, '$.mcp.call(<server>, <tool>) refused: <reason> ×1, as the mod reads it')
+  assert.deepEqual(byId(rows, 'engine.mcp-refused').details.sources, [
+    `claude-code/plugin/hooks/commands.ts:${lineOf('claude-code/plugin/hooks/commands.ts', 'const MODE_CALL_REFUSED = ')}`,
+    `claude-code/protocol/PROTOCOL.md:${lineOf('claude-code/protocol/PROTOCOL.md', '`$.mcp.call(<server>, <tool>) refused: <reason>` in 2.1.309')}`,
+  ])
+
+  fakeClaude(f, '2.1.309', { engine: 'otherwise' })
+  rows = await run()
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn' })
+  assert.match(byId(rows, 'engine.mcp-refused').reason, /^\$\.mcp\.call\(<server>, <tool>\) refused: <reason> not found, though \$\.mcp\.call\(…\) refused: is \(×1\), so it changed\. The mod reports a mode change the engine refuses as refused/)
+  fakeClaude(f, '2.1.309', { engine: 'none' })
+  rows = await run()
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn' })
+  assert.match(byId(rows, 'engine.mcp-refused').reason, /^\$\.mcp\.call\(<server>, <tool>\) refused: <reason> not found\. The mod reports/)
+
+  // No root, no version folder, no binary that runs: fail.
+  assert.match((await run(path.join(f.root, 'nowhere')))[0].reason, /^can't list .*nowhere: ENOENT$/)
+  const empty = path.join(f.root, 'empty-cc')
+  fs.mkdirSync(path.join(empty, '2.1.309', 'abc', 'claude.app', 'Contents', 'MacOS'), { recursive: true })
+  fs.writeFileSync(path.join(empty, '2.1.309', 'abc', 'claude.app', 'Contents', 'MacOS', 'claude'), ENGINE_WORDS.template, { mode: 0o644 })
+  rows = await run(empty)
+  assert.deepEqual(statuses(rows), { engine: 'fail' })
+  assert.match(rows[0].reason, /^no claude binary at .*2\.1\.309\/\*\/claude\.app\/Contents\/MacOS\/claude$/)
+
+  // What follows each $.mcp.call( decides, within the bytes the spec allows.
+  const spec = R.ENGINE_CHECKS[0]
+  const hits = (text) => R.engineHits(Buffer.from(text, 'latin1'), spec)
+  // The source's template; the compiled string table's pieces, as 2.1.309's binary has them too; another message.
+  assert.deepEqual(hits(`${ENGINE_WORDS.template}\n: $.mcp.call(\x00\x07\x01\x9f) refused: \n$.mcp.call (x): no tool`), { all: 2, template: 1, near: 1 })
+  assert.deepEqual(hits(`$.mcp.call(${'x'.repeat(130)}) refused: `), { all: 1, template: 0, near: 0 }, 'too far to be its words')
+  assert.deepEqual(hits('$.mcp.call(${a.b}, ${c$}) refused: ${d}'), { all: 1, template: 1, near: 0 })
+})
+
 // ---- privacy
 
 test('recheck: .key files are never opened, by the checks or by the command, and neither is a .json that isn\'t a file', async (t) => {
@@ -618,16 +728,18 @@ test('recheck: the command prints a table or JSON, exits 0 when nothing fails an
   assert.match(r.out, /^ok\s+records: found by host\s+3\/3 running sessions' records found/m)
   assert.match(r.out, /^ok\s+bundle: jump route\s+/m)
   assert.doesNotMatch(r.out, /mods API:/)
-  assert.match(r.out, /\n\n27 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
+  assert.match(r.out, /^ok\s+bundle: summary loader\s+/m)
+  assert.match(r.out, /^ok\s+engine: refused \$\.mcp\.call\s+\$\.mcp\.call\(<server>, <tool>\) refused: <reason> ×1, as the mod reads it$/m)
+  assert.match(r.out, /\n\n30 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
 
   r = await cli([...flags(f), '--skip-plugin', '--json'], { env: { HOME: f.root } })
   assert.equal(r.code, 0)
   const j = JSON.parse(r.out)
   assert.equal(j.ok, true)
-  assert.deepEqual(j.summary, { ok: 27, warn: 0, fail: 0 })
+  assert.deepEqual(j.summary, { ok: 30, warn: 0, fail: 0 })
   assert.deepEqual(j.skipped, ['mods'])
   assert.equal(j.paths.sessions, '~/sessions', 'paths under HOME read ~')
-  assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle'])
+  assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle', 'engine'])
   for (const c of j.checks) assert.deepEqual(Object.keys(c).slice(0, 5), ['group', 'id', 'name', 'status', 'reason'])
   assert.equal(byId(j.checks, 'registry.hostSessionId').details.source, `claude-code/deck/src/registry/registry.ts:${lineOf('claude-code/deck/src/registry/registry.ts', 'str(o.hostSessionId)')}`)
   assert.equal(byId(j.checks, 'records.turnWrapUp').details.source, `claude-code/deck/src/records/records.ts:${lineOf('claude-code/deck/src/records/records.ts', 'wrapUp(o.turnWrapUp)')}`)
@@ -670,7 +782,7 @@ test('recheck: the command runs check 5 too, keeps DECK_TOKEN from Claude Code a
   r = await cli([...flags(f), '--repo', repo], { env: { HOME: f.root, TMPDIR: f.tmp } })
   assert.equal(r.code, 1)
   assert.match(r.out, /^fail\s+mods API: plugin test\s+2\.1\.309 failed \(exit 1\): 1 of 2 failed/m)
-  assert.match(r.out, /\n28 ok, 0 warn, 1 fail\n$/)
+  assert.match(r.out, /\n31 ok, 0 warn, 1 fail\n$/)
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 
@@ -714,6 +826,21 @@ test('recheck: its field lists and strings are the deck\'s and the mod\'s own, s
   // The mod's call, as committed (check 5 runs HEAD's plugin).
   const register = execFileSync('git', ['-C', REPO, 'show', 'HEAD:claude-code/plugin/hooks/register.ts'], { encoding: 'utf8' })
   assert.match(register, /\$\.mcp\.call\('ccd_session_mgmt', 'set_session_permission_mode', \{ session_id: 'self', mode \}\)/)
+
+  // The engine's words the mod reads from a refusal of that call (refusalOf, as committed): check 6's shape, with the
+  // server and the tool register.ts names.
+  const commands = execFileSync('git', ['-C', REPO, 'show', 'HEAD:claude-code/plugin/hooks/commands.ts'], { encoding: 'utf8' })
+  const words = /const MODE_CALL_REFUSED = '([^']+)'/.exec(commands)?.[1]
+  const spec = byId(R.ENGINE_CHECKS, 'mcp-refused')
+  assert.equal(words, `${spec.text}ccd_session_mgmt, set_session_permission_mode${spec.refused}`)
+  assert.match(ENGINE_WORDS.template.slice(ENGINE_WORDS.template.indexOf(spec.text)), spec.template, 'the stand-in carries the shape check 6 looks for')
+
+  // The summary loader's fields: the list check 4 looks for in the bundle, and the one the fake deck's rule 6 reads. Its
+  // is_noteworthy check is looked for after that list, or after the list's own looser pair.
+  assert.deepEqual([...R.SUMMARY_FIELDS], [...SUMMARY_FIELDS])
+  const [list, noteworthy] = byId(R.BUNDLE_CHECKS, 'summary-loader').needles
+  assert.equal(list.text, JSON.stringify(SUMMARY_FIELDS))
+  assert.deepEqual(noteworthy.after, { what: 'the field list', texts: [list.text, list.looser], within: R.LOADER_SPAN })
 })
 
 test('recheck: it cites the deck\'s wire.ts by name, not by line, and each name it cites is there', () => {

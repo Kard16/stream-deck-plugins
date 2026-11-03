@@ -311,6 +311,16 @@ describe("Saved Prompt keys", () => {
 		);
 		assert.equal(keys.look("k")?.state, "refused");
 		assert.ok(log.at("info").some((l) => l.includes('Saved Prompt c1: failed: "not delivered"')));
+		// The key is free: a press is no longer refused for c1. The mod has had no poll open for those same 60 s, so
+		// its instance stopped counting (PROTOCOL.md, Identity), and the press alerts for that instead.
+		keys.press("k");
+		assert.deepEqual(feedback, ["k:alert", "k:alert"]);
+		assert.ok(log.at("info").at(-1)?.endsWith(`Saved Prompt: "Session 1"'s mod has had no poll open for 60 s, so it can't take commands until it says hello again`), log.at("info").join("\n"));
+		// The mod comes back: its next poll asks for a hello, which makes it current, and a press queues for it.
+		const asked = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: `i-${A}`, wait: "20" }), asked);
+		assert.deepEqual(asked.sent, ['{"error":"hello first"}']);
+		model.hello({ v: 1, sid: "sid-1", host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
 		keys.press("k");
 		assert.deepEqual(
 			model.commands.list().map((c) => [c.id, c.state]),
@@ -319,7 +329,7 @@ describe("Saved Prompt keys", () => {
 				["c2", "queued"],
 			],
 		);
-		assert.equal(feedback.length, 1);
+		assert.equal(feedback.length, 2);
 	});
 
 	test("no text, no target, an ended target, or a session without the plugin: the press alerts and nothing is queued", () => {

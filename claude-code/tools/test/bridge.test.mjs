@@ -10,7 +10,7 @@ import test from 'node:test'
 
 import { parseWait, readToken, scrubber, startFakeBridge } from '../lib/bridge.mjs'
 import { hostHeader, send, within } from '../lib/client.mjs'
-import { ALLOW, MAX_BODY, MODE_TOOL, PRE_ALLOW, fingerprint, summary } from '../lib/protocol.mjs'
+import { ALLOW, DENY, MAX_BODY, MODE_TOOL, PRE_ALLOW, fingerprint, summary } from '../lib/protocol.mjs'
 import { MOD, modLoop, request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const A = { sid: 'sid-a', host: 'local_a', inst: 'ia', pid: 11 }
@@ -350,6 +350,17 @@ test('bridge: status rule 6 is the app\'s own needs-input indicator, read from e
     [{ turnWrapUp: { description: 7, needsUser: 'Approve.' } }, 'idle'],
     [{ turnWrapUp: { needsUser: 'Approve.' }, ...last, postTurnSummary: { status_category: 'review_ready' } }, 'idle'],
     [{ turnWrapUp: 'Blocked on you.', ...last, postTurnSummary: { status_category: 'need_input' } }, 'needs-you'],
+    // A summary the app's loader drops (its OM) counts as none: one of its seven fields there and not a string, null
+    // included, or an is_noteworthy there and not a boolean. Fields it doesn't list don't matter.
+    [{ ...last, postTurnSummary: { status_category: 'need_input', is_noteworthy: 'yes' } }, 'idle'],
+    [{ ...last, postTurnSummary: { status_category: 'need_input', status_detail: null } }, 'idle'],
+    [{ ...last, postTurnSummary: { status_category: 'blocked', title: 7 } }, 'idle'],
+    [{ ...last, postTurnSummary: { status_category: 'blocked', summarizes_uuid: ['msg-9'] } }, 'idle'],
+    [{ ...last, postTurnSummary: { status_category: 'need_input', is_noteworthy: false, priority: 3, extra: { nested: 1 } } }, 'needs-you'],
+    [{ ...last, postTurnSummary: ['need_input'] }, 'idle'],
+    [{ ...last, postTurnSummary: null }, 'idle'],
+    // With a valid wrap-up, a dropped summary has no category: a failed one doesn't stay failed, and needsUser blocks.
+    [{ turnWrapUp: { description: 'Stuck.', needsUser: 'Read the error.' }, ...last, postTurnSummary: { status_category: 'failed', recent_action: 7 } }, 'needs-you'],
   ]
   const hosts = cases.map((_, i) => `local_r${i}`)
   cases.forEach(([record], i) => {
@@ -479,17 +490,70 @@ test('bridge: the folders feed the deck: sessions from the registry, settings fr
   assert.deepEqual(listing(), before)
 })
 
-test('bridge: an unreadable registry folder is not every session ending', async (t) => {
+test('bridge: a registry folder that can\'t be listed changes nothing: the last reading stands, and the bridge warns once until a reading succeeds', async (t) => {
+  // PROTOCOL.md, "The deck's session model", as amended for Phase 6 (item 5): until then such a reading ended every
+  // session at once.
   const env = tempEnv(t)
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
-  const bridge = await startBridge(t, env)
+  const lines = []
+  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l) })
   const held = request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, tool_name: 'Bash', tool_input: { command: 'ls' } } })
   await sleep(100)
-  fs.rmSync(env.registryDir, { recursive: true })
+  const moved = `${env.registryDir}-moved`
+  const warnings = () => runLog(env).filter((e) => e.kind === 'registry-unreadable').map((e) => e.error)
+  // A file where the folder was (ENOTDIR), read twice; then a folder it may not list (EACCES), after a good reading.
+  fs.renameSync(env.registryDir, moved)
+  fs.writeFileSync(env.registryDir, 'not a folder')
+  await bridge.rescan()
   await bridge.rescan()
   assert.equal(bridge.deck.view().held.length, 1, 'still held')
-  assert.deepEqual(bridge.deck.view().sessions, [A.host])
+  assert.deepEqual([bridge.deck.view().sessions, bridge.deck.view().status[A.host]], [[A.host], 'approval'])
+  assert.deepEqual(warnings(), ['ENOTDIR'], 'one warning for both readings')
+  fs.rmSync(env.registryDir)
+  fs.renameSync(moved, env.registryDir)
+  await bridge.rescan()
+  if (process.getuid?.() !== 0) {
+    fs.chmodSync(env.registryDir, 0o000)
+    try {
+      await bridge.rescan()
+      await bridge.rescan()
+    } finally {
+      fs.chmodSync(env.registryDir, 0o700)
+    }
+    assert.deepEqual(warnings(), ['ENOTDIR', 'EACCES'], 'warned again once a reading had succeeded between')
+    assert.deepEqual([bridge.deck.view().held.length, bridge.deck.view().sessions], [1, [A.host]])
+  } else {
+    t.diagnostic('running as root, which lists any folder: the EACCES case was skipped')
+  }
+  assert.ok(lines.some((l) => / registry folder unreadable \(ENOTDIR\), so the last reading stands until one succeeds: /.test(l)), lines.join('\n'))
+  assert.deepEqual(runLog(env).filter((e) => e.kind === 'registry' && e.change === 'removed'), [], 'no session ended')
   held.abort()
+})
+
+test('bridge: a registry folder that doesn\'t exist is no sessions: each ends, release rule 4, and the bridge says so once', async (t) => {
+  // PROTOCOL.md, "The deck's session model": "A folder that doesn't exist is no sessions."
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
+  const lines = []
+  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l) })
+  const held = request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, tool_name: 'Bash', tool_input: { command: 'ls' } } })
+  await sleep(100)
+  assert.equal(bridge.deck.view().held.length, 1)
+  fs.rmSync(env.registryDir, { recursive: true })
+  await bridge.rescan()
+  await bridge.rescan()
+  assert.deepEqual((await within(held.answer, 1000, 'the held request: no answer within 1 s')).json, {}, 'released with no decision')
+  assert.deepEqual([bridge.deck.view().held, bridge.deck.view().sessions], [[], []])
+  const log = runLog(env)
+  assert.deepEqual(log.filter((e) => e.kind === 'release').map((e) => e.rule), [4])
+  assert.deepEqual(log.filter((e) => e.kind === 'registry-missing').length, 1, 'said once')
+  assert.deepEqual(log.filter((e) => e.kind === 'registry-unreadable'), [], 'and no warning: nothing went wrong')
+  assert.ok(lines.some((l) => / registry folder missing, so no sessions: /.test(l)))
+  // Back, with the session: it's listed again.
+  fs.mkdirSync(env.registryDir)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: 2 })
+  await bridge.rescan()
+  assert.deepEqual(bridge.deck.view().sessions, [A.host])
 })
 
 test('bridge: the run log has every request and answer, and never the token', async (t) => {
@@ -521,7 +585,8 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   const env = tempEnv(t)
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
   const lines = []
-  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l) })
+  // The 60 s a command or a current instance has are cut to 1.5 s, so an instance stops counting before the end.
+  const bridge = await startBridge(t, env, { quiet: false, print: (l) => lines.push(l), inFlightMs: 1_500 })
   // Every answer this waits for comes within 3 s, or the test fails: a fake that held one wrongly mustn't hang it.
   const answered = (handle, what) => within(handle.answer, 3000, `${what}: no answer within 3 s`)
   const call = (opts) => answered(request(bridge, env.token, opts), opts.path)
@@ -597,6 +662,10 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   await call({ method: 'POST', path: '/control/reset' })
   assert.equal(await within(n4.answer.then(() => 'answered', () => 'cut off'), 3000, 'n4: neither answered nor cut off within 3 s'), 'cut off')
   assert.deepEqual((await answered(next('ia2'), 'the poll after the reset')).json, { error: 'hello first' })
+  // Its hello makes it current again; with no poll after it for the bridge's 1.5 s, it stops counting.
+  await call({ method: 'POST', path: '/v1/hello', json: { v: 1, ...mod('ia2'), cwd: '/s', model: 'm', plugin: '0.2.0', cc: '2.1.309' } })
+  for (let i = 0; i < 300 && bridge.deck.state().sessions[A.host]?.inst !== null; i++) await sleep(10)
+  assert.equal(bridge.deck.state().sessions[A.host].inst, null, 'no instance counts')
   bridge.deck.state = () => {
     throw new TypeError('the state broke')
   }
@@ -605,7 +674,7 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   await bridge.close()
 
   const log = runLog(env)
-  const kinds = ['fp-check', 'held', 'release', 'answered', 'command', 'result-ignored', 'mode-check', 'mode-allowed', 'unconfirmed', 'client-gone', 'poll-turn-end', 'poll-at-once', 'poll-superseded', 'poll-stale', 'poll-cut', 'poll-hello-first', 'hello', 'mod-restart', 'request', 'registry', 'route-error', 'control-error', 'client-error']
+  const kinds = ['fp-check', 'held', 'release', 'answered', 'command', 'result-ignored', 'mode-check', 'mode-allowed', 'unconfirmed', 'client-gone', 'poll-turn-end', 'poll-at-once', 'poll-superseded', 'poll-stale', 'poll-cut', 'poll-hello-first', 'hello', 'mod-restart', 'inst-quiet', 'request', 'registry', 'route-error', 'control-error', 'client-error']
   assert.deepEqual(kinds.filter((k) => !log.some((e) => e.kind === k)), [], 'every kind the jq lines select')
   assert.ok(log.some((e) => e.unlogged), 'and a line that says why its body is missing')
   // The fields the jq lines pick out.
@@ -616,6 +685,8 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   assert.ok(log.some((e) => e.kind === 'unconfirmed' && e.route === 'pretool' && e.sid === 'sid-child' && e.host === A.host))
   assert.ok(log.some((e) => e.kind === 'client-gone' && e.route === 'pretool' && e.sid === 'sid-gone' && e.host === A.host && typeof e.why === 'string'))
   assert.ok(log.some((e) => e.kind === 'poll-hello-first' && e.host === A.host && e.inst === 'ia2' && Number.isInteger(e.poll)))
+  assert.ok(log.some((e) => e.kind === 'inst-quiet' && e.host === A.host && e.inst === 'ia2' && e.quietMs > 1_000))
+  assert.ok(log.some((e) => e.kind === 'hello' && e.again === false && e.madeCurrent === true && Array.isArray(e.took)))
   assert.ok(log.some((e) => e.kind === 'poll-at-once' && Array.isArray(e.cmds) && Number.isFinite(e.sinceTurnEndMs)))
   assert.ok(log.some((e) => e.kind === 'request' && e.path === '/v1/next' && typeof e.query === 'string' && Number.isInteger(e.n) && e.method === 'GET' && e.auth === 'ok'))
   assert.ok(log.some((e) => e.kind === 'registry' && e.change === 'changed' && e.to.status === 'idle' && e.host === A.host))
@@ -630,6 +701,7 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
     [new RegExp(` ${press.json.cmd} delivered to local_a \\(inst ia\\)`), 'its delivery'],
     [/ registry ~ local_a busy → idle/, 'a registry change'],
     [/ local_a: poll from inst ia2 answered 409 hello first: no instance has said hello for the session/, 'a hello first'],
+    [/ local_a: inst ia2 has had no poll open for 1\.5 s, so it no longer counts: the deck forgets which instances said hello, and the mod's next poll gets 409 hello first/, 'an instance that stopped polling'],
   ]
   assert.deepEqual(want.filter(([re]) => !re.test(said)).map(([, what]) => what), [], said)
 })
@@ -842,6 +914,95 @@ test('bridge: a registry reading that misses the session answers its poll and fo
   assert.deepEqual(mod.trace.filter((x) => x.what === 'outage'), [], 'and no outage')
 })
 
+test('bridge: after a reset, a live mod and its lingering predecessor both say hello, the predecessor\'s last: once that has gone the bridge\'s limit with no poll, the live mod\'s next poll hears 409, its hello makes it current, and it takes the next command', async (t) => {
+  // PROTOCOL.md, Identity, as amended for Phase 6 (item 1): the two-processes case from round 2's review. The live mod
+  // is played as claude-code/plugin/hooks/bridge.ts plays it; the bridge's 60 s are cut to 2.5 s (inFlightMs).
+  const env = tempEnv(t)
+  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: 1 })
+  const bridge = await startBridge(t, env, { inFlightMs: 2_500 })
+  const live = modLoop(bridge, env.token, { ...A, inst: 'inew' })
+  t.after(() => live.stop())
+  live.start()
+  const state = () => bridge.deck.state().sessions[A.host]
+  const control = (p, json = {}) => request(bridge, env.token, { method: 'POST', path: p, json }).answer
+  await live.until(() => state()?.poll?.inst === 'inew', 2000, 'its first poll held')
+  // The deck restarts: the live mod's poll is cut off, and it says hello again 100 ms later.
+  await control('/control/reset')
+  await live.until((tr) => tr.filter((x) => x.what === 'hello' && x.status === 200).length === 2, 2000, 'its hello after the reset')
+  await live.until(() => state()?.poll?.inst === 'inew', 2000, 'its poll held again')
+  // The predecessor's hello lands last: it's made current, and it never polls.
+  const old = await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: A.sid, host: A.host, inst: 'iold', cwd: '/s', model: 'm', plugin: '0.2.0', cc: '2.1.309' } }).answer
+  assert.deepEqual([old.json, state().inst], [{ v: 1, ok: true }, 'iold'])
+  const since = live.trace.length
+  // The live mod's polls are answered at once with none, a second apart, as an older instance's.
+  await live.until((tr) => tr.slice(since).filter((x) => x.what === 'poll' && x.status === 200).length >= 2, 3000, 'polls answered at once')
+  assert.equal(state().inst, 'iold')
+  // Then the predecessor has gone 2.5 s with no poll: it stops counting. The live mod's next poll asks for a hello.
+  await live.until((tr) => helloAfter409(tr, since - 1) >= 0, 4000, 'a 409, then a hello')
+  await live.until(() => state()?.poll?.inst === 'inew', 2000, 'its poll held after the hello')
+  assert.equal(state().inst, 'inew')
+  const press = await control('/control/prompt', { host: A.host, text: 'Hi.' })
+  assert.equal(press.json.ok, true, JSON.stringify(press.json))
+  await live.until(() => live.cmds.some((c) => c.id === press.json.cmd), 2000, 'the command delivered')
+  const log = runLog(env)
+  assert.deepEqual(log.filter((e) => e.kind === 'inst-quiet').map((e) => [e.host, e.inst]), [[A.host, 'iold']])
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-stale').map((e) => [e.inst, e.current]).slice(0, 2), [['inew', 'iold'], ['inew', 'iold']])
+  assert.deepEqual(live.trace.filter((x) => x.what === 'outage'), [], 'and no outage: each 409 brought a quick hello')
+})
+
+test('bridge: 30 sessions at once: each says hello and keeps a poll open, their held requests are answered oldest first across sessions, and a command reaches only its own session', async (t) => {
+  const env = tempEnv(t)
+  const S = Array.from({ length: 30 }, (_, i) => ({ i, sid: `sid-${i}`, host: `local_s${i}`, inst: `i${i}`, pid: 1000 + i }))
+  for (const s of S) writeRegistry(env, s.pid, { sessionId: s.sid, hostSessionId: s.host, name: `Session ${s.i}`, status: 'busy', statusUpdatedAt: 1, startedAt: s.i })
+  const bridge = await startBridge(t, env)
+  const until = async (test, ms, what) => {
+    const deadline = Date.now() + ms
+    while (!test()) {
+      if (Date.now() > deadline) throw new Error(`${what}: not within ${ms} ms`)
+      await sleep(5)
+    }
+  }
+  const view = () => bridge.deck.view()
+  assert.equal(view().sessions.length, 30)
+  // Every hello at once; then every mod's long poll, held.
+  const hellos = await Promise.all(S.map((s) => request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: s.sid, host: s.host, inst: s.inst, cwd: `/s/${s.i}`, model: `m${s.i}`, plugin: '0.3.1', cc: '2.1.309' } }).answer))
+  assert.deepEqual(hellos.filter((r) => r.status !== 200 || r.json.ok !== true), [])
+  const polls = S.map((s) => request(bridge, env.token, { path: `/v1/next?sid=${s.sid}&host=${s.host}&inst=${s.inst}&wait=20` }))
+  const sessions = () => bridge.deck.state().sessions
+  await until(() => S.every((s) => sessions()[s.host]?.poll?.inst === s.inst), 3000, 'every poll held')
+  assert.deepEqual(S.map((s) => view().settings[s.host].model), S.map((s) => `m${s.i}`), 'each session its own hello')
+  // A request from each session, in a scrambled order, each sent once the one before is held: that's their age.
+  const order = S.map((_, k) => S[(k * 7) % 30])
+  const held = []
+  for (const s of order) {
+    const h = request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': s.host }, json: { session_id: s.sid, tool_name: 'Bash', tool_input: { command: `echo ${s.i}` } } })
+    held.push({ s, h })
+    await until(() => view().held.length === held.length, 2000, `${s.host}'s request held`)
+  }
+  assert.deepEqual(view().held.map((x) => x.host), order.map((s) => s.host), 'oldest first, across sessions')
+  assert.ok(S.every((s) => view().status[s.host] === 'approval'))
+  // Approve and Deny in turn, each on the key showing the oldest: each answers exactly that one, the rest stay held.
+  for (const [k, { s, h }] of held.entries()) {
+    const oldest = view().held[0]
+    assert.equal(oldest.host, s.host)
+    const key = k % 2 === 0 ? 'approve' : 'deny'
+    const r = await request(bridge, env.token, { method: 'POST', path: `/control/${key}`, json: { shown: oldest.id } }).answer
+    assert.deepEqual([r.json.ok, r.json.request], [true, oldest.id])
+    const a = await within(h.answer, 2000, `${s.host}: no answer within 2 s`)
+    assert.deepEqual(a.json, key === 'approve' ? ALLOW : DENY)
+    assert.equal(view().held.length, 29 - k)
+    assert.ok(held.slice(k + 1).every((x) => !x.h.settled), `after ${k + 1} presses, the rest still held`)
+  }
+  // A prompt for one session, and a mode change for another, reach only their own polls.
+  const prompt = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: S[17].host, text: 'Only you.' } }).answer
+  const mode = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: S[3].host, mode: 'plan' } }).answer
+  assert.deepEqual((await within(polls[17].answer, 2000, 'S17\'s poll')).json, { cmds: [{ id: prompt.json.cmd, t: 'prompt', text: 'Only you.' }] })
+  assert.deepEqual((await within(polls[3].answer, 2000, 'S3\'s poll')).json, { cmds: [{ id: mode.json.cmd, t: 'mode', mode: 'plan' }] })
+  await sleep(100)
+  assert.deepEqual(polls.map((p, i) => [i, p.settled]).filter(([i, settled]) => settled !== (i === 3 || i === 17)), [], 'every other poll still open')
+  assert.deepEqual([view().cmds[prompt.json.cmd], view().cmds[mode.json.cmd]], ['delivered', 'delivered'])
+})
+
 test('bridge: a reset with the mod\'s poll open cuts it off: the mod\'s fetch fails, it says hello 100 ms later, and takes the next command', async (t) => {
   // As a deck that restarts drops the connection; the mod played as bridge.ts plays it, no 409 needed.
   const env = tempEnv(t)
@@ -880,15 +1041,23 @@ test('bridge: a hook\'s request whose client goes away while the registry is rea
     return readdir(...args)
   }
   const sids = ['sid-a2', 'sid-a3', 'sid-a4']
+  const taken = async () => (await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken
   try {
     const requests = [['/v1/pretool', mode], ['/v1/permission', mode], ['/v1/permission', { tool_name: 'Write', tool_input: { file_path: '/s/a.txt', content: 'a' } }]]
     for (const [i, [p, json]] of requests.entries()) {
       writeRegistry(env, A.pid, { sessionId: sids[i], hostSessionId: A.host, status: 'busy', statusUpdatedAt: 2 + i })
-      const before = (await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken
+      const before = await taken()
       const h = hook(p, { ...json, session_id: sids[i] })
       await sleep(50)
       h.abort()
-      for (let n = 0; n < 100 && (await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken === before; n++) await sleep(10)
+      // /control/taken counts it once that reading is done, though it's neither held nor answered (README.md): what
+      // fake-claude sends next can't land before the bridge is done with it.
+      let after = before
+      for (let n = 0; n < 100 && after === before; n++) {
+        await sleep(10)
+        after = await taken()
+      }
+      assert.equal(after, before + 1, `${p} from ${sids[i]}: counted as taken`)
     }
   } finally {
     fsp.readdir = readdir

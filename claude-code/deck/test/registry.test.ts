@@ -185,6 +185,115 @@ describe("registry reader (~/.claude/sessions/*.json), against a temp folder", (
 		assert.match(log.lines[0]?.message ?? "", /ENOENT/);
 	});
 
+	test("a folder that can't be listed for another reason than ENOENT gives the last reading again, warned of once, until it can; then it's readable again, at info", async () => {
+		write("1701.json", entry(1701));
+		write("1805.json", entry(1805, { status: "busy" }));
+		let fail: string | null = null;
+		const fs: RegistryFs = { ...nodeRegistryFs, readdir: (d) => (fail === null ? nodeRegistryFs.readdir(d) : Promise.reject(Object.assign(new Error(`${fail}: listing ${d}`), { code: fail }))) };
+		const log = new RecordingLog();
+		const reader = new RegistryReader(dir, { fs, log });
+		const good = await reader.scan();
+		assert.equal(good.length, 2);
+		fail = "EACCES";
+		for (let i = 0; i < 5; i++) assert.deepEqual(await reader.scan(), good, `scan ${i}`);
+		fail = "EIO";
+		assert.deepEqual(await reader.scan(), good, "another reason, the same streak");
+		assert.deepEqual(log.at("warn"), [`warn can't list ${dir} (EACCES): keeping the last reading, of 2 session(s), until it can`]);
+		// Listed again: the folder as it is now.
+		fail = null;
+		unlinkSync(path.join(dir, "1805.json"));
+		assert.deepEqual(
+			(await reader.scan()).map((s) => s.key),
+			["1701"],
+		);
+		assert.deepEqual(
+			log.lines.filter((l) => l.level === "info").map((l) => l.message),
+			[`${dir} is readable again`],
+		);
+		// A folder that's gone is no sessions, warned of once too, and that's the last reading from then on.
+		fail = "ENOENT";
+		assert.deepEqual(await reader.scan(), []);
+		assert.deepEqual(await reader.scan(), []);
+		fail = "EPERM";
+		assert.deepEqual(await reader.scan(), [], "the last reading, after ENOENT");
+		assert.deepEqual(log.at("warn").slice(1), [`warn can't list ${dir} (ENOENT): no sessions`, `warn can't list ${dir} (EPERM): keeping the last reading, of 0 session(s), until it can`]);
+	});
+
+	test("a folder that can't be listed gives back the latest reading, not an older one: what changed, ended or started since the first stays as last read", async () => {
+		write("1701.json", entry(1701));
+		write("1805.json", entry(1805));
+		let fail = false;
+		const fs: RegistryFs = { ...nodeRegistryFs, readdir: (d) => (fail ? Promise.reject(Object.assign(new Error(`EACCES: listing ${d}`), { code: "EACCES" })) : nodeRegistryFs.readdir(d)) };
+		const log = new RecordingLog();
+		const reader = new RegistryReader(dir, { fs, log });
+		assert.deepEqual(
+			(await reader.scan()).map((s) => [s.key, s.status]),
+			[
+				["1701", "idle"],
+				["1805", "idle"],
+			],
+		);
+		// Since the first reading, 1701 has turned busy, 1805 has ended and 1902 has started.
+		write("1701.json", entry(1701, { status: "busy", statusUpdatedAt: 1_793_551_000_500 }));
+		unlinkSync(path.join(dir, "1805.json"));
+		write("1902.json", entry(1902));
+		const latest = await reader.scan();
+		assert.deepEqual(
+			latest.map((s) => [s.key, s.status]),
+			[
+				["1701", "busy"],
+				["1902", "idle"],
+			],
+		);
+		fail = true;
+		for (let i = 0; i < 3; i++) assert.deepEqual(await reader.scan(), latest, `scan ${i}`);
+		assert.deepEqual(log.at("warn"), [`warn can't list ${dir} (EACCES): keeping the last reading, of 2 session(s), until it can`]);
+	});
+
+	test("a first reading that can't list the folder has no last reading to keep: no sessions", async () => {
+		write("1701.json", entry(1701));
+		const fs: RegistryFs = { ...nodeRegistryFs, readdir: () => Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" })) };
+		const log = new RecordingLog();
+		assert.deepEqual(await new RegistryReader(dir, { fs, log }).scan(), []);
+		assert.deepEqual(log.at("warn"), [`warn can't list ${dir} (EACCES): keeping the last reading, of 0 session(s), until it can`]);
+	});
+
+	test("a file that can't be read keeps its last good reading, and a new one is left out, each warned of once until it reads again", async () => {
+		write("1701.json", entry(1701, { status: "busy" }));
+		const blocked = new Set<string>();
+		const fs: RegistryFs = {
+			...nodeRegistryFs,
+			readFile: (f) => (blocked.has(path.basename(f)) ? Promise.reject(Object.assign(new Error(`EACCES: ${f}`), { code: "EACCES" })) : nodeRegistryFs.readFile(f)),
+		};
+		const log = new RecordingLog();
+		const reader = new RegistryReader(dir, { fs, log });
+		const good = await reader.scan();
+		// It changes, so the reader reads it again, and can't; and a new file can't be read either.
+		write("1701.json", entry(1701, { status: "idle", name: "Changed" }));
+		write("1805.json", entry(1805));
+		blocked.add("1701.json");
+		blocked.add("1805.json");
+		for (let i = 0; i < 4; i++) assert.deepEqual(await reader.scan(), good, `scan ${i}`);
+		assert.deepEqual(log.at("warn"), [
+			`warn can't read ${path.join(dir, "1701.json")} (EACCES): keeping its last good reading until it can`,
+			`warn can't read ${path.join(dir, "1805.json")} (EACCES): leaving it out until it can`,
+		]);
+		blocked.clear();
+		assert.deepEqual(
+			(await reader.scan()).map((s) => [s.key, s.status]),
+			[
+				["1701", "idle"],
+				["1805", "idle"],
+			],
+		);
+		// A new streak warns again.
+		write("1701.json", entry(1701, { status: "busy" }));
+		blocked.add("1701.json");
+		await reader.scan();
+		await reader.scan();
+		assert.equal(log.at("warn").length, 3);
+	});
+
 	test("the watcher tells listeners only when something changed", async () => {
 		const watcher = new RegistryWatcher(new RegistryReader(dir));
 		const seen: string[][] = [];

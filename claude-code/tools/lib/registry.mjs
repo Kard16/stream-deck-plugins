@@ -26,17 +26,20 @@ function pick(obj, fields) {
 }
 
 /**
- * Reads every `<pid>.json` in the registry folder. Returns `{ok, entries, unreadable}`: `entries` maps file
- * name to the kept fields. A file that doesn't parse is most likely half-written, so its last good reading
- * from `previous` stands in for it. `ok` is false when the folder itself can't be read: the caller then
- * keeps what it had, rather than taking every session for ended.
+ * Reads every `<pid>.json` in the registry folder (PROTOCOL.md, "The deck's session model"). Returns `{ok, missing?,
+ * entries, unreadable}`: `entries` maps file name to the kept fields. A file that doesn't parse is most likely
+ * half-written, so its last good reading from `previous` stands in for it, and one with none is left out.
+ * - A folder that doesn't exist (ENOENT) is no sessions: `ok`, with `missing` and no entries.
+ * - `ok` is false when the folder can't be listed for any other reason (EACCES, ENOTDIR…): the caller then keeps
+ *   its last reading, rather than taking every session for ended.
  */
 export async function readRegistry(dir, previous = new Map()) {
   let names
   try {
     names = await fsp.readdir(dir)
   } catch (err) {
-    return { ok: false, error: err.code ?? String(err), entries: previous, unreadable: [] }
+    if (err?.code === 'ENOENT') return { ok: true, missing: true, entries: new Map(), unreadable: [] }
+    return { ok: false, error: err?.code ?? String(err), entries: previous, unreadable: [] }
   }
   const entries = new Map()
   const unreadable = []
@@ -88,15 +91,34 @@ export async function signature(file) {
 }
 
 /**
+ * The post-turn summary's fields that the app's record loader keeps only when each is missing or a string: app
+ * 4.4212.0's list, which its `OM` walks. recheck.mjs looks for this very list in the app's bundle.
+ */
+export const SUMMARY_FIELDS = Object.freeze(['title', 'description', 'status_category', 'status_detail', 'recent_action', 'needs_action', 'summarizes_uuid'])
+
+/**
+ * A `postTurnSummary` as the app's record loader keeps it (its `OM`; PROTOCOL.md, status rule 6), or null for one
+ * it drops: an object, not an array, whose SUMMARY_FIELDS are each missing or a string, and whose `is_noteworthy` is
+ * missing or a boolean. `null` is neither. Other fields don't matter: the loader leaves them out.
+ */
+export function validSummary(v) {
+  if (!isObject(v)) return null
+  for (const k of SUMMARY_FIELDS) if (v[k] !== undefined && typeof v[k] !== 'string') return null
+  if (v.is_noteworthy !== undefined && typeof v.is_noteworthy !== 'boolean') return null
+  return v
+}
+
+/**
  * Whether the app's own needs-input indicator would show for a record (PROTOCOL.md, status rule 6): app
- * 4.4212.0's `_D`, with its `Dw` and the record loader's `jM`.
+ * 4.4212.0's `_D`, with its `Dw` and the record loader's `OM` and `jM`.
+ * - A valid summary is one the loader keeps (validSummary). It drops any other.
  * - A valid wrap-up is a `turnWrapUp` object with a string `description`, empty or not, and a `needsUser` that's
  *   missing or a string. The loader drops any other.
  * - The record counts only with a valid wrap-up, or a summary of its last assistant message: a
  *   `postTurnSummaryFor` equal to its `lastAssistantUuid`. Both are ids, which the loader keeps only as strings.
- * - The turn's category is the summary's `status_category`. A valid wrap-up recasts it: `failed` stays `failed`;
- *   otherwise one with a `needsUser`, even an empty one, makes it `blocked`, and one without turns `blocked` and
- *   `need_input` into `review_ready`.
+ * - The turn's category is the valid summary's `status_category`, or none. A valid wrap-up recasts it: `failed`
+ *   stays `failed`; otherwise one with a `needsUser`, even an empty one, makes it `blocked`, and one without turns
+ *   `blocked` and `need_input` into `review_ready`.
  * - The indicator shows for `blocked` and `need_input`.
  */
 export function needsInput(record) {
@@ -104,7 +126,7 @@ export function needsInput(record) {
   const valid = isObject(wrapUp) && typeof wrapUp.description === 'string' && (wrapUp.needsUser === undefined || typeof wrapUp.needsUser === 'string')
   const forLast = typeof record.postTurnSummaryFor === 'string' && record.postTurnSummaryFor === record.lastAssistantUuid
   if (!valid && !forLast) return false
-  let category = isObject(record.postTurnSummary) ? record.postTurnSummary.status_category : undefined
+  let category = validSummary(record.postTurnSummary)?.status_category
   if (valid && category !== 'failed') {
     if (wrapUp.needsUser !== undefined) category = 'blocked'
     else if (category === 'blocked' || category === 'need_input') category = 'review_ready'
