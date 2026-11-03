@@ -836,6 +836,28 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Both are narrow, and both matter only through the Mode dial's press without a turn, which applies the shown mode. That's a design question for the user.
   - **Also accepted as nits:** the fake has no test for moving to the newest place, nor for its 2 s window's length, nor for kind mode's source. The real deck has a test for the first. It takes kind mode's mode and effort as any PermissionRequest's, before its kind-mode branch.
   - `claude-code/README.md`'s "When something's off" now covers a press that alerts because a session's plugin hasn't checked in for a minute.
+  - **Committed** as 86054e1.
+- 2026-11-03, **round 4 live:**
+  - Restarted only the Claude deck plugin, on 0.3.2, at 12:02Z. T2–T4 said hello with plugin 0.2.1 within 22 ms of the bridge listening.
+  - All 8 live checks pass.
+  - **The live 60 s check on T2** (`stale.mjs` in the scratchpad), all 6 pass:
+    - A made-up instance's hello under T2's host replaced T2's mod: RESTART.
+    - It never polled. At 60.6 s it stopped counting (UNPOLLED). T2's mod's next poll got 409, and its hello made it current 105 ms later, with no restart.
+    - The made-up instance's poll was then a stray's, answered at once with none. Its hello again changed nothing, and T2's held poll stayed open.
+    - Nothing reached T2's engine: the hellos carried no mode, model or effort, and no command was queued.
+  - The log since the restart has no warning or error. `deck-install.mjs status`: installed and current, since the plugin is unchanged.
+- 2026-11-03, **Phase 6's overnight scope is done.** What's left needs the user, as one checklist:
+  1. If **Deck test T4** still shows an approval card in the app, answer it either way. Then say whether the main thread may archive Deck test T2, T3 and T4.
+  2. **Restart the Claude app.** Every session then has the plugin, and each on the Sessions dial should show full status, not just working or idle.
+  3. **Mode dial on one of your sessions in Auto:** turn to Manual and press: one press, no card. Then back to Auto: the app's approval comes up and the deck allows it. Report whether each change took and whether a card stayed up.
+  4. **Approve and Deny** on a request from one of your sessions in Manual. Report what the key showed and whether each press took.
+  5. **A Saved Prompt** with harmless text to one of your sessions.
+  6. **Recovery:** restart the Stream Deck app, then sleep and wake the Mac, then reboot. After each, the sessions should show full status within seconds, though macOS 26 can delay localhost for minutes after a reboot.
+  7. Optional: `chmod 600 ~/.claude/settings.json`.
+  8. Optional: open a side chat in one of your sessions for a minute, for the fork check. The main thread then reads the deck's log.
+  9. **A design question:** should a Mode dial press without a turn do nothing, rather than apply the mode it shows? That would close the stale-mode residue that round 4 accepted.
+  10. **A day of real use,** with the deck's log at debug. Then the main thread reads the logs.
+  - To take the plugin back out of the user's sessions: `deck-install.mjs undo`.
 
 ## Progress
 
@@ -864,5 +886,6 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - It covers stale instances, repeated hellos, status rules 3 and 6, registry failures and the quick hello's window.
     - It adds tests with 30 sessions, quieter info logs, and recheck checks for the summary loader and the engine's refusal wording.
   - The guide is `claude-code/README.md`.
-  - Round 4 built and verified: deck 0.3.2. The plugin is unchanged, so 0.2.1 stays released.
+  - Round 4 committed (86054e1) and live: deck 0.3.2; the plugin is unchanged, so 0.2.1 stays released.
+  - The overnight scope is done. The user's checklist is in the Log's last entry.
   - Still to come: a reboot (macOS 26's localhost delay), the next Claude app update with recheck, and a day of real use.
