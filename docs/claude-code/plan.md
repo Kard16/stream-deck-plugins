@@ -1,6 +1,6 @@
 # Claude Code build plan
 
-**Status:** Phase 3, building in parallel tracks, 2026-11-01. The contract is frozen in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
+**Status:** Phase 5, started 2026-11-03 as an overnight run at the user's word. Phase 4 has step 11 left. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -671,6 +671,16 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     1. Step 11, at the user's choice, with the Claude app restart last.
     2. The decision on mode changes from Auto, which the classifier refuses.
     3. Then Phase 5, when the user says so.
+- 2026-11-03, **Phase 5 started, as an overnight run, at the user's word.** The user took all three recommendations:
+  1. **Install tonight.** Once the route checks out, the main thread adds env lines to `~/.claude/settings.json`. They point at a release copy of the plugin kept in the repo, so dev edits never reach the user's sessions, and `DECK_TOKEN` goes in the same block. One command undoes it. Sessions load the plugin when they next start, this one included. Terminal sessions stay quiet.
+  2. **Mode from Auto:** test, in T3 (already in Auto), a PreToolUse hook that the deck allows only for a change pressed on the deck. If that gets past the auto-mode classifier, build it. If not, the Mode dial on an Auto session shows "Change in app", and a press jumps to the session.
+  3. **Phase 6 items that need nobody** come after tonight's Phase 5 work.
+  - The Mac is kept awake for the night (`request_keep_awake`, until the session goes idle). T2 (Manual) and T3 (Auto) are reused, so tonight needs no new session.
+  - **The night's order:**
+    1. Side by side: the install route's open questions (does settings `env` override the preset's; does the app set plugin folders of its own; a folder marketplace as the fallback), and the Auto spike.
+    2. One protocol round and a build workflow.
+    3. The release, the install and their checks.
+    4. Phase 6.
 
 ## Progress
 
@@ -691,5 +701,5 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Done lag: fixed, 2026-11-03. Live, the registry goes idle 5–6 ms after a turn ends, and the deck shows done within a second.
   - Step 10: dropped.
   - Step 11: later.
-- [ ] Phase 5: daily use, when the user says so
+- [ ] Phase 5: daily use. Started 2026-11-03 as an overnight run; the Log's last entry says where it stands.
 - [ ] Phase 6: hardening
