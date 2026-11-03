@@ -51,9 +51,9 @@ export function sessionStatus(i: StatusInput): SessionStatus {
 
 /**
  * Whether the registry's status began at or before the moment the deck got the main loop's last `turn.end`, with
- * reason `aborted`: by its `statusUpdatedAt`, else by the deck's first reading of it. Claude Code keeps an
- * interrupted session `busy` for up to 8 s after Esc, while the mod's `turn.end` comes within milliseconds
- * (Phase 4).
+ * reason `aborted`: by its `statusUpdatedAt`, else by the deck's first reading of it. After a turn, Claude Code
+ * keeps the session `busy` until a moment when the mod has no request open (PROTOCOL.md, Commands), and the deck
+ * reads the registry once a second, while the mod's `turn.end` comes within milliseconds (Phase 4).
  */
 function beganBeforeAbort(i: StatusInput): boolean {
 	const abortedAt = i.turn?.ended && i.turn.reason === "aborted" ? i.turn.endedAt : null;

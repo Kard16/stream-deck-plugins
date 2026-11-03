@@ -84,6 +84,10 @@ The deck queues commands for a session when the user presses a key. The mod fetc
 **`GET /v1/next?sid=<sid>&host=<host>&inst=<inst>&wait=<s>`**
 - With commands queued for that session, it answers them at once, oldest first.
 - Otherwise it holds the request up to `wait` seconds (0–20, default 20; 0 answers at once) and answers as soon as a command is queued, or with `{"cmds": []}` when the time is up.
+- **At the end of the main loop's turn,** a `turn.end` or `failed` without `agent`, it answers the session's open poll with `{"cmds": []}` at once. Then, until a main-loop `turn.start` comes or for 60 s, while its registry reading says `busy`:
+  - **It answers each of the session's polls at once,** with the commands queued for it or none.
+  - **When the reading turns `busy`, it answers the poll it holds** with `{"cmds": []}`. The deck reads the registry once a second, so a poll can come before the reading says `busy`: after a shorter turn, or after a Deny while the reading still says `waiting`.
+  - Why: Claude Code keeps a session `busy` in the registry until a moment after the turn when the mod has no request open. A poll held past the turn's end kept it `busy` for up to 20 s more. So did a poll the mod opened while its `measure` for the turn was still on its line (Phase 4). The mod's wait after an early empty answer, below, gives Claude Code that moment, and keeps the polls to about one a second.
 - One open poll per session: a new poll answers any older one from the same session with `{"cmds": []}` at once.
 - A command is `queued`, then `delivered` once a poll has answered it, then `waiting` (prompts only), then `done`, `refused` or `failed`.
 - A queued command that no poll has taken 60 s after it was queued counts as `failed`, with "not delivered": the session's mod isn't polling.
@@ -168,7 +172,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 1. `approval`: the bridge holds a `tool` request for the session.
 2. `needs-you`: the bridge holds an `ask` request for it; or the registry says `waiting` and nothing is held for it (a session without the plugin, or a request lost when the deck restarted).
 3. `working`: the registry says `busy`. With the plugin, the summary of the main loop's latest unfinished `tool.start` says on what.
-   - **A `busy` that began before the main loop's last turn ended with reason `aborted` doesn't count,** and rules 4–8 take the session as idle. Claude Code keeps an interrupted session `busy` for up to 8 s after Esc, while the plugin's `turn.end` arrives within milliseconds (Phase 4).
+   - **A `busy` that began before the main loop's last turn ended with reason `aborted` doesn't count,** and rules 4–8 take the session as idle. After a turn, Claude Code keeps the session `busy` until a moment when the mod has no request open ([Commands](#commands)), and the deck reads the registry once a second, while the plugin's `turn.end` arrives within milliseconds (Phase 4).
    - **The `busy` began before** when its `statusUpdatedAt` is at or before the moment the deck got that `turn.end`. Without that field, it began before when the deck's first reading of it came at or before then. Its first reading is the first that showed the session `busy` since one showed it otherwise. A session's very first reading counts.
 4. `failed`: idle, and its last main-loop turn ended with `failed`. A subagent's `failed` doesn't count.
 5. `interrupted`: idle, and its last main-loop `turn.end` had reason `aborted`.
@@ -199,7 +203,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
     - `streamdeck restart` brings the deck back within 85 ms (Phase 4), so the new deck must still get a hello, with its version check, before anything else.
   - **What the mod does:** it backs off 1, 2, 5, 10 and 30 s, then every 30 s, with a hello each time, and logs once per outage. Once a hello gets `ok: true`, it reopens its poll and resends the failed request under its original `seq`. The outage, and so the backoff, ends only when the request whose failure began it goes through, meaning any answer under 500 for an event or result and a 2xx for a poll. Later failures in the same outage don't replace that request, and an answered hello alone doesn't end it.
   - **Any other answer to an event or result** that isn't 2xx and is under 500, such as a 4xx, drops that one request, so a bad request can't block the line. It's logged once per route and status.
-  - The mod never holds up the session.
+  - The mod never holds up the session's work. Its open requests do hold up the registry's `idle` after a turn, so the deck answers its polls at once from the turn's end until the session is idle ([Commands](#commands)).
 - **The deck plugin restarts with requests held:** their connections drop, the hooks get no decision, and the app's dialogs stay up. The sessions still read `waiting` in the registry, so the deck shows them as `needs-you`. Queued and in-flight commands are lost.
 - **The hook's timeout** is 600 s. After it, Claude Code drops the hook and the dialog stays. The bridge sees the connection close and releases the request.
 - **The mod reloads:** see `inst` in [Identity](#identity).
@@ -327,3 +331,11 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
    - In Phase 4, Claude Code kept T3 `busy` for 8.2 s after an Esc, while the plugin's `turn.end` reached the deck 3 ms after it.
    - The `prompt-refused` fixture now keeps the registry `busy` past the `turn.end`.
    - (The deck's session model, Fixtures)
+
+**2026-11-03, Phase 4** (no wire change):
+1. At the end of the main loop's turn, the deck answers the session's open poll with `{"cmds": []}`. Then, for up to 60 s and until a main-loop `turn.start`, while the registry says `busy`, it answers the session's polls at once, and answers the poll it holds when its reading turns `busy`. Claude Code keeps a session `busy` until a moment after the turn when the mod has no request open. (Commands, Failure and recovery)
+   - In the retests, T2 stayed `busy` for 17 s after a normal turn ended. In each of the three turn ends logged at debug level before the change, the registry went `idle` 2 ms before the deck logged the mod's next poll, that is, as the poll that was open when the turn ended ran out.
+   - Answering only the open poll brought a short turn to 5 ms. But a turn whose `measure` reached the deck after its `turn.end` stayed `busy` for 20 s, because the mod polled again while the `measure` was on its line. Answering its polls at once brought the same turn to 4 ms.
+   - Both reviewers found that a poll could still come before the deck's once-a-second reading said `busy`, after a short turn or a Deny, and be held for 20 s. So a reading that turns `busy` in that time answers the poll the deck holds.
+   - This corrects the 2026-11-02 entry. The 8.2 s after an Esc came from the same poll, and the delay follows every turn, not only an interrupted one. Status rule 3 stays, for the second before the deck reads the registry again. (The deck's session model)
+2. The `status`, `approve` and `prompt-refused` fixtures answer `n1` at the `turn.end` and the next poll at once while the registry says `busy`. `deny` holds its next poll: its registry still says `waiting`. (Fixtures)

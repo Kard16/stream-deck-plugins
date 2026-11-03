@@ -186,6 +186,24 @@ export class CommandQueue {
 	}
 
 	/**
+	 * The mod reported that the main loop's turn ended, with a `turn.end` or `failed`: the session's open poll, if it
+	 * has one, is answered with none at once. Claude Code keeps a session `busy` in the registry until a moment after
+	 * the turn when the mod has no request open, so a poll held past the turn's end would keep it `busy` for up to
+	 * 20 s more (PROTOCOL.md, Commands). The mod then polls again, and the queue holds that poll for the wait it's
+	 * given, which the session model makes none while the registry still says `busy` (SessionModel's `next`). A poll
+	 * it held because the session model's reading didn't say `busy` yet is answered here too, once the reading does
+	 * (SessionModel's `setRegistry`). Returns whether a poll was answered.
+	 */
+	turnEnded(host: string): boolean {
+		const poll = this.#polls.get(host);
+		if (!poll) return false;
+		const answered = poll.reply.open;
+		this.#endPoll(poll);
+		send(poll.reply, []);
+		return answered;
+	}
+
+	/**
 	 * The mod restarted, as instance `inst`: its delivered and waiting commands are lost, so they fail, and queued
 	 * ones stay queued. A poll the old instance left open is answered with none, so commands queued from now on
 	 * wait for the new instance's poll.

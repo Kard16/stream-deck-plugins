@@ -1,4 +1,4 @@
-{"note":"A turn that reads a file. The deck shows working with the file name, then done, with the context %."}
+{"note":"A turn that reads a file. The deck shows working with the file name, then done, with the context %. When the turn ends, the bridge answers the open poll with no commands, and the mod's next poll at once while the registry still says busy: Claude Code keeps the session busy until a moment when the mod has no request open (Phase 4)."}
 {"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
 {"mod":{"on":"session.start","e":{"cwd":"/Users/me/sandbox","surface":null,"isInteractive":false}}}
 {"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
@@ -15,5 +15,8 @@
 {"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":4,"events":[{"t":"measure","context":{"percent":12,"tokens":120000,"window":1000000},"at":1793600000400}]}}}
 {"mod":{"on":"turn.complete","e":{"turnId":"t1","reason":"answer","isAborted":false,"durationMs":2400,"answer":"Done."}}}
 {"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":5,"events":[{"t":"turn.end","turn":"t1","reason":"answer","at":1793600000500}]}}}
+{"reply":{"to":"n1","status":200,"body":{"cmds":[]}}}
+{"plugin":{"as":"n2","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"reply":{"to":"n2","status":200,"body":{"cmds":[]}}}
 {"registry":{"pid":101,"status":"idle","statusUpdatedAt":1793600005000}}
 {"expect":{"status":{"local_test-a":"done"},"context":{"local_test-a":12},"doing":{"local_test-a":null}}}

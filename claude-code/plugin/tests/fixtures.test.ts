@@ -11,6 +11,7 @@
 
 import type { On } from 'claude-code'
 import { expect, mock, test, type Engine, type MockClock } from 'claude-code/testing'
+import { POLL_MIN_MS } from '../hooks/bridge'
 import { FIXTURES } from './fixtures.gen'
 
 const BRIDGE = 'http://127.0.0.1:47600'
@@ -252,6 +253,10 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
       const isPoll = route === '/v1/next'
       const list = isPoll ? polls : others
       const n = isPoll ? pollsSeen++ : othersSeen++
+      for (let k = 0; k < 20 && list.length <= n; k++) await clock.settle()
+      // After an empty answer that came sooner than POLL_MIN_MS, as at a turn's end, the mod waits out the rest
+      // before it polls again (PROTOCOL.md, "Commands"). The clock moves only when told to.
+      if (isPoll && list.length <= n) await clock.advance(POLL_MIN_MS)
       for (let k = 0; k < 20 && list.length <= n; k++) await clock.settle()
       const req = list[n]
       if (req === undefined) {

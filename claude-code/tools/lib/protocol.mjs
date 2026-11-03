@@ -37,6 +37,12 @@ export const MAX_WAIT_S = 20
  */
 export const IN_FLIGHT_MS = 60_000
 
+/**
+ * From the main loop's turn end, the deck answers the session's polls at once, while the registry still says busy
+ * and until a main-loop turn.start, for less than this long after it.
+ */
+export const AT_ONCE_MS = 60_000
+
 /** The app's `local_…` ids. A host that doesn't match counts as missing, and the sid places the request. */
 export const HOST_PATTERN = /^local_[A-Za-z0-9-]{1,64}$/
 

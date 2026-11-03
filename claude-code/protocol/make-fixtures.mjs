@@ -214,7 +214,7 @@ const fixtures = {}
   const a = session(A)
   const read = { file_path: `${CWD}/notes.md` }
   fixtures.status = [
-    note('A turn that reads a file. The deck shows working with the file name, then done, with the context %.'),
+    note("A turn that reads a file. The deck shows working with the file name, then done, with the context %. When the turn ends, the bridge answers the open poll with no commands, and the mod's next poll at once while the registry still says busy: Claude Code keeps the session busy until a moment when the mod has no request open (Phase 4)."),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Summarise notes.md'),
@@ -228,6 +228,9 @@ const fixtures = {}
     a.ev({ t: 'measure', context: { percent: 12, tokens: 120000, window: 1000000 } }),
     a.turnEnd('t1'),
     a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
+    reply('n1', { cmds: [] }),
+    a.next('n2'),
+    reply('n2', { cmds: [] }),
     a.registry({ status: 'idle', statusUpdatedAt: T0 + 5000 }),
     { expect: { status: { [A.host]: 'done' }, context: { [A.host]: 12 }, doing: { [A.host]: null } } },
   ]
@@ -255,6 +258,9 @@ const fixtures = {}
     a.ev(toolEnd('Write', 'u2', write)),
     a.turnEnd('t1'),
     a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
+    reply('n1', { cmds: [] }),
+    a.next('n2'),
+    reply('n2', { cmds: [] }),
     a.registry({ status: 'idle', statusUpdatedAt: T0 + 4000 }),
     { expect: { status: { [A.host]: 'done' } } },
   ]
@@ -280,6 +286,8 @@ const fixtures = {}
     a.ev(toolEnd('Bash', 'u3', bash, { ok: false })),
     a.turnEnd('t1'),
     a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
+    reply('n1', { cmds: [] }),
+    a.next('n2'),
     a.registry({ status: 'idle', statusUpdatedAt: T0 + 4000 }),
     { expect: { held: [], status: { [A.host]: 'done' } } },
   ]
@@ -398,7 +406,7 @@ const fixtures = {}
   const text = 'Carry on.'
   const why = 'the session was stopped and nobody has sent input since'
   fixtures['prompt-refused'] = [
-    note('After the user pressed Esc, the engine drops prompts from the mod until the user types in the session (S2). The Saved Prompt key shows refused. Claude Code keeps the session busy for seconds after the Esc (Phase 4), so the deck shows interrupted from the turn.end, before the registry goes idle.'),
+    note("After the user pressed Esc, the engine drops prompts from the mod until the user types in the session (S2). The Saved Prompt key shows refused. Claude Code keeps the session busy for a moment after the turn.end, and the deck reads the registry once a second (Phase 4), so the deck shows interrupted from the turn.end, before the registry goes idle. Until then the bridge answers the mod's polls at once; the poll after that is held, and the press's prompt goes through it."),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Write a long story'),
@@ -407,14 +415,18 @@ const fixtures = {}
     { expect: { status: { [A.host]: 'working' } } },
     a.turnEnd('t1', 'aborted'),
     a.ev({ t: 'turn.end', turn: 't1', reason: 'aborted' }),
+    reply('n1', { cmds: [] }),
+    a.next('n2'),
+    reply('n2', { cmds: [] }),
     { expect: { status: { [A.host]: 'interrupted' } } },
     a.registry({ status: 'idle', statusUpdatedAt: T0 + 9000 }),
+    a.next('n3'),
     { expect: { status: { [A.host]: 'interrupted' } } },
     { press: { prompt: { session: A.host, text } } },
-    reply('n1', { cmds: [{ id: 'c1', t: 'prompt', text }] }),
+    reply('n3', { cmds: [{ id: 'c1', t: 'prompt', text }] }),
     { engine: { call: 'prompt.submit', args: { text, asUser: true }, returns: { drop: why } } },
     a.result('c1', 'waiting'),
-    a.next('n2'),
+    a.next('n4'),
     a.result('c1', 'refused', { error: `dropped: ${why}` }),
     { expect: { cmds: { c1: 'refused' } } },
   ]

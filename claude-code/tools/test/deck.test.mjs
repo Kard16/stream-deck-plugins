@@ -400,6 +400,433 @@ test('deck: long polls: wait, one open poll per session, answered as soon as a c
   assert.equal(deck.poll({ sid: 'unknown', host: '', inst: 'i', wait: 20, responder: responder() }), null)
 })
 
+test('deck: the main loop\'s turn.end answers the session\'s open poll with no commands at once, and once the registry says idle the poll after it is held as usual', () => {
+  // PROTOCOL.md, "Commands": Claude Code keeps a session busy in the registry until a moment after the turn when the
+  // mod has no request open, so a poll held past the turn's end kept the deck showing working for up to 20 s more
+  // (Phase 4).
+  const { deck, clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'], [B, 'busy'])
+  hello(A)
+  hello(B)
+  const n1 = poll(A)
+  const nB = poll(B)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'tool.start', tool: 'Read', use: 'u1', summary: 'notes.md', fp: 'f1' }, { t: 'tool.end', tool: 'Read', use: 'u1', fp: 'f1', ok: true })
+  clock.advance(5_000)
+  assert.equal(n1.r.sent.length, 0, 'held while the turn runs')
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }], 'answered at the turn.end, not when its wait runs out')
+  assert.equal(nB.r.sent.length, 0, 'another session\'s poll stays open')
+  assert.equal(deck.state().sessions[A.host].poll, null)
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end').map((e) => [e.host, e.poll, e.by]), [[A.host, n1.id, 'turn.end']])
+
+  // With no request open, Claude Code turns the session idle. Once the bridge reads that, the mod's next poll is held
+  // as usual though the turn ended just before it: polls are answered at once only while the registry still says busy
+  // (the tests after these). Had the mod's fetch of the turn.end rejected after the deck took it, its quiet hello, its
+  // new poll and its resend under the same seq change nothing: the resend is dropped as a retry.
+  reg([A, 'idle'], [B, 'busy'])
+  hello(A)
+  const n2 = poll(A)
+  deck.events({ sid: A.sid, host: A.host, inst: A.inst, seq: 2, events: [{ t: 'turn.end', turn: 't1', reason: 'answer', at: 1 }] })
+  clock.advance(19_999)
+  assert.equal(n2.r.sent.length, 0)
+  const c = deck.prompt({ host: A.host, text: 'Next.' }).cmd
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Next.' }] } }], 'answered when a command is queued')
+  const n3 = poll(A)
+  clock.advance(19_999)
+  assert.equal(n3.r.sent.length, 0)
+  clock.advance(1)
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }], 'or when its wait runs out')
+
+  // A turn the user stopped with Esc ends with reason aborted, which answers it too.
+  const n4 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't2' }, { t: 'turn.end', turn: 't2', reason: 'aborted' })
+  assert.deepEqual(n4.r.sent, [{ status: 200, json: { cmds: [] } }])
+})
+
+test('deck: the main loop\'s failed answers the open poll too, and so does a turn end whose agent isn\'t a non-empty string', () => {
+  const { log, reg, hello, ev, poll } = setup()
+  // The registry doesn't say busy, so the polls after a turn end are held as usual, not answered at once (the tests
+  // after these), and each turn end here finds one open.
+  reg([A, 'idle'])
+  hello(A)
+  const n1 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'failed', error: 'API error' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  // The failed turn's own turn.end may follow it, and answers the poll the mod opened since: PROTOCOL.md names both.
+  const n2 = poll(A)
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end').map((e) => [e.poll, e.by]), [[n1.id, 'failed'], [n2.id, 'turn.end']])
+
+  // PROTOCOL.md, "Events": an agent that isn't a non-empty string counts as none, the main loop's.
+  for (const agent of ['', null, 7, ['ag1'], { id: 'ag1' }]) {
+    for (const e of [{ t: 'failed', agent, error: 'API error' }, { t: 'turn.end', turn: 't2', agent, reason: 'answer' }]) {
+      const n = poll(A)
+      ev(A, e)
+      assert.deepEqual(n.r.sent, [{ status: 200, json: { cmds: [] } }], `${e.t} with agent ${JSON.stringify(agent)}`)
+    }
+  }
+})
+
+test('deck: a subagent\'s turn.end or failed leaves the open poll alone, as do the main loop\'s other events', () => {
+  const { reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const n1 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.start', turn: 's1', agent: 'ag1' }, { t: 'turn.start', turn: 's2', agent: 'ag2' })
+  ev(A, { t: 'turn.end', turn: 's1', agent: 'ag1', reason: 'answer' })
+  ev(A, { t: 'failed', agent: 'ag2', error: 'overloaded' })
+  ev(A, { t: 'turn.end', turn: 's2', agent: 'ag2', reason: 'aborted' })
+  assert.equal(n1.r.sent.length, 0, 'the main loop\'s turn is still running')
+  ev(
+    A,
+    { t: 'tool.start', tool: 'Read', use: 'u1', summary: 'a.md', fp: 'f1' },
+    { t: 'tool.end', tool: 'Read', use: 'u1', fp: 'f1', ok: true },
+    { t: 'measure', context: { percent: 5, window: 10 } },
+    { t: 'settings', mode: 'plan' },
+    { t: 'attach', surface: 'desktop' },
+    { t: 'detach', surface: 'desktop' },
+    { t: 'end', reason: 'clear' },
+    { t: 'turn.ended', turn: 't1' },
+  )
+  assert.equal(n1.r.sent.length, 0)
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }], 'the main loop\'s turn.end does')
+})
+
+test('deck: a main-loop turn end with no poll open breaks nothing, and the poll after it is held until the next turn end', () => {
+  const { deck, clock, log, reg, hello, ev, poll, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  // Before the mod's first poll.
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  // Between a poll's answer and the next, with a prompt the engine holds until the session is idle (S3): its time
+  // without an open poll runs from that answer, whatever ends a turn meanwhile.
+  const c = deck.prompt({ host: A.host, text: 'Next.' }).cmd
+  poll(A)
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c, state: 'waiting' })
+  clock.advance(30_000)
+  ev(A, { t: 'turn.start', turn: 't2' }, { t: 'failed', error: 'API error' }, { t: 'turn.end', turn: 't2', reason: 'answer' })
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end'), [], 'no poll to answer')
+  reg([A, 'idle'])
+  assert.equal(view().status[A.host], 'failed', 'the turn ended as usual')
+  clock.advance(29_999)
+  assert.equal(view().cmds[c], 'waiting')
+  clock.advance(1)
+  assert.deepEqual([view().cmds[c], deck.state().commands.find((x) => x.id === c).error], ['failed', 'no result'])
+
+  // Nothing was kept for the next poll, and the registry says idle: it's held as usual, until the main loop's next
+  // turn ends.
+  const n1 = poll(A)
+  clock.advance(19_999)
+  assert.equal(n1.r.sent.length, 0)
+  ev(A, { t: 'turn.start', turn: 't3' }, { t: 'turn.end', turn: 't3', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+})
+
+test('deck: a poll answered at a main-loop turn end starts a waiting prompt\'s 60 s without a poll, as any poll\'s end does', () => {
+  const { deck, clock, reg, hello, ev, poll, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  // A prompt pressed while the session was busy waits for the turn's end (S3).
+  const c = deck.prompt({ host: A.host, text: 'Next.' }).cmd
+  poll(A)
+  deck.result({ sid: A.sid, host: A.host, inst: A.inst, id: c, state: 'waiting' })
+  const n1 = poll(A)
+  clock.advance(5_000)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  // The mod never polls again.
+  clock.advance(59_999)
+  assert.equal(view().cmds[c], 'waiting')
+  clock.advance(1)
+  assert.deepEqual([view().cmds[c], deck.state().commands.find((x) => x.id === c).error], ['failed', 'no result'])
+})
+
+test('deck: a main-loop turn end from an inst seen before answers the open poll, the newest instance\'s', () => {
+  // Its events still count (PROTOCOL.md, "Identity"), and the session's turn has ended whichever instance says so.
+  const { reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  hello({ ...A, inst: 'ia2' })
+  const n1 = poll(A, 20, 'ia2')
+  ev(A, { t: 'turn.start', turn: 't1' })
+  assert.equal(n1.r.sent.length, 0)
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+})
+
+/** The `poll-at-once` lines of `log`, as [poll, cmds]. */
+const atOnce = (log) => log.filter((e) => e.kind === 'poll-at-once').map((e) => [e.poll, e.cmds])
+
+test('deck: after the main loop\'s turn end, the session\'s polls are answered at once with no commands while the registry still says busy', () => {
+  // PROTOCOL.md, "Commands": Claude Code keeps the session busy until a moment after the turn when the mod has no
+  // request open. A poll the mod opened while its measure for the turn was still on its line kept it busy until the
+  // poll ran out, 20 s (Phase 4).
+  const { deck, clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'], [B, 'busy'])
+  hello(A)
+  hello(B)
+  const n1 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  const n2 = poll(A)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }], 'answered at once, not held for its 20 s')
+  ev(A, { t: 'measure', context: { percent: 12, window: 10 } })
+  // The mod waits out the rest of its second after an early empty answer, then polls again.
+  clock.advance(1_000)
+  const n3 = poll(A)
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.equal(deck.state().sessions[A.host].poll, null, 'no poll left open between them')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-at-once').map((e) => [e.host, e.poll, e.cmds, e.sinceTurnEndMs]), [[A.host, n2.id, [], 0], [A.host, n3.id, [], 1_000]])
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end').map((e) => e.poll), [n1.id], 'only the poll open at the turn end')
+
+  // Another session's polls are held as usual: its turn hasn't ended.
+  const nB = poll(B)
+  clock.advance(19_999)
+  assert.equal(nB.r.sent.length, 0)
+})
+
+test('deck: a poll answered at once after the main loop\'s turn end takes the commands queued for the session, oldest first', () => {
+  const { deck, clock, log, reg, hello, ev, poll, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  const n1 = poll(A)
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  // Pressed while the mod waits out its second: no poll is open, so they're queued, and its next poll takes them.
+  const c = deck.prompt({ host: A.host, text: 'Next.' }).cmd
+  const m = deck.mode({ host: A.host, mode: 'plan' }).cmd
+  assert.deepEqual([view().cmds[c], view().cmds[m]], ['queued', 'queued'])
+  clock.advance(1_000)
+  const n2 = poll(A)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Next.' }, { id: m, t: 'mode', mode: 'plan' }] } }])
+  assert.deepEqual([view().cmds[c], view().cmds[m]], ['delivered', 'delivered'])
+  assert.deepEqual(atOnce(log), [[n1.id, []], [n2.id, [c, m]]])
+  // The next one has none left to take.
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }])
+})
+
+test('deck: a registry reading that doesn\'t say busy ends the polls answered at once after the turn end; each poll is judged by the latest', () => {
+  for (const status of ['idle', 'waiting']) {
+    const { clock, log, reg, hello, ev, poll } = setup()
+    reg([A, 'busy'])
+    hello(A)
+    ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+    const n1 = poll(A)
+    assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }], 'at once while it says busy')
+    reg([A, status])
+    const n2 = poll(A)
+    clock.advance(19_999)
+    assert.equal(n2.r.sent.length, 0, `held as usual once it says ${status}`)
+    clock.advance(1)
+    assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }], 'until its wait runs out')
+    // The bridge judges each poll as it comes, by its latest reading: busy again, with no turn.start and within the
+    // 60 s, answers them at once again.
+    reg([A, 'busy'])
+    const n3 = poll(A)
+    assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }], `busy again after ${status}`)
+    assert.deepEqual(atOnce(log).map(([p]) => p), [n1.id, n3.id])
+  }
+
+  // A session the registry doesn't list has no reading that says busy.
+  const { log, reg, hello, ev, poll } = setup()
+  reg([B, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.equal(poll(A).r.sent.length, 0)
+  reg([A, 'busy'], [B, 'busy'])
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }], 'listed busy since')
+  assert.equal(atOnce(log).length, 1)
+})
+
+test('deck: a main-loop turn.start ends the polls answered at once after the turn end, and a subagent\'s doesn\'t', () => {
+  const { clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  const n1 = poll(A)
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  // A background subagent's turn carries on past the main loop's.
+  ev(A, { t: 'turn.start', turn: 's1', agent: 'ag1' })
+  const n2 = poll(A)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }], 'a subagent\'s turn.start isn\'t a new turn of the session\'s')
+  // The next prompt's turn, under the same busy.
+  ev(A, { t: 'turn.start', turn: 't2' })
+  const n3 = poll(A)
+  clock.advance(19_999)
+  assert.equal(n3.r.sent.length, 0, 'held as usual while the new turn runs')
+  ev(A, { t: 'turn.end', turn: 't2', reason: 'answer' })
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }], 'until it ends')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end').map((e) => e.poll), [n3.id])
+  assert.deepEqual(atOnce(log).map(([p]) => p), [n1.id, n2.id])
+  // And from that turn end, at once again.
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.equal(atOnce(log).length, 3)
+})
+
+test('deck: the polls after the main loop\'s turn end are answered at once for less than 60 s after it, by the bridge\'s clock', () => {
+  const { deck, clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  clock.advance(30_000)
+  // Its turn.end again, dropped as a retry: no turn end at all, so the 60 s still run from the first.
+  deck.events({ sid: A.sid, host: A.host, inst: A.inst, seq: 1, events: [{ t: 'turn.end', turn: 't1', reason: 'answer', at: 1 }] })
+  clock.advance(29_999)
+  const n1 = poll(A)
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }], '1 ms before the 60 s')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-at-once').map((e) => e.sinceTurnEndMs), [59_999])
+  clock.advance(1)
+  const n2 = poll(A)
+  clock.advance(19_999)
+  assert.equal(n2.r.sent.length, 0, 'held as usual from the 60 s on, though the registry still says busy')
+  clock.advance(1)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.deepEqual(atOnce(log).map(([p]) => p), [n1.id])
+})
+
+test('deck: a main-loop failed starts the polls answered at once too, as does a turn end whose agent isn\'t a non-empty string, and each starts the 60 s again', () => {
+  const { clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const n1 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'failed', error: 'API error' })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  const n2 = poll(A)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }], 'at once after the failed')
+  // The failed turn's own turn.end, 30 s on: the 60 s run from it.
+  clock.advance(30_000)
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  clock.advance(59_999)
+  const n3 = poll(A)
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }], '89.999 s after the failed, 59.999 s after the turn.end')
+  clock.advance(1)
+  const n4 = poll(A)
+  assert.equal(n4.r.sent.length, 0)
+  assert.deepEqual(atOnce(log).map(([p]) => p), [n2.id, n3.id])
+
+  // PROTOCOL.md, "Events": an agent that isn't a non-empty string counts as none, the main loop's.
+  let turn = 1
+  for (const agent of ['', null, 7, ['ag1'], { id: 'ag1' }]) {
+    for (const t of ['failed', 'turn.end']) {
+      const id = `t${++turn}`
+      ev(A, { t: 'turn.start', turn: id })
+      const held = poll(A)
+      assert.equal(held.r.sent.length, 0, 'held while the turn runs')
+      ev(A, t === 'failed' ? { t, agent, error: 'API error' } : { t, turn: id, agent, reason: 'answer' })
+      assert.deepEqual(held.r.sent, [{ status: 200, json: { cmds: [] } }])
+      assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }], `at once after ${t} with agent ${JSON.stringify(agent)}`)
+    }
+  }
+})
+
+test('deck: a subagent\'s turn.end or failed doesn\'t start the polls answered at once; the main loop\'s turn end does', () => {
+  const { clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.start', turn: 's1', agent: 'ag1' }, { t: 'turn.start', turn: 's2', agent: 'ag2' })
+  ev(A, { t: 'turn.end', turn: 's1', agent: 'ag1', reason: 'answer' })
+  const n1 = poll(A)
+  clock.advance(19_999)
+  assert.equal(n1.r.sent.length, 0, 'held after a subagent\'s turn.end: the main loop\'s turn is still running')
+  clock.advance(1)
+  ev(A, { t: 'failed', agent: 'ag2', error: 'overloaded' })
+  const n2 = poll(A)
+  clock.advance(19_999)
+  assert.equal(n2.r.sent.length, 0, 'and after a subagent\'s failed')
+  assert.deepEqual(atOnce(log), [])
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.deepEqual(poll(A).r.sent, [{ status: 200, json: { cmds: [] } }], 'at once after the main loop\'s')
+  assert.equal(atOnce(log).length, 1)
+})
+
+test('deck: a main-loop turn end from an older inst has the newest instance\'s polls answered at once, while an older one\'s still get no commands and leave its poll alone; a new inst keeps the rest of the 60 s', () => {
+  // PROTOCOL.md, "Identity": an older instance's events still count, but its polls never displace the newest
+  // instance's poll and never receive commands, after a turn end too. A new inst keeps the rest.
+  const { deck, clock, log, reg, hello, ev, poll, view } = setup()
+  const A2 = { ...A, inst: 'ia2' }
+  const A3 = { ...A, inst: 'ia3' }
+  reg([A, 'busy'])
+  hello(A)
+  hello(A2)
+  // The old instance's line still brings the main loop's turn. A prompt pressed after it ends finds no poll open.
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  const c = deck.prompt({ host: A.host, text: 'Next.' }).cmd
+  const stale1 = poll(A)
+  assert.deepEqual(stale1.r.sent, [{ status: 200, json: { cmds: [] } }], 'an old instance\'s poll gets none of it')
+  assert.equal(view().cmds[c], 'queued')
+  assert.deepEqual(atOnce(log), [], 'nor is it one answered at once after the turn end')
+  const n1 = poll(A2)
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [{ id: c, t: 'prompt', text: 'Next.' }] } }], 'the newest instance\'s takes it')
+  clock.advance(1_000)
+  const n2 = poll(A2)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }], 'and its next, with nothing queued, is answered at once too')
+  assert.deepEqual(atOnce(log), [[n1.id, [c]], [n2.id, []]])
+
+  // The newest instance has a poll open after the turn end only while the registry doesn't say busy. An old
+  // instance's poll leaves it alone.
+  reg([A, 'idle'])
+  const n3 = poll(A2)
+  assert.equal(n3.r.sent.length, 0)
+  const stale2 = poll(A)
+  assert.deepEqual(stale2.r.sent, [{ status: 200, json: { cmds: [] } }])
+  assert.equal(n3.r.sent.length, 0, 'the newest instance\'s poll stays open')
+  const open = deck.state().sessions[A.host].poll
+  assert.deepEqual([open.id, open.inst], [n3.id, 'ia2'])
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-stale').map((e) => e.poll), [stale1.id, stale2.id])
+
+  // A new inst answers the open poll, ia2's now, and its own polls are answered at once while the registry says busy
+  // until 60 s after the turn end: the restart neither ends them nor starts the 60 s again.
+  hello(A3)
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }])
+  reg([A, 'busy'])
+  clock.advance(58_999)
+  const n4 = poll(A3)
+  assert.deepEqual(n4.r.sent, [{ status: 200, json: { cmds: [] } }], '59.999 s after the turn end')
+  clock.advance(1)
+  const n5 = poll(A3)
+  assert.equal(n5.r.sent.length, 0, 'held from the 60 s on')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-at-once').map((e) => [e.poll, e.sinceTurnEndMs]), [[n1.id, 0], [n2.id, 1_000], [n4.id, 59_999]])
+})
+
+test('deck: a reading that turns busy after a main-loop turn end answers the poll held before it did, and none outside that time', () => {
+  // PROTOCOL.md, "Commands": after a turn shorter than a scan, or a Deny with the reading still waiting, a poll can
+  // come before the reading says busy. Held, it would keep the session busy until its wait ran out.
+  const { clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'idle'], [B, 'waiting'])
+  hello(A)
+  hello(B)
+  const nA = poll(A)
+  const nB = poll(B)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  ev(B, { t: 'turn.start', turn: 't1' }, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.deepEqual([nA.r.sent, nB.r.sent], [[{ status: 200, json: { cmds: [] } }], [{ status: 200, json: { cmds: [] } }]], 'the open polls, at the turn ends')
+  const nA2 = poll(A)
+  const nB2 = poll(B)
+  assert.deepEqual([nA2.r.sent.length, nB2.r.sent.length], [0, 0], 'held: neither reading says busy yet')
+  reg([A, 'busy'], [B, 'idle'])
+  assert.deepEqual(nA2.r.sent, [{ status: 200, json: { cmds: [] } }], 'answered once the reading turns busy')
+  assert.equal(nB2.r.sent.length, 0, 'a reading that goes from waiting to idle answers nothing')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end' && e.by === 'busy').map((e) => [e.host, e.poll]), [[A.host, nA2.id]])
+
+  // Outside that time: during the next turn, and 60 s after a turn end.
+  ev(A, { t: 'turn.start', turn: 't2' })
+  reg([A, 'idle'], [B, 'idle'])
+  const nA3 = poll(A)
+  reg([A, 'busy'], [B, 'idle'])
+  assert.equal(nA3.r.sent.length, 0, 'held during a turn')
+  ev(A, { t: 'turn.end', turn: 't2', reason: 'answer' })
+  assert.deepEqual(nA3.r.sent, [{ status: 200, json: { cmds: [] } }], 'answered at its end')
+  reg([A, 'idle'], [B, 'idle'])
+  clock.advance(60_000)
+  const nA4 = poll(A)
+  reg([A, 'busy'], [B, 'idle'])
+  assert.equal(nA4.r.sent.length, 0, 'held 60 s after the turn end')
+  assert.equal(log.filter((e) => e.kind === 'poll-turn-end' && e.by === 'busy').length, 1)
+})
+
 test('deck: a new inst forgets the session\'s current tool and in-flight commands, and keeps the rest', () => {
   const { deck, reg, hello, ev, poll, view } = setup()
   reg([A, 'busy'])

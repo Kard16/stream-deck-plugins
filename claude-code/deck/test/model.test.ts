@@ -59,7 +59,13 @@ function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)]) {
 		model.permission({ session_id: host === A ? "sid-1" : "sid-2", tool_name: tool, tool_input: input, permission_mode: "default", effort: { level: "low" }, ...extra }, host, reply);
 		return reply;
 	};
-	return { model, clock, log, at, events, permission, view: (host: string) => model.session(host) };
+	/** The mod's long poll, from the instance `events` sends as. */
+	const poll = (host: string): FakeReply => {
+		const reply = new FakeReply();
+		model.next(new URLSearchParams({ host, inst: `i-${host}`, wait: "20" }), reply);
+		return reply;
+	};
+	return { model, clock, log, at, events, permission, poll, view: (host: string) => model.session(host) };
 }
 
 describe("session status (PROTOCOL.md's order)", () => {
@@ -523,6 +529,291 @@ describe("session model", () => {
 		assert.equal(model.session(A)?.mode, "plan");
 		ib = poll("ib");
 		assert.deepEqual([ib.answers.length, next.state, next.inst], [1, "delivered", "ib"]);
+	});
+
+	test("the main loop's turn.end answers the session's open poll with none at once, and once the session is idle, the mod's next poll is held as usual", () => {
+		const { model, clock, log, events, poll } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "busy" })]);
+		const polls = (): string[] => log.lines.filter((l) => l.message.startsWith("POLL ")).map((l) => `${l.level} ${l.message}`);
+		const n1 = poll(A);
+		const other = poll(B);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "tool.start", tool: "Read", use: "u1", summary: "a.md", fp: "11111111" });
+		clock.advance(5000);
+		events(A, { t: "tool.end", tool: "Read", use: "u1", fp: "11111111", ok: true });
+		assert.deepEqual(n1.answers, [], "held while the turn runs");
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(other.answers, [], "another session's poll stays open");
+		assert.deepEqual(polls(), [`debug POLL ${A} wait 20 s`, `debug POLL ${B} wait 20 s`, `debug POLL ${A} answered with none: the turn ended`]);
+		// The registry goes idle, and the mod polls again: that poll is held as usual, and takes a command queued later.
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 }), reg(2, B, { status: "busy" })]);
+		const n2 = poll(A);
+		clock.advance(15_000);
+		assert.deepEqual(n2.answers, []);
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+		assert.equal(n1.answers.length, 1, "answered once");
+	});
+
+	test("the main loop's failed answers the open poll too; the turn.end after it, with no poll open, answers and logs nothing", () => {
+		const { model, log, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		const answered = (): string[] => log.lines.filter((l) => l.message.startsWith(`POLL ${A} answered`)).map((l) => `${l.level} ${l.message}`);
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" });
+		events(A, { t: "failed", error: "overloaded" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(answered(), [`debug POLL ${A} answered with none: the turn failed`]);
+		// The turn.end comes before the mod polls again.
+		events(A, { t: "turn.end", turn: "t1", reason: "error" });
+		assert.deepEqual([n1.answers.length, answered().length, model.commands.polling(A)], [1, 1, false]);
+		// Once the registry says idle, the mod's next poll is held as usual, and takes a command queued later.
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 })]);
+		const n2 = poll(A);
+		assert.deepEqual(n2.answers, []);
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+	});
+
+	test("a subagent's turn.end or failed leaves the session's poll open", () => {
+		const { events, poll } = setup([reg(1, A, { status: "busy" })]);
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.start", turn: "s1", agent: "a1b2" });
+		events(A, { t: "failed", agent: "a1b2", error: "overloaded" });
+		events(A, { t: "turn.end", turn: "s1", agent: "a1b2", reason: "answer" });
+		assert.deepEqual(n1.answers, [], "the main loop's turn goes on");
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }], "until its own turn.end");
+	});
+
+	test("a turn.end in a request dropped as a retry answers no poll", () => {
+		const { model, poll } = setup([reg(1, A, { status: "busy" })]);
+		const send = (seq: number, e: Record<string, unknown>) => model.events({ host: A, inst: `i-${A}`, seq, events: [{ at: 1, ...e }] });
+		const n1 = poll(A);
+		send(1, { t: "turn.start", turn: "t1" });
+		send(2, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		// After a rejected fetch, the mod sends the request again under its original seq (PROTOCOL.md, Failure and recovery).
+		// By then the registry says idle, so the mod's poll is held.
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 })]);
+		const n2 = poll(A);
+		send(2, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n2.answers, [], "dropped, so the poll stays open");
+	});
+
+	test("after the main loop's turn.end, the session's polls are answered at once with none while the registry still says busy", () => {
+		const { model, clock, log, events, poll } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "busy" })]);
+		const polls = (): string[] => log.lines.filter((l) => l.message.startsWith("POLL ")).map((l) => `${l.level} ${l.message}`);
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		// The mod polls again at once. That answer came in under a second, so it waits out the rest of it before the next.
+		const n2 = poll(A);
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [] } }]);
+		clock.advance(1000);
+		const n3 = poll(A);
+		assert.deepEqual(n3.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.equal(model.commands.polling(A), false, "no request left open");
+		// Another session, busy with no turn's end, has its poll held as usual.
+		const other = poll(B);
+		assert.deepEqual(other.answers, []);
+		assert.deepEqual(polls(), [
+			`debug POLL ${A} wait 20 s`,
+			`debug POLL ${A} answered with none: the turn ended`,
+			`debug POLL ${A} answered at once: the turn ended and the registry still says busy`,
+			`debug POLL ${A} answered at once: the turn ended and the registry still says busy`,
+			`debug POLL ${B} wait 20 s`,
+		]);
+	});
+
+	test("a command queued while the session's polls are answered at once goes out on its next poll", () => {
+		const { model, clock, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }]);
+		// Pressed in the second the mod waits out, with no poll open: it stays queued until the next.
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.equal(cmd.state, "queued");
+		clock.advance(1000);
+		const n2 = poll(A);
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+		assert.deepEqual([cmd.state, cmd.inst], ["delivered", `i-${A}`]);
+	});
+
+	test("while the session's polls are answered at once, an old instance's still get none and take no commands", () => {
+		const { model, events } = setup([reg(1, A, { status: "busy" })]);
+		events(A, { t: "turn.start", turn: "t1" });
+		// The mod reloads: the new instance says hello, and the old one's line still brings the turn's end.
+		model.hello({ v: 1, host: A, inst: "ib", model: "m" });
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		const old = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: `i-${A}`, wait: "20" }), old);
+		assert.deepEqual([old.answers, cmd.state], [[{ status: 200, body: { cmds: [] } }], "queued"]);
+		const fresh = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "ib", wait: "20" }), fresh);
+		assert.deepEqual(fresh.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }]);
+		assert.deepEqual([cmd.state, cmd.inst], ["delivered", "ib"]);
+	});
+
+	test("polls answered at once count as the mod polling: a waiting prompt doesn't fail while the mod polls every second", () => {
+		const { model, clock, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		// A prompt pressed during the turn waits for its end (S3).
+		events(A, { t: "turn.start", turn: "t1" });
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.equal(poll(A).answers.length, 1);
+		assert.equal(model.commands.result(A, `i-${A}`, cmd.id, "waiting", null, null), true);
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		// The registry stays busy, say for a background subagent, so each poll for the next 60 s is answered at once.
+		for (let i = 0; i < 60; i++) {
+			assert.equal(poll(A).answers.length, 1, `poll ${i}`);
+			clock.advance(1000);
+		}
+		assert.equal(cmd.state, "waiting");
+		// From the 60 s on, the poll is held, and the prompt still waits.
+		assert.equal(poll(A).answers.length, 0);
+		clock.advance(30_000);
+		assert.equal(cmd.state, "waiting");
+	});
+
+	test("once a registry reading says the session isn't busy, its polls are held as usual: idle, or still waiting after a Deny", () => {
+		const { model, events, poll } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "waiting" })]);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "at once while it's busy");
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 }), reg(2, B, { status: "waiting" })]);
+		const n2 = poll(A);
+		assert.deepEqual(n2.answers, [], "held once it's idle");
+		const cmd = model.commands.queue(A, { t: "prompt", text: "hi" });
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] } }], "until a command is queued");
+		// A turn the deck's Deny ended, while the deck's last reading still says waiting.
+		events(B, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(poll(B).answers, []);
+	});
+
+	test("after a turn shorter than a scan, a poll held while the deck's reading still said idle is answered with none once it says busy", () => {
+		const { model, clock, log, events, poll, view } = setup();
+		const polls = (): string[] => log.lines.filter((l) => l.message.startsWith("POLL ")).map((l) => `${l.level} ${l.message}`);
+		const n1 = poll(A);
+		const other = poll(B);
+		// A sub-second turn between two of the deck's scans: its reading still says idle, from before the turn.
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		// The mod polls again while its measure for the turn is still on its line, so Claude Code keeps the session busy.
+		const n2 = poll(A);
+		assert.deepEqual(n2.answers, [], "held: the reading says idle");
+		// The next scan reads that busy, and B's, which has had no turn's end.
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: 10_500 }), reg(2, B, { status: "busy", statusUpdatedAt: 10_500 })]);
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [] } }], "answered as soon as the reading says busy");
+		assert.deepEqual([model.commands.polling(A), view(A)?.status], [false, "working"]);
+		assert.deepEqual(other.answers, [], "B's poll stays held");
+		// After the second the mod waits out: answered at once while the reading says busy, and held once it says idle.
+		clock.advance(1000);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }]);
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 11_500 }), reg(2, B, { status: "busy", statusUpdatedAt: 10_500 })]);
+		assert.equal(view(A)?.status, "done");
+		const n4 = poll(A);
+		clock.advance(15_000);
+		assert.deepEqual(n4.answers, []);
+		assert.deepEqual(polls(), [
+			`debug POLL ${A} wait 20 s`,
+			`debug POLL ${B} wait 20 s`,
+			`debug POLL ${A} answered with none: the turn ended`,
+			`debug POLL ${A} wait 20 s`,
+			`debug POLL ${A} answered with none: the turn ended and the registry now says busy`,
+			`debug POLL ${A} answered at once: the turn ended and the registry still says busy`,
+			`debug POLL ${A} wait 20 s`,
+		]);
+	});
+
+	test("after a Deny, a poll held while the reading still said waiting is answered once it says busy; one whose session goes straight to idle stays held", () => {
+		const { model, clock, events, poll } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "busy" })]);
+		for (const host of [A, B]) events(host, { t: "turn.start", turn: "t1" });
+		model.setRegistry([reg(1, A, { status: "waiting", statusUpdatedAt: 2000 }), reg(2, B, { status: "waiting", statusUpdatedAt: 2000 })]);
+		// The deck's Deny stops both turns while the reading still says waiting.
+		for (const host of [A, B]) events(host, { t: "turn.end", turn: "t1", reason: "answer" });
+		const a2 = poll(A);
+		const b2 = poll(B);
+		assert.deepEqual([a2.answers, b2.answers], [[], []], "held: the reading says waiting");
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: 3000 }), reg(2, B, { status: "idle", statusUpdatedAt: 3000 })]);
+		assert.deepEqual(a2.answers, [{ status: 200, body: { cmds: [] } }], "waiting, then busy");
+		assert.deepEqual(b2.answers, [], "waiting, then idle, as in the deny fixture");
+		clock.advance(1000);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "at once while the reading says busy");
+	});
+
+	test("a reading that turns busy answers no held poll before the main loop's turn ends, after its next turn.start, or 60 s after it ended", () => {
+		const { model, clock, events, poll } = setup();
+		const read = (status: string, at: number): void => model.setRegistry([reg(1, A, { status, statusUpdatedAt: at }), reg(2, B)]);
+		// A turn whose busy the deck reads while it runs.
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" });
+		read("busy", 2000);
+		assert.deepEqual(n1.answers, [], "the turn runs");
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		read("idle", 3000);
+		// The next turn: its turn.start reaches the deck before the scan that reads its busy.
+		const n2 = poll(A);
+		events(A, { t: "turn.start", turn: "t2" });
+		read("busy", 4000);
+		assert.deepEqual(n2.answers, [], "the next turn runs");
+		events(A, { t: "turn.end", turn: "t2", reason: "answer" });
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [] } }]);
+		read("idle", 5000);
+		// A busy with no turn.start, 60 s after that turn ended, by the monotonic clock.
+		clock.advance(60_000);
+		const n3 = poll(A);
+		read("busy", 6000);
+		assert.deepEqual(n3.answers, [], "60 s after the turn ended");
+	});
+
+	test("the main loop's next turn.start stops the session's polls being answered at once; a subagent's doesn't", () => {
+		const { events, poll } = setup([reg(1, A, { status: "busy" })]);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "at once after the turn's end");
+		// A background subagent's turn starts after the main loop's ended.
+		events(A, { t: "turn.start", turn: "s1", agent: "a1b2" });
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "a subagent's turn.start doesn't stop it");
+		events(A, { t: "turn.start", turn: "t2" });
+		const n2 = poll(A);
+		assert.deepEqual(n2.answers, [], "held while the next turn runs");
+		// That turn's end starts it again.
+		events(A, { t: "turn.end", turn: "t2", reason: "answer" });
+		assert.deepEqual(n2.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }]);
+	});
+
+	test("60 s after the main loop's turn ended, by the monotonic clock, its polls are held as usual though the registry still says busy", () => {
+		const { clock, at, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		// The wall clock jumping, as after a time sync on wake, doesn't end it.
+		at(130_000);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }]);
+		clock.advance(59_999);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "1 ms before");
+		clock.advance(1);
+		const late = poll(A);
+		assert.deepEqual(late.answers, [], "held");
+		clock.advance(20_000);
+		assert.deepEqual(late.answers, [{ status: 200, body: { cmds: [] } }], "until its wait is up");
+	});
+
+	test("the main loop's failed starts answering the session's polls at once, as its turn.end does", () => {
+		const { clock, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "failed", error: "overloaded" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "at once, with no turn.end yet");
+		clock.advance(60_000);
+		assert.deepEqual(poll(A).answers, [], "for 60 s from the failed");
+	});
+
+	test("a subagent's turn.end or failed doesn't start answering the session's polls at once", () => {
+		const { events, poll } = setup([reg(1, A, { status: "busy" })]);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.start", turn: "s1", agent: "a1b2" });
+		events(A, { t: "failed", agent: "a1b2", error: "overloaded" }, { t: "turn.end", turn: "s1", agent: "a1b2", reason: "answer" });
+		const n1 = poll(A);
+		assert.deepEqual(n1.answers, [], "held while the main loop's turn goes on");
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(n1.answers, [{ status: 200, body: { cmds: [] } }]);
+		assert.deepEqual(poll(A).answers, [{ status: 200, body: { cmds: [] } }], "at once after the main loop's own turn.end");
 	});
 
 	test("without a usable host, the registry's sid places a mod request, and then the sid and host pairs the mods sent", () => {

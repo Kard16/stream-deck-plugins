@@ -38,9 +38,9 @@ export const STALL_MS = 35_000
 export const RETRY_MS = 100
 /**
  * A poll answered sooner than this with no command to run, none or only ones it skips, waits out the rest before
- * the next one. The bridge holds a poll until a command comes or the wait ends, so an early empty answer means
- * something is off (two copies of a mod cutting each other's poll short, a confused server), and this keeps it from
- * becoming a busy loop.
+ * the next one. The bridge holds a poll until a command comes, the main loop's turn ends or the wait ends. So an
+ * early empty answer means a turn ended just after the poll opened, or something is off (two copies of a mod cutting
+ * each other's poll short, a confused server), and this keeps the latter from becoming a busy loop.
  */
 export const POLL_MIN_MS = 1000
 /** Requests kept while the bridge is away; past this the oldest goes. */

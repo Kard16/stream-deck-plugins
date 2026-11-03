@@ -19,5 +19,8 @@
 {"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":3,"events":[{"t":"tool.end","tool":"Write","use":"u2","fp":"1d3780c3","ok":true,"at":1793600000300}]}}}
 {"mod":{"on":"turn.complete","e":{"turnId":"t1","reason":"answer","isAborted":false,"durationMs":2400,"answer":"Done."}}}
 {"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":4,"events":[{"t":"turn.end","turn":"t1","reason":"answer","at":1793600000400}]}}}
+{"reply":{"to":"n1","status":200,"body":{"cmds":[]}}}
+{"plugin":{"as":"n2","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"reply":{"to":"n2","status":200,"body":{"cmds":[]}}}
 {"registry":{"pid":101,"status":"idle","statusUpdatedAt":1793600004000}}
 {"expect":{"status":{"local_test-a":"done"}}}

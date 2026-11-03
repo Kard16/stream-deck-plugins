@@ -6,7 +6,9 @@
 //   /v1/permission and /v1/next, which may be held: a later `reply` line checks those, waiting up to 2 s.
 //   Answers to the rest must be 200 or 204 unless a `reply` line says otherwise.
 // - `press`, `registry` and `expect` lines go to a driver (drivers.mjs), which knows how to press keys, change
-//   the registry and read the deck's state, or to ask a person to.
+//   the registry and read the deck's state, or to ask a person to. A driver that skips registry lines skips the
+//   replies that hang on them too, and reports them: one that waits on a registry change, and one to a poll the
+//   deck answers at once only because the registry says busy after the main loop's turn ended.
 // The deck's command ids bind to the fixture's names at their first appearance in a reply. An answer to a
 // permission request must also be exactly one of PROTOCOL.md's three, whatever its reply line expects, since
 // it's what Claude Code acts on, or an error answer when it isn't 2xx (permissionAnswerMismatch).
@@ -139,6 +141,28 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
   const result = { name: fx.name, ok: true, checked: 0, skipped: [], notes: [] }
   const ctx = { fx, bindings, created: [], notes: result.notes, say, open: () => openHeld() }
   const tag = Math.random().toString(36).slice(2, 8)
+  // The fixture's registry files by pid, as its lines have left them, and the hosts whose main loop's turn has ended
+  // with no main-loop turn.start since, by the events the bridge took. From that turn end the deck answers a poll at
+  // once while the registry says busy (PROTOCOL.md, "Commands"), which a driver that skips registry lines can't make
+  // it say.
+  const registry = new Map((fx.setup.registry ?? []).filter(isObject).map((f) => [f.pid, { ...f }]))
+  const turnEnded = new Set()
+
+  /** Whether the deck answers a poll for `host` at once only because the fixture's registry says busy after its turn end. */
+  function atOnceAfterTurnEnd(host) {
+    return turnEnded.has(host) && [...registry.values()].some((f) => f.hostSessionId === host && f.status === 'busy')
+  }
+
+  /** Follows the main loop's turn ends and starts in an events body the bridge took. */
+  function sawEvents(b) {
+    if (!isObject(b) || !Array.isArray(b.events)) return
+    for (const e of b.events) {
+      // PROTOCOL.md, "Events": an agent that isn't a non-empty string counts as none, the main loop's.
+      if (!isObject(e) || (typeof e.agent === 'string' && e.agent !== '')) continue
+      if (e.t === 'turn.start') turnEnded.delete(b.host)
+      else if (e.t === 'turn.end' || e.t === 'failed') turnEnded.add(b.host)
+    }
+  }
 
   /** The inst to send for the fixture's: the same one, or a fresh one bound to it. */
   function instFor(name) {
@@ -193,7 +217,8 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     open.add(handle)
     const drop = () => open.delete(handle)
     handle.answer.then(drop, drop)
-    if (p.as) labeled.set(p.as, { line, handle, route })
+    const atOnce = route === ROUTES.next && atOnceAfterTurnEnd(new URL(p.path, 'http://fixture').searchParams.get('host'))
+    if (p.as) labeled.set(p.as, { line, handle, route, atOnce })
     say(`→ ${p.method} ${p.path}${p.as ? ` [${p.as}]` : ''}`)
     if (MAY_HOLD.has(route)) {
       // Let the bridge take it before the next line, so what follows lands after it, as in the fixture.
@@ -209,6 +234,7 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     if (!(p.as && fx.replied.has(p.as)) && r.status !== 200 && r.status !== 204) {
       throw new PlayFailure(line, `${p.method} ${route} answered ${r.status} ${r.text}`)
     }
+    if (route === ROUTES.events && (r.status === 200 || r.status === 204)) sawEvents(p.body)
   }
 
   async function checkReply(line) {
@@ -218,6 +244,12 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
       // The answer waits on a registry change, and this driver can't make one.
       result.skipped.push({ line: line.n, reply: to, why: 'it waits on a registry change, which this mode skips' })
       say(`skip: reply ${to}, which waits on the skipped registry change`)
+      return
+    }
+    if (driver.skipsRegistry && entry.atOnce) {
+      // The deck holds this poll instead: no registry it reads says the session is busy.
+      result.skipped.push({ line: line.n, reply: to, why: 'the deck answers it at once only while the registry says busy after the turn ended, and this mode skips registry lines' })
+      say(`skip: reply ${to}, answered at once only while the skipped registry says busy`)
       return
     }
     const waitMs = lastAction === 'press' && driver.replyAfterPressMs ? driver.replyAfterPressMs : replyMs
@@ -252,10 +284,14 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
           await driver.press(line, { ...ctx, replyNext: nextAction(i) === 'reply' })
           lastAction = 'press'
           break
-        case 'registry':
+        case 'registry': {
+          const { pid, gone, ...fields } = line.value
+          if (gone) registry.delete(pid)
+          else registry.set(pid, { ...(registry.get(pid) ?? { pid }), ...fields })
           await driver.registry(line, ctx)
           lastAction = 'registry'
           break
+        }
         case 'expect':
           // True when the driver checked the state itself; a person's look isn't counted.
           if (await driver.expect(line, ctx)) result.checked++

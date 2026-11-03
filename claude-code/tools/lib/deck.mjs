@@ -6,7 +6,7 @@
 // No I/O here: bridge.mjs feeds it HTTP requests and folder readings, and its clock and timers are injected,
 // so the tests drive it directly. Presses come from the control interface in place of the keys.
 
-import { ASK_TOOLS, FINAL_STATES, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, VERSION, answerFor, fingerprint, summary } from './protocol.mjs'
+import { ASK_TOOLS, AT_ONCE_MS, FINAL_STATES, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, VERSION, answerFor, fingerprint, summary } from './protocol.mjs'
 
 /** A control call, or a mod request, that can't be carried out as asked: bridge.mjs answers it with 400. */
 export class BadRequest extends Error {}
@@ -70,10 +70,11 @@ function newSession(host) {
      */
     fpCalls: [],
     /**
-     * The main loop's current or last turn: its id, did the deck see it end, how, did it fail, and when the deck
-     * got its turn.end, as a #seenTick (status rule 3).
+     * The main loop's current or last turn: its id, did the deck see it end, how, did it fail, when the deck got its
+     * turn.end, as a #seenTick (status rule 3), and when it got the turn's last end, a turn.end or failed, by its
+     * clock (#afterTurnEnd).
      */
-    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, endSeen: null },
+    turn: { id: null, sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null },
     context: null,
     /** The latest model, effort and mode from the plugin: hello, settings events, PermissionRequests. */
     settings: { model: null, effort: null, mode: null },
@@ -273,7 +274,8 @@ export class FakeDeck {
     switch (e.t) {
       case 'turn.start':
         if (main) {
-          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, endSeen: null }
+          // A new turn: the last one's end no longer has the polls answered at once (#afterTurnEnd).
+          s.turn = { id: str(e.turn), sawEnd: false, lastEnd: null, failed: false, endSeen: null, endedAt: null }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -284,7 +286,7 @@ export class FakeDeck {
           // reads done. One it can't tell apart, with no turn id on one side or the other, keeps it.
           const id = str(e.turn)
           const same = id === null || s.turn.id === null || id === s.turn.id
-          s.turn = { id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, endSeen: ++this.#seenTick }
+          s.turn = { id: id ?? s.turn.id, sawEnd: true, lastEnd: str(e.reason), failed: same && s.turn.failed, endSeen: ++this.#seenTick, endedAt: this.#now() }
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -293,6 +295,7 @@ export class FakeDeck {
         if (main) {
           s.turn.sawEnd = true
           s.turn.failed = true
+          s.turn.endedAt = this.#now()
           this.#clearMainTools(s)
         }
         this.#fpCallsEnded(s, (c) => c.agent === agent)
@@ -332,6 +335,7 @@ export class FakeDeck {
         return
     }
     this.#log({ kind: 'event', host: s.host, event: e })
+    if (main && (e.t === 'turn.end' || e.t === 'failed')) this.#turnEnded(s, e.t)
   }
 
   #clearMainTools(s) {
@@ -532,8 +536,10 @@ export class FakeDeck {
 
   /**
    * A long poll (PROTOCOL.md, "Commands"). Answers at once with what's queued, else holds up to `wait`
-   * seconds. A new poll answers the session's older one with no commands. Returns the poll's id, or null
-   * when the poll names no session the bridge can place.
+   * seconds. A new poll answers the session's older one with no commands, and so does the end of the main
+   * loop's turn (#turnEnded). From that turn end, while the registry still says busy, it answers at once with
+   * what's queued or nothing (#afterTurnEnd). Returns the poll's id, or null when the poll names no session the
+   * bridge can place.
    */
   poll({ sid, host, inst, wait, responder }) {
     const s = this.#touchMod(sid, host, inst)
@@ -553,12 +559,14 @@ export class FakeDeck {
       this.#log({ kind: 'poll-superseded', host: s.host, poll: old })
     }
     const queued = [...this.#commands.values()].filter((c) => c.host === s.host && c.state === 'queued')
-    if (queued.length || wait === 0) {
+    const afterTurnEnd = this.#afterTurnEnd(s)
+    if (queued.length || wait === 0 || afterTurnEnd) {
       // Answered at once: the mod is there, but the session has no open poll again.
       this.#deliver(queued, s)
       responder.send(200, { cmds: queued.map(wire) })
       s.pollEndedAt = this.#now()
       this.#armPollGap(s)
+      if (afterTurnEnd) this.#log({ kind: 'poll-at-once', host: s.host, poll: id, cmds: queued.map((c) => c.id), sinceTurnEndMs: this.#now() - s.turn.endedAt })
       return id
     }
     const p = { id, responder, inst: s.inst, since: this.#now(), timer: null }
@@ -579,6 +587,38 @@ export class FakeDeck {
       }
     }
     return false
+  }
+
+  /**
+   * PROTOCOL.md, "Commands": the mod reported that the main loop's turn ended, a turn.end or failed without
+   * `agent`, so the session's open poll is answered with no commands at once. Claude Code keeps a session busy in
+   * the registry until a moment after the turn when the mod has no request open, so a poll held past the turn's end
+   * kept the deck showing working for up to 20 s more (Phase 4). The mod polls again, and from now on its polls are
+   * answered at once while the registry still says busy (#afterTurnEnd). With no poll open there's nothing to
+   * answer: a waiting prompt's time without one still runs from when the last one ended. The report may come from an
+   * inst seen before, whose events still count: the session's turn has ended all the same, so the poll it answers is
+   * the newest instance's.
+   */
+  #turnEnded(s, t) {
+    const p = s.poll
+    if (!p) return
+    this.#endPoll(s, [])
+    this.#log({ kind: 'poll-turn-end', host: s.host, poll: p.id, by: t })
+  }
+
+  /**
+   * PROTOCOL.md, "Commands": after the main loop's turn end answers the open poll, the session's polls are answered
+   * at once, with the commands queued for it or none, until the registry stops saying busy, a main-loop turn.start
+   * comes, or 60 s pass. A poll the mod opened while its last events were still on its line, a measure after the
+   * turn.end say, would otherwise keep the session busy until its wait ran out (Phase 4); answered at once, the mod
+   * waits out the rest of its second before the next, and that moment with no request open lets Claude Code turn the
+   * session idle. Judged as each poll arrives, by the bridge's latest registry reading and its own clock: a session
+   * the registry doesn't list, or lists as anything but busy, has its polls held as usual, and every main-loop
+   * turn.end or failed starts the 60 s again.
+   */
+  #afterTurnEnd(s) {
+    const at = s.turn.endedAt
+    return at !== null && this.#now() - at < AT_ONCE_MS && this.#registry.get(s.host)?.status === 'busy'
   }
 
   /** Ends the session's open poll: answered with `cmds` if they're given and its client is still there. */
@@ -839,6 +879,17 @@ export class FakeDeck {
     }
     for (const [host, f] of next) {
       if (f.status === 'waiting') for (const h of this.#heldOf(host, f.sessionId)) h.seenWaiting = true
+    }
+    // PROTOCOL.md, "Commands": a reading that turns busy within the 60 s after the main loop's turn end answers the
+    // poll held before it did, after a turn shorter than a scan or while the reading still said waiting after a Deny,
+    // as that poll would have been answered at once had it come now (#afterTurnEnd).
+    for (const [host, f] of next) {
+      if (f.status !== 'busy' || prev.get(host)?.status === 'busy') continue
+      const s = this.#sessions.get(host)
+      if (!s?.poll || !this.#afterTurnEnd(s)) continue
+      const p = s.poll
+      this.#endPoll(s, [])
+      this.#log({ kind: 'poll-turn-end', host, poll: p.id, by: 'busy' })
     }
   }
 

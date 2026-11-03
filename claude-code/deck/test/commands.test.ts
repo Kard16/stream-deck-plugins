@@ -321,6 +321,60 @@ describe("command queue and long poll", () => {
 		assert.deepEqual(open.answers, [{ cmds: [] }], "answered once");
 	});
 
+	test("a turn's end answers the session's open poll with none at once, and the queue holds the next for the wait it's given", () => {
+		const { queue, clock } = setup();
+		// No poll open: none yet, or its client went away. Nothing to answer.
+		assert.equal(queue.turnEnded("local_a"), false);
+		const gone = new FakePoll();
+		queue.poll("local_a", "ia", 20, gone);
+		gone.close();
+		assert.equal(queue.turnEnded("local_a"), false);
+		assert.deepEqual(gone.answers, []);
+		const open = new FakePoll();
+		queue.poll("local_a", "ia", 20, open);
+		const other = new FakePoll();
+		queue.poll("local_b", "ib", 20, other);
+		clock.advance(5000);
+		assert.equal(queue.turnEnded("local_a"), true);
+		assert.deepEqual(open.answers, [{ cmds: [] }]);
+		assert.equal(queue.polling("local_a"), false);
+		assert.deepEqual(other.answers, [], "another session's poll stays open");
+		assert.equal(queue.turnEnded("local_a"), false, "answered already");
+		// The mod polls again: that poll is held as usual, and a command queued later answers it.
+		const next = new FakePoll();
+		queue.poll("local_a", "ia", 20, next);
+		clock.advance(15_000);
+		assert.deepEqual(next.answers, []);
+		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
+		assert.deepEqual(next.answers, [{ cmds: [{ id: cmd.id, t: "prompt", text: "hi" }] }]);
+		assert.deepEqual(open.answers, [{ cmds: [] }], "answered once");
+	});
+
+	test("a poll answered at a turn's end starts a waiting prompt's 60 s without a poll, as any poll's end does", () => {
+		const { queue, clock } = setup();
+		// A prompt pressed while the session was busy waits for the turn's end (S3).
+		const cmd = queue.queue("local_a", { t: "prompt", text: "hi" });
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		assert.equal(queue.result("local_a", "ia", cmd.id, "waiting", null, null), true);
+		queue.poll("local_a", "ia", 20, new FakePoll());
+		clock.advance(5000);
+		assert.equal(queue.turnEnded("local_a"), true);
+		// The mod never polls again.
+		clock.advance(IN_FLIGHT_MS - 1);
+		assert.equal(cmd.state, "waiting");
+		clock.advance(1);
+		assert.deepEqual([cmd.state, cmd.error], ["failed", "no result"]);
+	});
+
+	test("a turn's end whose poll's client went before its close arrived answers nothing, and says so", () => {
+		const { queue } = setup();
+		const dying = new FakePoll();
+		queue.poll("local_a", "ia", 20, dying);
+		dying.open = false;
+		assert.equal(queue.turnEnded("local_a"), false);
+		assert.deepEqual(dying.answers, []);
+	});
+
 	test("dispose stops every timer", () => {
 		const { queue, clock } = setup();
 		queue.queue("local_a", { t: "prompt", text: "hi" });

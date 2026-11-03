@@ -1,4 +1,4 @@
-{"note":"After the user pressed Esc, the engine drops prompts from the mod until the user types in the session (S2). The Saved Prompt key shows refused. Claude Code keeps the session busy for seconds after the Esc (Phase 4), so the deck shows interrupted from the turn.end, before the registry goes idle."}
+{"note":"After the user pressed Esc, the engine drops prompts from the mod until the user types in the session (S2). The Saved Prompt key shows refused. Claude Code keeps the session busy for a moment after the turn.end, and the deck reads the registry once a second (Phase 4), so the deck shows interrupted from the turn.end, before the registry goes idle. Until then the bridge answers the mod's polls at once; the poll after that is held, and the press's prompt goes through it."}
 {"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
 {"mod":{"on":"session.start","e":{"cwd":"/Users/me/sandbox","surface":null,"isInteractive":false}}}
 {"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
@@ -10,13 +10,17 @@
 {"expect":{"status":{"local_test-a":"working"}}}
 {"mod":{"on":"turn.complete","e":{"turnId":"t1","reason":"aborted","isAborted":true,"durationMs":2400,"answer":""}}}
 {"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":2,"events":[{"t":"turn.end","turn":"t1","reason":"aborted","at":1793600000200}]}}}
+{"reply":{"to":"n1","status":200,"body":{"cmds":[]}}}
+{"plugin":{"as":"n2","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"reply":{"to":"n2","status":200,"body":{"cmds":[]}}}
 {"expect":{"status":{"local_test-a":"interrupted"}}}
 {"registry":{"pid":101,"status":"idle","statusUpdatedAt":1793600009000}}
+{"plugin":{"as":"n3","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
 {"expect":{"status":{"local_test-a":"interrupted"}}}
 {"press":{"prompt":{"session":"local_test-a","text":"Carry on."}}}
-{"reply":{"to":"n1","status":200,"body":{"cmds":[{"id":"c1","t":"prompt","text":"Carry on."}]}}}
+{"reply":{"to":"n3","status":200,"body":{"cmds":[{"id":"c1","t":"prompt","text":"Carry on."}]}}}
 {"engine":{"call":"prompt.submit","args":{"text":"Carry on.","asUser":true},"returns":{"drop":"the session was stopped and nobody has sent input since"}}}
 {"plugin":{"method":"POST","path":"/v1/result","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","id":"c1","state":"waiting"}}}
-{"plugin":{"as":"n2","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"plugin":{"as":"n4","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
 {"plugin":{"method":"POST","path":"/v1/result","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","id":"c1","state":"refused","error":"dropped: the session was stopped and nobody has sent input since"}}}
 {"expect":{"cmds":{"c1":"refused"}}}

@@ -617,6 +617,55 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     2. The user answers step 8.
     3. Step 11, with the Claude app restart last.
     4. Then decide how the deck handles a mode change from Auto, which the classifier refuses.
+- 2026-11-03, **Phase 4 retests, and the poll fix, at the user's word.**
+  - **Step 6 passed.** The user picked T2 on the Sessions dial and pressed Saved Prompt at 01:33:20.534Z. The deck delivered the text through T2's open poll at once, and the key showed sent 55 ms after the press. T2 answered "ok".
+  - **Step 9's Esc half passed.** T3's `turn.end` (`aborted`) reached the deck at 01:34:29.128Z, and the deck logged `working → interrupted` in the same millisecond. The registry went idle 5.2 s later. The prompt half (refused, then sent once the user types) is still to do.
+  - **New: done showed 17 s late.** T2's turn ended at 01:33:23.658Z, but the deck showed `working` until 01:33:40.892Z.
+    - The cause is the mod's own long poll: Claude Code keeps a session `busy` in the registry until the mod's open requests end.
+    - Evidence: in all three turn ends logged at debug level (T2 and T3 on 11-03, T3 on 11-02), the registry's `statusUpdatedAt` came 2 ms before the deck logged the mod's next poll, that is, as the poll that was open when the turn ended ran out.
+    - So the 2–8 s after an Esc in part 3 came from the same poll, and the delay follows every turn. Phase 1's 130 ms after a normal Stop predates the long poll.
+  - **The fix, first step:** the deck answers a session's open poll with `{"cmds": []}` as soon as the main loop's `turn.end` or `failed` arrives. The mod polls again at once, or after the rest of its 1 s floor.
+    - **Protocol** (main thread): the rule under `GET /v1/next`, status rule 3's reason, "The mod never holds up the session's work" in Failure and recovery, and the 2026-11-03 amendment.
+    - **Fixtures:** `status`, `approve`, `deny` and `prompt-refused` answer `n1` at the `turn.end`, and the mod then polls again (`n2`). Before the fix, the deck failed those 4 and the tools failed 11 tests.
+    - **The plugin's fixture runner** now lets the mod's 1 s floor pass while it waits for a poll. Without that, the 4 fail on the plugin side ("the mod never sent GET /v1/next"). The mod's comment on that floor now names a turn's end; its code is unchanged.
+    - Editing the plugin folder hot-reloaded T3's and T2's mods (01:47:08Z and 01:47:25Z), with nothing in flight.
+    - **A workflow built the deck and tools sides,** each reviewed adversarially. Both reviews passed with minors and nits only. Both reviewers found that no test pinned a waiting prompt's 60 s clock after a turn-end answer.
+    - **The main thread then added:**
+      - those tests, plus a dropped-retry test and a closed-reply test in the deck;
+      - the main loop's `end` and an unknown type in the tools' "other events" test;
+      - a README `jq` line that times the three.
+      Six mutants were each caught by the test meant for them.
+  - **Checks, by the main thread:**
+    - Plugin: `tsc` clean, validate passes, 77/77, fixtures in sync.
+    - Deck: typecheck clean, 193/193, the same with the clock two days ahead and a week back, build and validate pass.
+    - Tools: 118/118.
+  - **Live, at the user's go (restart 02:51:32Z), the first step was not enough:**
+    - A short turn on T2 went idle 5 ms after its `turn.end`, and the deck showed done 0.85 s after.
+    - A count turn whose `measure` came after its `turn.end` stayed busy 20 s. The mod had opened its next poll before sending the `measure`, so it never had nothing open until that poll ran out.
+  - **What the engine shows** (the app's `claude.app`, 2.1.309): for app-hosted sessions, the registry's status mirrors the engine's session state (`running` → busy). The turn's end also waits on the post-turn summary classifier, capped at 60 s, and `idle` can come from a check when the session's background work changes. The timings say the mod's open requests are what it waits on.
+  - **A throwaway prototype** answered polls at once for 3 s after a turn end. The same kind of count turn went idle 4 ms after its `turn.end` (03:06:58.949Z → .953Z), and the deck showed done 0.1 s after. The mod polled once a second meanwhile.
+  - **The fix, second step** (protocol amended again): from the main loop's turn end, the deck answers the session's polls at once while the registry still says busy, until a main-loop `turn.start`, for at most 60 s.
+    - `status`, `approve` and `prompt-refused` answer the next poll at once. `deny` keeps its next poll held, since its registry says `waiting`.
+    - The plugin passes 77/77 on them, unchanged. The deck fails the 3 changed fixtures, and the tools fail 10 tests.
+    - A workflow built the deck and tools sides, each reviewed adversarially and then fixed.
+    - The second fixture sync, of the plugin's tests alone, didn't reload the mods: their instances are the same since 01:47.
+  - **Both reviewers found a gap:** a poll could come before the deck's once-a-second reading said busy, after a turn shorter than a scan or after a Deny, and be held for 20 s.
+    - The deck's fix pass answers the held poll when the reading turns busy inside the 60 s.
+    - The main thread put that in the protocol and in the fake, and flipped the fake's test that pinned the opposite.
+    - The main thread added deck tests for an old instance's poll in that time, and for a waiting prompt across 60 s of polls answered at once.
+    - Four mutants were each caught by the test meant for them.
+  - **Left open (minor):** the fake times its 60 s on the wall clock where the deck uses a monotonic one, and two of its README claims have no test of their own. Readings that go busy, idle, then busy again inside the 60 s answer polls at once again, which the protocol's wording allows.
+  - **Checks, by the main thread:**
+    - Plugin: `tsc` clean, validate passes, 77/77, fixtures in sync.
+    - Deck: typecheck clean, 205/205, the same with the clock two days ahead and a week back, build and validate pass.
+    - Tools: 128/128.
+  - **Live** (restart 04:06:44Z):
+    - A short turn on T2 ended at 04:07:04.170Z. The registry went idle 6 ms later, and the deck showed done 0.83 s after the end.
+    - A count turn, with its `measure` after the `turn.end`, ended at 04:07:20.699Z. The registry went idle 5 ms later, and the deck showed done 0.33 s after.
+    - Once the registry said idle, the mod's next poll was held as usual.
+  - **Next:**
+    1. The user finishes step 9 on T3 (Saved Prompt refused; type in T3; Saved Prompt sent), picking T3 again after the restart.
+    2. Step 8's answer, step 11, then the decision on mode changes from Auto.
 
 ## Progress
 
@@ -627,13 +676,14 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Track A: Claude Code plugin · [x] Track B: deck plugin · [x] Track C: tools, 2026-11-01
 - [x] Protocol amendments and the reviewers' minors: three sets, rounds 2–4 committed, and Phase 4's quick hello (579f240)
 - [x] Ladder steps 4–5, 2026-11-01 (what needs a person or the app's dialogs moves to Phase 4)
-- [ ] Phase 4: on hardware with the user. Paused 2026-11-02 at the user's request; "Next" in the Log's last entry says where to resume.
+- [ ] Phase 4: on hardware with the user. Resumed 2026-11-03; "Next" in the Log's last entry says where it stands.
   - Pass: steps 1–4.
   - Steps 5 and 7, going by the log: the pick and the jumps took about 60 ms, and each mode change took about 30 ms. The user reported no problem with either.
   - Mode from Auto: refused by the classifier, so it needs a design choice.
-  - Step 6: waits on the key's text.
+  - Step 6: passed, 2026-11-03.
   - Step 8: waits on the user's answer.
-  - Step 9: the Esc fix is in. Live, "interrupted" showed 7 ms after a stop; the user's retest is pending.
+  - Step 9: the Esc half passed, 2026-11-03; the prompt half is pending.
+  - Done lag: fixed, 2026-11-03. Live, the registry goes idle 5–6 ms after a turn ends, and the deck shows done within a second.
   - Step 10: dropped.
   - Step 11: later.
 - [ ] Phase 5: daily use, when the user says so

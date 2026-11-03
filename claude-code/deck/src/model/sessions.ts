@@ -23,7 +23,7 @@ import {
 } from "../protocol/wire.js";
 import type { AppRecord } from "../records/records.js";
 import { compareSessions, type RegistrySession } from "../registry/registry.js";
-import type { Clock } from "../util/clock.js";
+import { type Clock, realClock } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import { type SessionStatus, sessionStatus } from "./status.js";
 
@@ -79,6 +79,12 @@ type BridgeSession = {
 	settings: { model: string | null; mode: string | null; effort: string | null };
 	/** The main loop's last turn. */
 	turn: Turn | null;
+	/**
+	 * Until when, by the monotonic clock, the session's polls are answered at once while the registry says `busy`:
+	 * AT_ONCE_MS after the main loop's turn ended. Null before the first turn end and from each main-loop `turn.start`;
+	 * a time that has passed stays until then.
+	 */
+	pollsAtOnceUntil: number | null;
 	/** The main loop's unfinished tool calls, oldest first. */
 	tools: RunningTool[];
 	context: number | null;
@@ -91,9 +97,15 @@ const NO_HOST: RouteAnswer = { status: 400, body: { error: "unknown session: no 
 /** The longest title kept; the strips and keys cut it further. */
 const MAX_TITLE = 120;
 
+/**
+ * How long after the main loop's turn ends the session's polls are answered at once, while the registry still says
+ * `busy` and no `turn.start` has come (PROTOCOL.md, Commands).
+ */
+const AT_ONCE_MS = 60_000;
+
 export type SessionModelOptions = {
 	log?: Log;
-	/** Timers for the long poll and the in-flight limit. */
+	/** Timers for the long poll and the in-flight limit, and the time since a turn ended for answering polls at once. */
 	clock?: Clock;
 	/** Wall-clock ms, compared with the registry's `statusUpdatedAt` and the records' `lastFocusedAt`. */
 	wallNow?: () => number;
@@ -110,6 +122,7 @@ export class SessionModel implements BridgeRoutes {
 	readonly held: HeldRequests;
 	readonly commands: CommandQueue;
 	readonly #log: Log;
+	readonly #clock: Clock;
 	readonly #wallNow: () => number;
 	readonly #listeners = new Set<() => void>();
 	readonly #bridge = new Map<string, BridgeSession>();
@@ -131,9 +144,10 @@ export class SessionModel implements BridgeRoutes {
 
 	constructor(opts: SessionModelOptions = {}) {
 		this.#log = opts.log ?? nullLog;
+		this.#clock = opts.clock ?? realClock;
 		this.#wallNow = opts.wallNow ?? Date.now;
 		this.held = new HeldRequests({ log: this.#log });
-		this.commands = new CommandQueue({ clock: opts.clock, log: this.#log, inFlightMs: opts.inFlightMs });
+		this.commands = new CommandQueue({ clock: this.#clock, log: this.#log, inFlightMs: opts.inFlightMs });
 		this.held.onChange(() => this.#emit());
 		this.commands.onChange(() => this.#emit());
 	}
@@ -164,7 +178,8 @@ export class SessionModel implements BridgeRoutes {
 	 * A new list from the registry. Release rules 2–4 run on what changed: a session leaving `waiting` lets its
 	 * only held request go if it came before the change; `idle` with a later `statusUpdatedAt` lets go every
 	 * request that came before; a session whose file disappeared has ended. A session whose status changed, or
-	 * that's new, has its first reading of that status now.
+	 * that's new, has its first reading of that status now. A session whose reading turns `busy` while its polls are
+	 * answered at once has the poll it held answered with none.
 	 */
 	setRegistry(sessions: readonly RegistrySession[]): void {
 		const now = this.#wallNow();
@@ -195,6 +210,13 @@ export class SessionModel implements BridgeRoutes {
 			if (s.status === "idle") {
 				const since = s.statusUpdatedAt ?? (old && old.status !== "idle" ? now : null);
 				if (since !== null) for (const h of this.held.forHost(host)) if (h.at < since) this.held.release(h.id, "the registry shows the session idle (rule 3)");
+			}
+			// The reading has caught up with a busy after the main loop's turn ended. A poll held before it did, after a turn
+			// shorter than the time to this scan or while the reading still said waiting after a Deny, keeps Claude Code
+			// from turning the session idle, so it's answered with none now, as `next` would have answered it at once.
+			if (s.status === "busy" && old?.status !== "busy") {
+				const b = this.#bridge.get(host);
+				if (b && this.#answersAtOnce(b)) this.#answerPoll(b, "the turn ended and the registry now says busy");
 			}
 		}
 		for (const [key, old] of before) {
@@ -328,8 +350,13 @@ export class SessionModel implements BridgeRoutes {
 			reply.send(200, JSON.stringify({ cmds: [] }));
 			return;
 		}
-		this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
-		this.commands.poll(b.host, q.inst, q.wait, reply);
+		if (this.#answersAtOnce(b)) {
+			this.#log.debug(`POLL ${b.host} answered at once: the turn ended and the registry still says busy`);
+			this.commands.poll(b.host, q.inst, 0, reply);
+		} else {
+			this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
+			this.commands.poll(b.host, q.inst, q.wait, reply);
+		}
 		this.#emit();
 	}
 
@@ -438,6 +465,7 @@ export class SessionModel implements BridgeRoutes {
 				if (e.agent !== null) return;
 				b.turn = { id: e.turn, ended: false, reason: null, failed: false, endedAt: null };
 				b.tools = [];
+				b.pollsAtOnceUntil = null;
 				return;
 			case "turn.end": {
 				if (e.agent !== null) return;
@@ -445,6 +473,8 @@ export class SessionModel implements BridgeRoutes {
 				const same = b.turn !== null && (e.turn === null || b.turn.id === null || b.turn.id === e.turn);
 				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false), endedAt: this.#wallNow() };
 				b.tools = [];
+				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
+				this.#answerPoll(b, "the turn ended");
 				return;
 			}
 			case "failed":
@@ -452,6 +482,8 @@ export class SessionModel implements BridgeRoutes {
 				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, endedAt: b.turn?.endedAt ?? null };
 				b.tools = [];
 				this.#log.info(`FAILED turn in ${b.host}${e.error ? `: ${quote(e.error, 120)}` : ""}`);
+				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
+				this.#answerPoll(b, "the turn failed");
 				return;
 			case "tool.start":
 				if (e.agent !== null) return;
@@ -492,6 +524,28 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
+	 * The main loop's turn ended, or the deck's reading of the registry turned `busy` after it did: the session's open
+	 * poll, if it has one, is answered with none at once, since Claude Code keeps the session `busy` in the registry
+	 * until a moment after the turn when the mod has no request open (PROTOCOL.md, Commands).
+	 */
+	#answerPoll(b: BridgeSession, why: string): void {
+		if (this.commands.turnEnded(b.host)) this.#log.debug(`POLL ${b.host} answered with none: ${why}`);
+	}
+
+	/**
+	 * Whether the session's poll is answered at once, with its queued commands or none: the main loop's turn ended
+	 * less than AT_ONCE_MS ago, no main-loop `turn.start` has come since, and the registry still says `busy`. A poll
+	 * held then would keep the session `busy` until it ran out, since Claude Code waits for a moment after the turn
+	 * when the mod has no request open; the mod waits out the rest of a second after an early empty answer, which
+	 * gives it that moment (PROTOCOL.md, Commands). The deck reads the registry once a second, so after a turn shorter
+	 * than that, or while its reading still says `waiting` after a Deny, a poll can come before the reading says
+	 * `busy`: it's held, and answered with none once the reading does (`setRegistry`).
+	 */
+	#answersAtOnce(b: BridgeSession): boolean {
+		return b.pollsAtOnceUntil !== null && this.#clock.now() < b.pollsAtOnceUntil && this.#registry.get(b.host)?.status === "busy";
+	}
+
+	/**
 	 * The session of a mod request, by its host or else its sid. An `inst` not seen before means the mod
 	 * restarted: the session's current tool and in-flight commands are forgotten, and a poll the old instance
 	 * left open is answered with none.
@@ -527,6 +581,7 @@ export class SessionModel implements BridgeRoutes {
 				cwd: null,
 				settings: { model: null, mode: null, effort: null },
 				turn: null,
+				pollsAtOnceUntil: null,
 				tools: [],
 				context: null,
 				onScreenAt: null,

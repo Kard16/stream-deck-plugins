@@ -136,15 +136,24 @@ test('play: a mismatch fails the fixture with the line and the reason', async (t
   }
 })
 
+/** The main loop's events in an events body: those without agent, or whose agent isn't a non-empty string (PROTOCOL.md, "Events"). */
+const mainEvents = (body) => (Array.isArray(body?.events) ? body.events : []).filter((e) => e !== null && typeof e === 'object' && !(typeof e.agent === 'string' && e.agent !== ''))
+
 /**
  * A deck that answers presses its own way, for answers the fake bridge never gives: hello is ok, events and
- * results get 204, polls are held, and a press answers the oldest held permission request with
- * `answer(key, its body)`. It plays nothing else of a deck: registry lines do nothing and expect lines go
- * unchecked, so a fixture through it checks only the replies.
+ * results get 204, and a press answers the oldest held permission request with `answer(key, its body)`. Polls go
+ * as PROTOCOL.md's "Commands" has them as far as these fixtures need: held, the open one answered with none when
+ * the mod reports that the main loop's turn ended, and those after it answered at once while the registry says busy
+ * and until a main-loop turn.start. It plays nothing else of a deck: registry lines only set the status its polls go
+ * by, of the one session these fixtures have, and expect lines go unchecked, so a fixture through it checks only the
+ * replies.
  */
 async function stubDeck(t, answer) {
   const held = []
+  const polls = []
   let taken = 0
+  let status = null
+  let turnEnded = false
   const server = http.createServer((req, res) => {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
@@ -155,9 +164,21 @@ async function stubDeck(t, answer) {
         res.end(json === undefined ? undefined : JSON.stringify(json))
       }
       const route = new URL(req.url, 'http://stub').pathname
-      if (route === ROUTES.permission) held.push({ body: JSON.parse(Buffer.concat(chunks).toString('utf8')), reply })
+      const body = () => JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (route === ROUTES.permission) held.push({ body: body(), reply })
       else if (route === ROUTES.hello) reply(200, { v: 1, ok: true })
-      else if (route !== ROUTES.next) reply(204)
+      else if (route === ROUTES.next) {
+        if (turnEnded && status === 'busy') reply(200, { cmds: [] })
+        else polls.push(reply)
+      } else {
+        for (const e of route === ROUTES.events ? mainEvents(body()) : []) {
+          if (e.t === 'turn.start') turnEnded = false
+          if (e.t !== 'turn.end' && e.t !== 'failed') continue
+          turnEnded = true
+          for (const poll of polls.splice(0)) poll(200, { cmds: [] })
+        }
+        reply(204)
+      }
     })
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -167,7 +188,9 @@ async function stubDeck(t, answer) {
   }))
   const driver = {
     name: 'stub',
-    async begin() {},
+    async begin(fx) {
+      status = fx.setup.registry?.[0]?.status ?? null
+    },
     async taken(sent) {
       const deadline = Date.now() + 2000
       while (taken < sent) {
@@ -179,7 +202,9 @@ async function stubDeck(t, answer) {
       const request = held.shift()
       request?.reply(200, answer(Object.keys(line.value)[0], request.body))
     },
-    async registry() {},
+    async registry(line) {
+      status = line.value.gone ? null : (line.value.status ?? status)
+    },
     async expect() {
       return false
     },
@@ -190,11 +215,15 @@ async function stubDeck(t, answer) {
 test("play: an answer to a permission request with anything beyond one of PROTOCOL.md's three fails at its reply, though the fixture's body is all in it", async (t) => {
   // The stub itself is sound: answering as PROTOCOL.md writes them, both fixtures pass.
   const exact = (key) => (key === 'deny' ? DENY : ALLOW)
-  for (const name of ['approve', 'deny']) {
+  const sound = [
+    ['approve', 4, 'the replies to hello, to the press, to the poll at the turn\'s end and to the next, answered at once while the registry says busy'],
+    ['deny', 3, 'the replies to hello, to the press and to the poll at the turn\'s end: the next is held, as the registry says waiting'],
+  ]
+  for (const [name, replies, which] of sound) {
     const { url, driver } = await stubDeck(t, exact)
     const r = await play(readFixture(name), { url, token: 'stub', driver })
     assert.equal(r.ok, true, `${name}: ${r.error}`)
-    assert.equal(r.checked, 2, 'the replies to hello and to the press')
+    assert.equal(r.checked, replies, `${name}: ${which}`)
   }
 
   const adding = (base, extra) => ({ hookSpecificOutput: { ...base.hookSpecificOutput, decision: { ...base.hookSpecificOutput.decision, ...extra } } })
@@ -249,8 +278,12 @@ test('play: the interactive driver, with a scripted person pressing on the fake 
   assert.ok(shown.some((s) => /^PRESS: press Approve\. The key should show the oldest held request: local_test-a: Write s4\.txt\./.test(s)))
   assert.ok(shown.some((s) => s.startsWith('CHECK on the deck:')))
   assert.ok(shown.some((s) => s.startsWith('skip: registry')))
-  assert.equal(r.checked, 2, 'the replies to hello and to the press; expect lines are for the person')
+  assert.equal(r.checked, 3, 'the replies to hello, to the press and to the poll at the turn\'s end; expect lines are for the person')
   assert.equal(asked.length, 3, 'one question per expect line')
+  // The poll after the turn's end is answered at once only while the registry says busy, and no registry the deck
+  // reads lists the fixture's session: the deck holds it, and its reply is skipped and reported.
+  assert.deepEqual(r.skipped.map((s) => [s.reply, s.why]), [['n2', 'the deck answers it at once only while the registry says busy after the turn ended, and this mode skips registry lines']])
+  assert.ok(shown.some((s) => s === '  skip: reply n2, answered at once only while the skipped registry says busy'))
 
   r = await play(readFixture('answered-in-app-registry'), { url: bridge.url, token: env.token, driver, say })
   assert.equal(r.ok, true, r.error)
@@ -269,4 +302,53 @@ test('play: the interactive driver, with a scripted person pressing on the fake 
   notes.push(...r.notes)
   assert.equal(r.ok, true)
   assert.deepEqual(notes.map((n) => n.saw), ['the key shows nothing'])
+})
+
+test('play: with registry lines skipped, only the reply to a poll answered at once because the registry says busy after the turn end is skipped', async (t) => {
+  // A poll while the registry says busy before the turn ends (n2), one after it while busy (n3), one after the
+  // registry says idle (n4), and one while busy again in the next turn (n6): only n3's answer hangs on the registry,
+  // so only its reply is skipped.
+  const SID = '3fa86955-0000-4000-8000-00000000000a'
+  const HOST = 'local_test-a'
+  const next = (as) => ({ plugin: { as, method: 'GET', path: `/v1/next?sid=${SID}&host=${HOST}&inst=ia&wait=20` } })
+  const none = (to) => ({ reply: { to, status: 200, body: { cmds: [] } } })
+  const ev = (seq, e) => ({ plugin: { method: 'POST', path: '/v1/events', body: { sid: SID, host: HOST, inst: 'ia', seq, events: [{ ...e, at: T0 + seq }] } } })
+  const lines = [
+    { setup: { session: { sid: SID, host: HOST, model: 'm', cwd: '/s', token: 't' }, registry: [{ pid: 101, sessionId: SID, hostSessionId: HOST, name: 'A', cwd: '/s', status: 'idle', statusUpdatedAt: T0 }] } },
+    { plugin: { as: 'h', method: 'POST', path: '/v1/hello', body: { v: 1, sid: SID, host: HOST, inst: 'ia', cwd: '/s', model: 'm', plugin: '*', cc: '*' } } },
+    { reply: { to: 'h', status: 200, body: { v: 1, ok: true } } },
+    next('n1'),
+    ev(1, { t: 'turn.start', turn: 't1' }),
+    { registry: { pid: 101, status: 'busy', statusUpdatedAt: T0 + 1000 } },
+    next('n2'),
+    none('n1'),
+    ev(2, { t: 'turn.end', turn: 't1', reason: 'answer' }),
+    none('n2'),
+    next('n3'),
+    none('n3'),
+    { registry: { pid: 101, status: 'idle', statusUpdatedAt: T0 + 2000 } },
+    next('n4'),
+    next('n5'),
+    none('n4'),
+    ev(3, { t: 'turn.start', turn: 't2' }),
+    { registry: { pid: 101, status: 'busy', statusUpdatedAt: T0 + 3000 } },
+    next('n6'),
+    none('n5'),
+    ev(4, { t: 'turn.end', turn: 't2', reason: 'answer' }),
+    none('n6'),
+  ]
+  const fx = parseFixture(lines.map((l) => JSON.stringify(l)).join('\n'), 'at-once.jsonl')
+
+  // The fake bridge, its registry written, gives every reply.
+  let { r } = await playAgainstFake(t, fx)
+  assert.equal(r.ok, true, r.error)
+  assert.deepEqual([r.checked, r.skipped], [7, []])
+
+  // With its registry lines skipped, the bridge holds n3 too, and its reply alone is skipped and reported.
+  const env = tempEnv(t)
+  const bridge = await startBridge(t, env)
+  r = await play(fx, { url: bridge.url, token: env.token, driver: interactive({ ui: { show: () => {}, ask: async () => '' }, pressTimeoutMs: 1000 }) })
+  assert.equal(r.ok, true, r.error)
+  assert.equal(r.checked, 6, 'the replies to hello, n1, n2, n4, n5 and n6')
+  assert.deepEqual(r.skipped.map((s) => [s.line, s.reply]), [[12, 'n3']])
 })
