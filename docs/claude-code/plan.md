@@ -681,6 +681,15 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     2. One protocol round and a build workflow.
     3. The release, the install and their checks.
     4. Phase 6.
+- 2026-11-03, **the Auto spike: a PreToolUse allow carries the deck's mode change past the auto-mode classifier.** Tools: `spikes/cc-pretool/`, a stand-in on 127.0.0.1:47610 that answers a PreToolUse http hook and hands modes to a temporary poller in the mod. The poller called the same `set_session_permission_mode` as a deck mode command, with no prompt in the transcript. Log: `spikes/results/20261103-042849-pretool/requests.jsonl`.
+  - **Baseline, T3 in Auto, no new hook:** the mod's change to Manual got no answer for minutes. Nothing reached the deck, and the registry stayed `idle`. In Phase 4 the same call was refused in 14 ms ("The server-side auto mode classifi…"). In the 2.1.309 engine the server-side check judges calls against the verdicts that come with the model's own response, and a mod's call has none.
+  - **T2 in Manual:** the same call returned in 34 ms ("This session is already in Manual mode"). It raised a PermissionRequest that the deck held as an ordinary `tool` request, since no deck command was in flight. Rule 3 released it when the registry read idle.
+  - **A hot reload doesn't register hooks newly added to `hooks.json`.** After adding the PreToolUse hook, neither T2's own Read nor the mod's call reached the stand-in, so the test needed a fresh session. That matches ladder step 4.
+  - **T4** (`local_ffcddcd0-…`) was started from the preset, in Auto, on Haiku at low effort, with the hook in place. Its first Read reached the stand-in 9 ms after `tool.start`, with `permission_mode: auto`.
+  - **The decisive run:** with the stand-in allowing, the mod's change from Auto to Manual reached the hook 15 ms after the mod took it, with input `{session_id: "self", mode: "default"}`. It was allowed, and was `done` 31 ms after the call began: "This session now runs in Manual mode (default), from Auto". No PermissionRequest came, and the app's record says `default`.
+  - **A raise still asks:** Manual to Auto passed the hook's allow, then raised the app's own PermissionRequest 8 ms later. The deck held it as `#3`, since this change wasn't a deck command. So the design needs both rules: PreToolUse for the classifier, and the existing mode rule for the raise's card. From Auto every change goes down, so no card comes.
+  - **Left behind:** T4 is in Manual with the app's card for that raise still open (registry `waiting`). It's for the user in the morning. T3's unanswered calls may still settle later; it's a throwaway session. The spike's edits to the plugin are reverted, and the stand-in is stopped.
+  - **Next:** the protocol round adds the PreToolUse route.
 
 ## Progress
 
