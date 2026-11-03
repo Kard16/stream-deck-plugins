@@ -876,6 +876,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Auto to Manual: one command, done.
     - Back to Auto: the mode check and kind mode's PermissionRequest were both allowed for the same command, and it was done in 0.2 s.
     - Whether the app's card stayed up is the user's to say.
+  - Item 1: the main thread archived Deck test T2, T3 and T4 at the user's word, at 14:35Z. Each get_session then said `isArchived: true`. The next live check needs a new throwaway session from the `deck-sandbox` preset, since the scratchpad's live scripts take T2's host.
 
 ## Progress
 
