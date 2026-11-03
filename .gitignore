@@ -37,3 +37,6 @@ spikes/results/
 **/run/
 # Written by the engine when a session loads the plugin; it extends the engine's own (self-ignoring) types folder
 claude-code/plugin/tsconfig.json
+
+# The Claude Code plugin's release copy, which the user's own sessions load, and its settings backups (claude-code/install/)
+claude-code/release/

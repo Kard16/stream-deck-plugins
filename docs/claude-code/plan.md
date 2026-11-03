@@ -690,6 +690,32 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **A raise still asks:** Manual to Auto passed the hook's allow, then raised the app's own PermissionRequest 8 ms later. The deck held it as `#3`, since this change wasn't a deck command. So the design needs both rules: PreToolUse for the classifier, and the existing mode rule for the raise's card. From Auto every change goes down, so no card comes.
   - **Left behind:** T4 is in Manual with the app's card for that raise still open (registry `waiting`). It's for the user in the morning. T3's unanswered calls may still settle later; it's a throwaway session. The spike's edits to the plugin are reverted, and the stand-in is stopped.
   - **Next:** the protocol round adds the PreToolUse route.
+- 2026-11-03, **the install route, from a research agent.** It read the 2.1.309 engine and the app's JS, and ran 13 experiments with the 2.1.309 binary in scratch configs, with no credentials and no model calls. Its files are in this session's scratchpad (`route/`).
+  - **Settings `env` against the launch env:** in a desktop session the launch environment wins, key by key. The engine latches the launch keys at start, and the app's preset and Environment variables are launch env. Elsewhere, settings win.
+    - So the user's sessions will load the release copy from settings.
+    - Preset sandbox sessions keep the dev copy and the preset's token. Their debug log says so: "Ignoring CLAUDE_CODE_PLUGIN_DIRS, DECK_TOKEN from userSettings…".
+  - **The app's own plugins** come in its initialize request, which the engine merges with the env's folders, so ours drops nothing of theirs. The app never sets `CLAUDE_CODE_PLUGIN_DIRS`.
+  - **When changes apply:**
+    - A settings `env` change re-applies to running sessions about 1 s later. A new token reaches their mods and hooks.
+    - A new plugin folder takes effect only at a session's start; `/reload-plugins` doesn't add it.
+    - Removing the keys doesn't unset them in running sessions.
+  - **Who else loads it, and the fixes:**
+    - **Terminal and VS Code sessions, and `claude -p` runs.** They have no host id.
+    - **A `claude` started inside a desktop session.** It inherits the parent's host id, with `CLAUDECODE=1` and `CLAUDE_CODE_CHILD_SESSION=1`, and its mod ran under the parent's identity.
+    - **Side chats and recaps forked from preset sessions.** They carry the parent's host id and `CLAUDE_CODE_TAGS`. Forks of the user's sessions read no settings. This may explain some RESTART lines in Phase 4.
+    - **The app's pre-warmed spares.** They run the mod's `session.start` with the host id of the session they'll become, before they're claimed.
+    - **The fixes,** in the protocol round's "Desktop sessions only":
+      - The mod uses the engine's own test (`dp()`, `_M()`) plus the forks' tags.
+      - The bridge takes a hook's request only from a session the registry confirms by host and `session_id`.
+      - A hello under a listed host with another `sessionId` gets 409.
+  - **A mod's call has `tool_use_id: "toolu_plugin_…"`** (the Auto spike). It could tell the mod's call from Claude's own, but the rule doesn't use it yet.
+  - **After the install,** this session's Bash env picks up both keys through that re-apply. So `claude` and `$CC` commands run here need `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`. `DECK_TOKEN` will be in every Claude Code child process. That's no weaker than the token file, which any process of the user's can read.
+  - **The route stays as planned:** settings `env` with `CLAUDE_CODE_PLUGIN_DIRS` pointing at `claude-code/release/streamdeck-bridge`, plus `DECK_TOKEN`, and no `CLAUDE_CODE_PLUGIN_DIR_WATCH`. The fallback, a folder marketplace, was checked too: the inline copy wins over an installed one of the same name.
+- 2026-11-03, **the protocol round for Phase 5** (uncommitted until it's built):
+  - **PROTOCOL.md's 2026-11-03 amendment:** the mode hook and `POST /v1/pretool`; "Desktop sessions only"; only a hello makes an `inst` current; and the fixtures `mode-from-auto`, `stray-instance` and `not-desktop`, with `mode-raise` and `mode-not-ours` changed (17 in all).
+  - **Before the build:** the deck failed 6 checks, the tools 11 and the plugin 2.
+  - **Also committed tonight:** `claude-code/tools/recheck.mjs` (5ccf1c2) re-checks the app internals after an update. 18 tests pass, and on this Mac it reports 29 ok, 0 warn, 0 fail.
+  - **Building:** workflow `wf_614315da-297` covers deck, plugin and tools, each built, reviewed adversarially, then refixed. An agent writes `claude-code/install/deck-install.mjs` (status, release, install, undo).
 
 ## Progress
 
