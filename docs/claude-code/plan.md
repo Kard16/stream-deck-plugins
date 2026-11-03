@@ -751,6 +751,26 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **A repeated hello from the current instance,** as after every Deny: its mode and effort are only what the mod last told the deck. So it could put back a mode older than the PermissionRequest's the deck just took, until the next prompt. It will take `cwd` and `model` only. Both decks take everything today.
     - **Contract wording:** the registry's `startedAt`, and which of two files for one host the deck shows; release rule 4 when no file lists the host; `plugin.json` declares nothing; `refused` covers the engine refusing the call. The recheck script watches the engine's wording.
   - **Next:** commit, restart the deck, the live checks, then the release and the install.
+- 2026-11-03, **round 2 is committed (f90bc6f) and live, and the plugin is installed for the user's sessions.**
+  - **Spot checks by the main thread,** each in a scratch copy:
+    - The deck with no 409 fails 8 tests. With the 409 sent to stray instances too, 10 fail.
+    - The mod taking the 409 as a failure fails 4 tests, and so does the mod taking any 409 as a call for hello.
+  - **The deck restarted at 08:41 UTC** with f90bc6f's build. T2, T3 and T4 said hello within 30 ms of it, each after the restart rejected its open poll. There have been no 409s or restarts since, and each keeps a 20 s poll open.
+  - **Live checks, all 8 pass** (the main thread's script, using T2's host and made-up ones, so nothing reaches any session):
+    - a PermissionRequest with no `X-Deck-Host` gets `{}` at once, and so does one under T2's host with another `session_id`;
+    - T2's own mode check with no command in flight gets `{}`;
+    - a hello under T2's host with another sid gets 409 `not this session`;
+    - a stray instance's poll under T2's host gets `{"cmds": []}` at once;
+    - a poll for a host no instance has said hello for gets 409 `hello first`;
+    - a wrong token gets 401, and a foreign `Host` gets 403.
+    - The deck logged each refusal once at info.
+  - **The release:** f90bc6f, version 0.2.0, 16 files, validated with 2.1.309.
+  - **The install:**
+    - `settings.json` is backed up, and the diff, with the token masked, adds only the `env` block.
+    - `deck-install.mjs status` exits 0, "installed and current".
+    - As the route research said, this session's Bash picked up both keys, while the tools and tests read neither. CLAUDE.md now says to run `claude` with `env -u`, records where the plugin loads, and lists the install commands. The root README has the guide's link.
+  - **The user's sessions load it when they next start.** The running ones are untouched.
+  - **Next:** round 3, the hardening and the decisions above.
 
 ## Progress
 
@@ -772,4 +792,6 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Step 10: dropped.
   - Step 11: later.
 - [ ] Phase 5: daily use. Started 2026-11-03 as an overnight run; the Log's last entry says where it stands.
+  - Installed for the user's sessions, 2026-11-03: release f90bc6f in settings `env`.
+  - Still to come: the user's morning checks, then a day of real use.
 - [ ] Phase 6: hardening

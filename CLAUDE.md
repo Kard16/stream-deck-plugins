@@ -3,18 +3,20 @@
 Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Code. One user, one Mac (macOS 26). No Marketplace, Windows support or distribution polish. Keystroke automation and undocumented APIs are fine when they're the only route.
 
 - **Done:** the Lightroom Classic side, 2026-11-01. Plan, decisions and progress: `docs/lightroom/plan.md`.
-- **Now:** the Claude Code side. Plan, decisions and progress: `docs/claude-code/plan.md`. Design notes: `docs/research/claude-code-extensibility.md`.
+- **Now:** the Claude Code side, in daily use since 2026-11-03 (Phase 5). Plan, decisions and progress: `docs/claude-code/plan.md`. Design notes: `docs/research/claude-code-extensibility.md`. The user's guide: `claude-code/README.md`.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
 ## Rules
 
 - Never touch the user's main Lightroom catalog. Work only in the test catalog named in `docs/lightroom/plan.md`. The Lua plugin's guard (`GUARD` in `Config.lua`) refuses writes in other catalogs, but the user turned it off on 2026-11-01 for daily use. So before driving Lightroom, check that the latest `starting:` line in its log names the test catalog. Only the user changes `GUARD`.
 - Lightroom, the Claude app, the Stream Deck app and the physical deck are shared. One agent drives them at a time, and the main thread decides which.
-- Until the user says otherwise, the Claude Code plugin loads only in throwaway sessions the main thread starts in `claude-code/sandbox/`.
-  - Never load it anywhere else: not through `~/.claude/settings.json` (hooks, `enabledPlugins`, `env`), not `~/.claude/skills/`, not a user-scope install.
+- The Claude Code plugin loads in two places, and nowhere else:
+  - **Throwaway sessions** the main thread starts from the app's `deck-sandbox` preset in `claude-code/sandbox/`. They load the dev copy, `claude-code/plugin`, through the `claude-code/sandbox-plugin` link, and hot-reload every save.
+  - **The user's own sessions,** since 2026-11-03 at the user's word. They load the release copy, `claude-code/release/streamdeck-bridge`, which `CLAUDE_CODE_PLUGIN_DIRS` names beside `DECK_TOKEN` in the `env` block of `~/.claude/settings.json`. Only `claude-code/install/deck-install.mjs` (`release`, `install`, `undo`) touches those keys, and it backs the file up first. A dev change reaches the user's sessions only once it's committed and released, and each session picks it up when it next starts.
+  - Not through hooks or `enabledPlugins` in `~/.claude/settings.json`, not `~/.claude/skills/`, not a user-scope install. Never set `CLAUDE_CODE_PLUGIN_DIR_WATCH`: it would turn off the dev-mods hot reload.
   - Never write under `~/.claude/dev-mods/`. The main session's mods folder there is watched, and anything in it loads into that session.
   - Only the main thread starts, messages or archives sessions in the Claude app.
-  - Never approve, deny, send a prompt to, or change the mode, model or effort of a session the main thread didn't start. The user's own sessions are read-only.
+  - Never approve, deny, send a prompt to, or change the mode, model or effort of a session the main thread didn't start, in the app or through the bridge. The user's own sessions are read-only: the deck acts on them only for the user's own presses.
   - Keystrokes into the Claude app only with the user's OK, and only with a throwaway session in front.
 - Steps only the user can do go back to the main thread, which batches them into one numbered checklist. That means Lightroom's Plug-in Manager, prompts in the Claude app, macOS permission prompts, looking at the deck, and design choices.
 - Stay inside this repo. Outside it, these are fine without asking:
@@ -40,6 +42,8 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 | `claude-code/protocol/` | Bridge protocol spec, plus fixture streams both sides test against | Main thread |
 | `claude-code/sandbox/` | The folder throwaway test sessions run in | Main thread |
 | `claude-code/vendor/` | The mods API reference for the app's Claude Code version | Main thread |
+| `claude-code/install/` | `deck-install.mjs`: releases the plugin from HEAD, and installs it in or takes it out of settings `env` | Main thread |
+| `claude-code/release/` | The release copy the user's sessions load, and backups of `settings.json`. Git ignores it, and only `deck-install.mjs` writes it | Main thread |
 | `spikes/` | Phase 1 experiments for both sides | Whoever runs the spike |
 | `docs/` | Research, plans, progress | Main thread |
 
@@ -106,14 +110,16 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 **The bridge protocol** is `claude-code/protocol/PROTOCOL.md`, frozen with its fixtures. Changes go through the main thread, and fixtures are edited in `make-fixtures.mjs`, never by hand.
 
 **Hooks**
-- The only hook is the PermissionRequest `http` hook. Status comes from the mod.
-- Never give the PermissionRequest hook `onFailure: "block"`: with the bridge down, it would deny every tool call.
+- Two `http` hooks: PermissionRequest for approvals, and PreToolUse matched to the app's mode tool alone, for the deck's own mode changes. Status comes from the mod.
+- Never give either hook `onFailure: "block"`: with the bridge down, the permission hook would deny every tool call.
+- A session reads `hooks.json` when it starts. A hot reload doesn't add a new hook.
 - PermissionRequest ignores exit code 2; answer with JSON.
 
 **The desktop app**
 - Sessions are SDK-hosted. Their environment has `CLAUDE_CODE_SESSION_ID` and the app's own id, `CLAUDE_CODE_HOST_SESSION_ID` (`local_…`).
 - `~/.claude/sessions/<pid>.json` lists the running sessions, with titles and busy or idle. It's undocumented, so code that reads it tolerates missing fields. Never read the `.key` files beside it.
 - The app's dialogs must keep working whatever the deck does. Anything the bridge can't answer falls back to them.
+- With the plugin in `~/.claude/settings.json`, every Claude Code process that reads it loads the plugin: terminal sessions, `claude -p` runs, a `claude` started inside a session. The mod talks only from a desktop session of its own, and the bridge takes hook requests only from a session the registry confirms (PROTOCOL.md, "Desktop sessions only").
 
 ## Logs agents can read
 
@@ -137,8 +143,9 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - The plugin is linked, and Stream Deck's developer mode is on (`npx streamdeck dev`). A linked plugin doesn't start without developer mode.
 
 **Claude Code plugin** (from the repo root; `CC` is the app's binary, `$HOME/Library/Application Support/Claude/claude-code/2.1.309/5af865b9901c/claude.app/Contents/MacOS/claude`)
+- Run every `claude` or `"$CC"` command with `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`: the install puts both in this session's environment, and they would load the release copy too.
 - `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`
-- `CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`.
+- `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`.
 - `node claude-code/plugin-tsc/sync-fixtures.mjs --check`: the plugin's copy of the fixtures is current, `hooks.json` is PROTOCOL.md's block, `plugin.json` only describes the plugin, and its version is the mod's `PLUGIN_VERSION`. `claude plugin test` can't read files outside the plugin, so after `make-fixtures.mjs` changes them, run it without `--check`.
 - `node --test claude-code/plugin-tsc/sync-fixtures.test.mjs`: that script's own tests. Name the file: Node 24 takes a bare folder as a module.
 
@@ -146,6 +153,13 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `npm run typecheck`, `npm test`, `npm run build`
 - `npx streamdeck validate com.karimdhanji.claude.sdPlugin`
 - After `npm run build`, `streamdeck restart com.karimdhanji.claude`; `npm run watch` does both on save.
+
+**Install** (from the repo root)
+- `node claude-code/install/deck-install.mjs status`: whether the user's sessions get the plugin at HEAD. Exits 0 when installed and current.
+- After a commit to `claude-code/plugin`: `deck-install.mjs release`. Sessions pick it up when they next start. `undo` takes the plugin out of `settings.json`.
+- `node --test claude-code/install/test/`
+
+**After a Claude app update:** `node claude-code/tools/recheck.mjs` re-checks the app internals the deck and the plugin rely on.
 
 **Claude tools and protocol** (from the repo root)
 - `node --test claude-code/tools/test/`
