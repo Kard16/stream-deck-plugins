@@ -6,8 +6,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /**
  * Normal use logs at info: startup, the connection to Lightroom, refusals that alert a key or dial, and
- * problems. Per-event lines are below it: the dial's TICK and INPUT lines, bank changes and stale refusals at
- * debug, every line to and from Lightroom at trace.
+ * problems. Per-event lines are below it: the dial's TICK and INPUT lines, big steps going on and off, the
+ * ranges Lightroom reports and stale refusals at debug, every line to and from Lightroom at trace.
  */
 export const DEFAULT_LOG_LEVEL: LogLevel = "info";
 

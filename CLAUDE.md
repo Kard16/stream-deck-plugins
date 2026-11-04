@@ -2,7 +2,7 @@
 
 Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Code. One user, one Mac (macOS 26). No Marketplace, Windows support or distribution polish. Keystroke automation and undocumented APIs are fine when they're the only route.
 
-- **Done:** the Lightroom Classic side, 2026-11-01. Plan, decisions and progress: `docs/lightroom/plan.md`.
+- **Done:** the Lightroom Classic side, 2026-11-01, and its Phase 7, dials on Stream Deck pages and big steps, 2026-11-04. Plan, decisions and progress: `docs/lightroom/plan.md`.
 - **Now:** the Claude Code side, in daily use since 2026-11-03 (Phase 5). Plan, decisions and progress: `docs/claude-code/plan.md`. Design notes: `docs/research/claude-code-extensibility.md`. The user's guide: `claude-code/README.md`.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
@@ -91,7 +91,7 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 - One item out of bounds, or overlapping another at the same `zOrder`, makes the whole layout fail silently. Run `streamdeck validate` after every layout change.
 - Coalesce dial ticks (~40 ms) and apply our own acceleration.
 - Send at most 10–15 strip updates per second per dial, with only the changed keys.
-- Dial stacks steal the press, so every press action needs a touch alternative.
+- Dial stacks steal the press, so every press action needs a touch alternative, unless the user rules otherwise. The Lightroom dial's reset is press-only at their word (2026-11-03), and its strip tap turns on big steps.
 
 **System**
 - `streamDeck.system.openUrl` can't open custom URL schemes; run `open` through `child_process`.

@@ -6,9 +6,10 @@
 // Stream Deck app (the plugin WebSocket API) and a fake Lightroom (DeckBridge v1 on two TCP sockets), all on
 // ephemeral ports, and runs the plugin process against them with DECKBRIDGE_CMD_PORT/DECKBRIDGE_EVT_PORT.
 // scripts/smoke-guard.mjs makes any connection to 58780/58781 throw. Then it plays dial and key input through
-// the SDK's events and checks what reaches Lightroom and the deck. That run logs at the default level; a short
-// second run, with log-level.txt saying debug, checks the dial's TICK and INPUT lines that
-// spikes/s4-ticks/analyze.mjs reads. --keep keeps the temp folder with both runs' logs. Nothing here touches the
+// the SDK's events and checks what reaches Lightroom and the deck: dials with and without settings, the dial's
+// Property Inspector, big steps, a page switch, the keys, a reconnect and a locked photo. That run logs at the
+// default level; a short second run, with log-level.txt saying debug, checks the dial's TICK and INPUT lines that
+// spikes/s4-ticks/analyze.mjs reads, and the big-step and ranges lines. --keep keeps the temp folder with both runs' logs. Nothing here touches the
 // Stream Deck app, Lightroom or the physical deck.
 import { spawn } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -25,6 +26,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const source = path.join(here, "..", "com.karimdhanji.lightroom.sdPlugin");
 const UUID = "com.karimdhanji.lightroom";
 const TEST_CATALOG = "/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat";
+/** The params in the shipped sliders.json, in its order: the deck watches all of them. */
+const SLIDERS = JSON.parse(readFileSync(path.join(source, "sliders.json"), "utf8")).sliders.map((s) => s.param);
+/** STRIP_COLORS in src/dial/strip.ts: big steps, the same dimmed, and the normal bar fill. */
+const GREEN = "#3DDC84";
+const DIM_GREEN = "#2F7A52";
+const BLUE = "#4A9EFF";
 const RANGES = { Temperature: [2000, 50000], Tint: [-150, 150], Exposure: [-5, 5] };
 const VALUES = { Temperature: 5500, Tint: 10, Exposure: 0.35, Contrast: 0, Highlights: -20, Shadows: 15 };
 const PRESETS = [
@@ -189,8 +196,9 @@ const payload = (controller, column, settings, extra = {}) => ({
 });
 const willAppear = (action, context, controller, column, settings = {}) =>
 	toPlugin({ event: "willAppear", action: `${UUID}.${action}`, context, device: DEVICE, payload: payload(controller, column, settings) });
-const dialEvent = (event, column, extra = {}) =>
-	toPlugin({ event, action: `${UUID}.dial`, context: `dial-${column}`, device: DEVICE, payload: { ...payload("Encoder", column, {}), ...extra } });
+const dialEvent = (event, context, column, extra = {}) =>
+	toPlugin({ event, action: `${UUID}.dial`, context, device: DEVICE, payload: { ...payload("Encoder", column, {}), ...extra } });
+const tap = (context, column, hold = false) => dialEvent("touchTap", context, column, { hold, tapPos: [100, 50] });
 const keyEvent = (event, action, context, column, settings = {}) =>
 	toPlugin({ event, action: `${UUID}.${action}`, context, device: DEVICE, payload: payload("Keypad", column, settings, { state: 0 }) });
 
@@ -233,7 +241,7 @@ const evtPort = await listen(lr.evtServer);
 const sdPort = await startApp();
 const info = {
 	application: { font: ".AppleSystemUIFont", language: "en", platform: "mac", platformVersion: "26.0.0", version: "7.6.0.23012" },
-	plugin: { uuid: UUID, version: "0.2.0.0" },
+	plugin: { uuid: UUID, version: "0.3.0.0" },
 	devicePixelRatio: 2,
 	colors: {},
 	devices: [{ id: DEVICE, name: "Stream Deck +", size: { columns: 4, rows: 2 }, type: 7 }],
@@ -271,6 +279,11 @@ const deadline = setTimeout(() => {
 deadline.unref();
 
 const alertsOn = (context) => fromPlugin.filter((m) => m.event === "showAlert" && m.context === context).length;
+/** The settings the plugin saved for a dial with setSettings, in order. */
+const savedFor = (context) => fromPlugin.filter((m) => m.event === "setSettings" && m.context === context).map((m) => m.payload);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+/** What Lightroom received from index `from` on, pings aside. */
+const sentSince = (from) => lr.received.slice(from).filter((c) => c.t !== "ping");
 /** analyze.mjs's pattern for the lines it reads, and their records. */
 const RECORD = /\b(TICK|INPUT|STARTUP) (\{.*\})\s*$/;
 const records = (log) =>
@@ -288,40 +301,95 @@ const main = startPlugin(copyPlugin("default"));
 try {
 	await waitFor("the plugin registers with the Stream Deck app", () => fromPlugin.some((m) => m.event === "registerPlugin" && m.uuid === UUID));
 	await waitFor("the plugin connects to Lightroom's two sockets", () => lr.cmdConns.length === 1 && lr.evtConns.length === 1);
-	await waitFor("it says hello and watches all 13 bank params", () => lrGot(lr, (c) => c.t === "hello" && c.v === 1) && lrGot(lr, (c) => c.t === "watch" && c.ps.length === 13));
+	await waitFor(`it says hello and watches all ${SLIDERS.length} sliders, in sliders.json's order`, () => SLIDERS.length === 17 && lrGot(lr, (c) => c.t === "hello" && c.v === 1) && lrGot(lr, (c) => c.t === "watch" && same(c.ps, SLIDERS)));
 
-	for (let c = 0; c < 4; c++) willAppear("dial", `dial-${c}`, "Encoder", c);
+	// Dials 1, 2 and 4 have no slider in their settings yet; dial 3 has Exposure.
+	willAppear("dial", "dial-0", "Encoder", 0);
+	willAppear("dial", "dial-1", "Encoder", 1);
+	willAppear("dial", "dial-2", "Encoder", 2, { param: "Exposure" });
+	willAppear("dial", "dial-3", "Encoder", 3);
 	willAppear("pick", "key-pick", "Keypad", 0);
 	willAppear("before-after", "key-ba", "Keypad", 1);
 	willAppear("preset", "key-preset", "Keypad", 2, { uuid: "P1", name: "Classic Chrome" });
 	willAppear("next", "key-next", "Keypad", 3);
 
-	await waitFor("the strips show bank 1 with live values", () =>
-		["Temp", "Tint", "Exposure", "Contrast"].every((label, c) => strip(`dial-${c}`).label?.value === label) &&
+	await waitFor("dials without a slider get their column's default, saved with setSettings: Temperature, Tint and Contrast", () =>
+		same(savedFor("dial-0"), [{ param: "Temperature" }]) && same(savedFor("dial-1"), [{ param: "Tint" }]) && same(savedFor("dial-3"), [{ param: "Contrast" }]),
+	);
+	check("the dial whose settings name Exposure saves nothing", savedFor("dial-2").length === 0, JSON.stringify(savedFor("dial-2")));
+	await waitFor("the strips show their sliders with live values, and big steps off", () =>
+		["Temp", "Tint", "Exposure", "Contrast"].every((label, c) => strip(`dial-${c}`).label?.value === label && strip(`dial-${c}`).mode?.value === "") &&
 		strip("dial-0").value?.value === "5500 K" &&
 		strip("dial-2").value?.value === "+0.35" &&
-		strip("dial-2").bank?.value === "1/4",
+		strip("dial-2").bar?.bar_fill_c === BLUE,
 	);
 	await waitFor("the keys get live images", () => lastImage("key-pick").includes("Pick") && lastImage("key-preset").includes("Classic"));
 
-	dialEvent("dialRotate", 2, { ticks: 1, pressed: false });
+	dialEvent("dialRotate", "dial-2", 2, { ticks: 1, pressed: false });
 	await waitFor("a turn sends set Exposure 0.38 with g, and ph for photo 101", () => lrGot(lr, (c) => c.t === "set" && c.p === "Exposure" && c.v === 0.38 && Number.isInteger(c.g) && c.ph === "101"));
 	await waitFor("the strip follows the turn", () => strip("dial-2").value?.value === "+0.38");
 	await waitFor("done follows 800 ms after the last tick", () => lrGot(lr, (c) => c.t === "done"), 2000);
 
-	dialEvent("dialDown", 3);
-	dialEvent("dialUp", 3);
+	dialEvent("dialDown", "dial-3", 3);
+	dialEvent("dialUp", "dial-3", 3);
 	await waitFor("a press without turning resets Contrast, with ph for photo 101", () => lrGot(lr, (c) => c.t === "reset" && c.p === "Contrast" && c.ph === "101"));
 
-	dialEvent("dialDown", 1);
-	dialEvent("dialRotate", 1, { ticks: 4, pressed: true });
-	dialEvent("dialUp", 1);
+	dialEvent("dialDown", "dial-1", 1);
+	dialEvent("dialRotate", "dial-1", 1, { ticks: 4, pressed: true });
+	dialEvent("dialUp", "dial-1", 1);
 	await waitFor("push + turn is fine (Tint +1) and the release doesn't reset", () => lrGot(lr, (c) => c.t === "set" && c.p === "Tint" && c.v === 11) && !lrGot(lr, (c) => c.t === "reset" && c.p === "Tint"));
+	await sleep(900); // Tint's gesture ends
 
-	dialEvent("touchTap", 0, { hold: false, tapPos: [100, 50] });
-	await waitFor("a tap moves every dial to bank 2", () =>
-		["Highlights", "Shadows", "Whites", "Blacks"].every((label, c) => strip(`dial-${c}`).label?.value === label && strip(`dial-${c}`).bank?.value === "2/4"),
+	// Big steps.
+	let from = lr.received.length;
+	tap("dial-2", 2);
+	await waitFor("a tap on the strip turns big steps on for that dial: ×10, and it and the bar fill go green", () =>
+		strip("dial-2").mode?.value === "×10" && strip("dial-2").mode?.color === GREEN && strip("dial-2").bar?.bar_fill_c === GREEN,
 	);
+	check("the other dials stay as they were", [0, 1, 3].every((c) => strip(`dial-${c}`).mode?.value === "" && strip(`dial-${c}`).bar?.bar_fill_c === BLUE));
+	check("the tap sends Lightroom nothing", sentSince(from).length === 0, JSON.stringify(sentSince(from)));
+	dialEvent("dialRotate", "dial-2", 2, { ticks: 2, pressed: false });
+	await waitFor("2 ticks with big steps on move Exposure 2 × 1/3 EV, with no acceleration: set 1.05", () => lrGot(lr, (c) => c.t === "set" && c.p === "Exposure" && c.v === 1.05));
+	await waitFor("the strip follows, still green", () => strip("dial-2").value?.value === "+1.05" && strip("dial-2").bar?.bar_fill_c === GREEN);
+	from = lr.received.length;
+	tap("dial-2", 2);
+	await waitFor("another tap turns them off: no ×10, and the fill is blue again", () => strip("dial-2").mode?.value === "" && strip("dial-2").bar?.bar_fill_c === BLUE);
+	tap("dial-2", 2, true);
+	await waitFor("a long touch turns them on, like a tap", () => strip("dial-2").mode?.value === "×10");
+	check("neither the tap nor the long touch sent anything: the long touch no longer resets", sentSince(from).every((c) => c.t === "done"), JSON.stringify(sentSince(from)));
+	dialEvent("dialDown", "dial-2", 2);
+	await waitFor("pressing the dial turns them off", () => strip("dial-2").mode?.value === "");
+	dialEvent("dialUp", "dial-2", 2);
+	await waitFor("and the press still resets Exposure", () => lrGot(lr, (c) => c.t === "reset" && c.p === "Exposure" && c.ph === "101"));
+	from = lr.received.length;
+	const tappedAt = Date.now();
+	tap("dial-1", 1);
+	await waitFor("a tap turns big steps on for Tint", () => strip("dial-1").mode?.value === "×10");
+	await waitFor("they go off by themselves after 2 s without a turn", () => strip("dial-1").mode?.value === "", 4000);
+	const lasted = Date.now() - tappedAt;
+	check("not before 2 s", lasted >= 1950 && lasted < 3000, `${lasted} ms`);
+	check("going on and off by themselves sent Lightroom nothing", sentSince(from).length === 0, JSON.stringify(sentSince(from)));
+
+	// The dial's Property Inspector, on dial 4.
+	toPlugin({ event: "propertyInspectorDidAppear", action: `${UUID}.dial`, context: "dial-3", device: DEVICE });
+	await sleep(50);
+	toPlugin({ event: "sendToPlugin", action: `${UUID}.dial`, context: "dial-3", payload: { t: "getSliders" } });
+	await waitFor("the dial's Property Inspector gets every slider in sliders.json's order, labelled, with dial 4's param", () =>
+		fromPlugin.some(
+			(m) =>
+				m.event === "sendToPropertyInspector" &&
+				m.context === "dial-3" &&
+				m.payload?.t === "sliders" &&
+				m.payload.param === "Contrast" &&
+				same(m.payload.items?.map((i) => i.param), SLIDERS) &&
+				same(m.payload.items[0], { param: "Temperature", label: "Temp" }),
+		),
+	);
+	from = lr.received.length;
+	toPlugin({ event: "didReceiveSettings", action: `${UUID}.dial`, context: "dial-3", device: DEVICE, payload: payload("Encoder", 3, { param: "Dehaze" }) });
+	await waitFor("choosing Dehaze there repaints dial 4 at once, with Lightroom's value", () => strip("dial-3").label?.value === "Dehaze" && strip("dial-3").value?.value === "0");
+	check("and sends Lightroom nothing: Dehaze is already watched", sentSince(from).length === 0, JSON.stringify(sentSince(from)));
+	toPlugin({ event: "propertyInspectorDidDisappear", action: `${UUID}.dial`, context: "dial-3", device: DEVICE });
 
 	keyEvent("keyDown", "pick", "key-pick", 0, {});
 	await waitFor("Pick sends flag pick with advance on by default", () => lrGot(lr, (c) => c.t === "flag" && c.v === "pick" && c.advance === true));
@@ -350,62 +418,92 @@ try {
 	keyEvent("keyDown", "next", "key-next", 3);
 	await waitFor("Next sends nav next", () => lrGot(lr, (c) => c.t === "nav" && c.v === "next"));
 
+	// A Stream Deck page switch: page 1's dials disappear, and page 2's appear with sliders in their settings.
+	const PAGE2 = ["Highlights", "Shadows", "Whites", "Blacks"];
+	const page2 = PAGE2.map((_, c) => `page2-${c}`);
+	for (let c = 0; c < 4; c++) toPlugin({ event: "willDisappear", action: `${UUID}.dial`, context: `dial-${c}`, device: DEVICE, payload: payload("Encoder", c, {}) });
+	await sleep(100); // the plugin has taken them in, and anything it sent before has arrived
+	const switchedAt = fromPlugin.length;
+	from = lr.received.length;
+	PAGE2.forEach((param, c) => willAppear("dial", page2[c], "Encoder", c, { param }));
+	const page2Values = () => page2.map((ctx) => strip(ctx).value?.value);
+	await waitFor("after a page switch, page 2's dials show their own sliders with Lightroom's values for photo 102", () =>
+		PAGE2.every((param, c) => strip(page2[c]).label?.value === param) && same(page2Values(), ["-20", "+15", "0", "0"]),
+	);
+	check("their settings name their sliders, so nothing is saved for them", page2.every((ctx) => savedFor(ctx).length === 0));
+	check("the page switch sends Lightroom nothing", sentSince(from).length === 0, JSON.stringify(sentSince(from)));
+
 	lr.evtConns.at(-1).destroy();
-	await waitFor("the strips say Offline when Lightroom goes away", () => strip("dial-0").value?.value === "Offline");
+	await waitFor("the strips say Offline when Lightroom goes away", () => strip("page2-0").value?.value === "Offline");
 	await waitFor("losing the event socket makes the plugin close the command socket and reconnect both", () => lr.cmdConns.length === 2 && lr.evtConns.length === 2 && lr.cmdConns[0].destroyed, 4000);
-	await waitFor("the strips come back online", () => strip("dial-0").value?.value === "-20");
+	await waitFor("the strips come back online", () => same(page2Values(), ["-20", "+15", "0", "0"]));
 
 	// A background AI process locks photo 102 (PROTOCOL.md, Locked photos).
 	lr.setLocked(true);
-	await waitFor("while the photo is locked every strip says Locked", () => [0, 1, 2, 3].every((c) => strip(`dial-${c}`).value?.value === "Locked"));
+	await waitFor("while the photo is locked every strip says Locked", () => page2.every((ctx) => strip(ctx).value?.value === "Locked"));
 	const lockedFrom = lr.received.length;
-	dialEvent("dialRotate", 1, { ticks: 1, pressed: false });
-	dialEvent("dialDown", 2);
-	dialEvent("dialUp", 2);
-	dialEvent("touchTap", 0, { hold: false, tapPos: [100, 50] });
-	await waitFor("a tap still moves every dial to the next bank, still Locked", () => strip("dial-0").label?.value === "Texture" && strip("dial-0").bank?.value === "3/4" && strip("dial-0").value?.value === "Locked");
-	await waitFor("the dials turned and pressed while locked alert", () => alertsOn("dial-1") === 1 && alertsOn("dial-2") === 1);
+	dialEvent("dialRotate", "page2-1", 1, { ticks: 1, pressed: false });
+	dialEvent("dialDown", "page2-2", 2);
+	dialEvent("dialUp", "page2-2", 2);
+	tap("page2-0", 0);
+	await waitFor("a tap still turns big steps on, in dimmed green, still Locked", () =>
+		strip("page2-0").mode?.value === "×10" && strip("page2-0").mode?.color === DIM_GREEN && strip("page2-0").bar?.bar_fill_c === DIM_GREEN && strip("page2-0").value?.value === "Locked",
+	);
+	await waitFor("the dials turned and pressed while locked alert", () => alertsOn("page2-1") === 1 && alertsOn("page2-2") === 1);
 	await sleep(300);
-	const whileLocked = lr.received.slice(lockedFrom).filter((c) => c.t !== "ping");
+	const whileLocked = sentSince(lockedFrom);
 	check("they send Lightroom nothing: no set, reset or module", whileLocked.length === 0, JSON.stringify(whileLocked));
 	lr.setLocked(false);
-	await waitFor("when the lock ends the strips show values again", () => [0, 1, 2, 3].every((c) => strip(`dial-${c}`).value?.value === "0"));
+	await waitFor("when the lock ends the strips show values again", () => same(page2Values(), ["-20", "+15", "0", "0"]));
 
+	check("page 1's dials got no strip updates after they disappeared", !fromPlugin.slice(switchedAt).some((m) => m.event === "setFeedback" && /^dial-/.test(m.context)));
 	check("every command Lightroom received matches PROTOCOL.md", lr.invalid.length === 0, lr.invalid.join(" | "));
 	const alerts = fromPlugin.filter((m) => m.event === "showAlert").map((m) => m.context);
-	check("the only alerts were the two dials used while the photo was locked", JSON.stringify(alerts.sort()) === JSON.stringify(["dial-1", "dial-2"]), JSON.stringify(alerts));
+	check("the only alerts were the two dials used while the photo was locked", same(alerts.sort(), ["page2-1", "page2-2"]), JSON.stringify(alerts));
 	check("the plugin process is still running", main.exited === null, main.exited ? JSON.stringify(main.exited) : "");
 
 	const log = await stopPlugin(main);
 	check("the plugin logged its startup, at the default level info, and the connection going online", records(log).some((r) => r.kind === "STARTUP" && r.log === "info") && log.includes("offline → online"));
 	const below = log.split("\n").filter((l) => / (DEBUG|TRACE) /.test(l) || (RECORD.test(l) && !l.includes("STARTUP")));
-	check("normal use logs nothing below info: no TICK or INPUT lines, no bank changes", below.length === 0, `${below.length} lines, first ${JSON.stringify(below[0] ?? "")}`);
+	check("normal use logs nothing below info: no TICK or INPUT lines, no big-step or ranges lines", below.length === 0, `${below.length} lines, first ${JSON.stringify(below[0] ?? "")}`);
 
 	// The dial's instrumentation, with log-level.txt saying debug.
 	const fromIndex = fromPlugin.length;
 	const raised = startPlugin(copyPlugin("debug", "debug"));
 	await waitFor("with log-level.txt saying debug, a second run registers", () => fromPlugin.slice(fromIndex).some((m) => m.event === "registerPlugin" && m.uuid === UUID));
-	willAppear("dial", "dial-2", "Encoder", 2);
-	await sleep(100);
-	dialEvent("dialRotate", 2, { ticks: 2, pressed: false });
-	dialEvent("dialDown", 2);
-	dialEvent("dialUp", 2);
-	dialEvent("touchTap", 2, { hold: true, tapPos: [40, 60] });
+	willAppear("dial", "dial-2", "Encoder", 2, { param: "Exposure" });
+	await waitFor("it reaches Lightroom and shows Exposure's value", () =>
+		fromPlugin.slice(fromIndex).some((m) => m.event === "setFeedback" && m.context === "dial-2" && /^[+-]?\d/.test(m.payload?.value?.value ?? "")),
+	);
+	dialEvent("dialRotate", "dial-2", 2, { ticks: 2, pressed: false });
+	dialEvent("touchTap", "dial-2", 2, { hold: true, tapPos: [40, 60] });
+	dialEvent("dialRotate", "dial-2", 2, { ticks: 1, pressed: false });
+	dialEvent("dialDown", "dial-2", 2);
+	dialEvent("dialUp", "dial-2", 2);
 	await sleep(300);
-	const raisedRecords = records(await stopPlugin(raised));
+	const raisedLog = await stopPlugin(raised);
+	const raisedRecords = records(raisedLog);
 	const numbers = (r) => typeof r.t === "number" && typeof r.hr === "number" && r.col === 2;
+	const ticks = raisedRecords.filter((r) => r.kind === "TICK");
 	check("its STARTUP says debug", raisedRecords.some((r) => r.kind === "STARTUP" && r.log === "debug"));
 	check(
-		"TICK lines have analyze.mjs's format",
-		raisedRecords.some((r) => r.kind === "TICK" && numbers(r) && r.ticks === 2 && r.pressed === false && typeof r.result === "string"),
-		JSON.stringify(raisedRecords.filter((r) => r.kind === "TICK")),
+		"TICK lines have analyze.mjs's format, and the turn's mode",
+		ticks.some((r) => numbers(r) && r.ticks === 2 && r.pressed === false && r.mode === "normal" && typeof r.result === "string"),
+		JSON.stringify(ticks),
 	);
+	check("a turn with big steps on says mode macro", ticks.some((r) => numbers(r) && r.ticks === 1 && r.pressed === false && r.mode === "macro" && r.result === "applied"), JSON.stringify(ticks));
 	check(
-		"and so do INPUT lines",
+		"and INPUT lines have analyze.mjs's format",
 		["dialDown", "dialUp", "touchTap"].every((ev) => raisedRecords.some((r) => r.kind === "INPUT" && r.ev === ev && numbers(r))) &&
 			raisedRecords.some((r) => r.ev === "touchTap" && r.hold === true && JSON.stringify(r.tapPos) === "[40,60]"),
 		JSON.stringify(raisedRecords.filter((r) => r.kind === "INPUT")),
 	);
+	check(
+		"big steps going on and off log at debug",
+		/DEBUG.*big steps on for Exposure \(dial 3, long touch\)/.test(raisedLog) && /DEBUG.*big steps off for Exposure \(dial 3\): the dial was pressed/.test(raisedLog),
+		raisedLog.split("\n").filter((l) => l.includes("big steps")).join(" | "),
+	);
+	check("so do the ranges Lightroom reports, the new sliders' among them", /DEBUG.*ranges from Lightroom: .*Sharpness -?\d+…\d+.*GrainAmount/.test(raisedLog));
 } finally {
 	for (const run of runs) if (run.log === undefined) await stopPlugin(run);
 	if (checks.some((c) => !c.ok)) {

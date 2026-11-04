@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { DEFAULT_BANKS, watchList } from "../src/banks.js";
 import { DialDeck, type DialSurface } from "../src/dial/deck.js";
 import { clampToRange } from "../src/model/steps.js";
 import { LrModel } from "../src/model/model.js";
+import { DEFAULT_SLIDERS, watchList } from "../src/sliders.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { FakeLink } from "./helpers/fake-link.js";
 import { concrete, connectHello, connectState, type Fixture, loadFixtures, rangesFor, type Setup, targetPhoto, watchedValues } from "./helpers/fixtures.js";
 
 type Obj = Record<string, unknown>;
 
-const WATCH = watchList(DEFAULT_BANKS);
+const WATCH = watchList(DEFAULT_SLIDERS);
 const INST = "replay-inst";
 
 /**
@@ -152,8 +152,9 @@ type Replay = {
 };
 
 /**
- * Dial input for each gesture fixture. The banks put Temp, Tint, Exposure, Contrast on dials 0–3 in bank 1.
- * Exposure moves 1/30 EV a tick and 1/120 EV a fine (push + turn) tick, so values like 0.40 need fine ticks.
+ * Dial input for each gesture fixture. Dials 0–3 appear without settings, so they show their columns' defaults:
+ * Temp, Tint, Exposure, Contrast. Exposure moves 1/30 EV a tick and 1/120 EV a fine (push + turn) tick, so values
+ * like 0.40 need fine ticks.
  */
 const REPLAYS: Record<string, (r: Replay) => void> = {
 	"dial-gesture.jsonl": (r) => {
@@ -193,16 +194,18 @@ const REPLAYS: Record<string, (r: Replay) => void> = {
 		r.clock.advance(400);
 	},
 	"reset.jsonl": (r) => {
+		r.deck.settings("dial-3", { param: "Exposure" }); // dial 4 shows Exposure too: two dials may show one slider
 		r.deck.down("dial-2");
 		r.deck.rotate("dial-2", 102, true); // 0.35 + 102/120 = 1.20
 		r.lr(1);
-		r.deck.tap("dial-2", true); // long touch resets; Lightroom's reset ends the gesture, so no done
+		r.deck.down("dial-3");
+		r.deck.up("dial-3"); // a press on the other Exposure dial resets it; Lightroom's reset ends the gesture, so no done
 		r.lr(2);
-		r.deck.up("dial-2");
+		r.deck.up("dial-2"); // its gesture already ended: nothing to end, and no reset
 		r.clock.advance(400);
 	},
 	"set-from-library.jsonl": (r) => {
-		r.deck.tap("dial-0", false); // bank 2: Highlights, Shadows, Whites, Blacks
+		r.deck.settings("dial-1", { param: "Shadows" }); // dial 2's slider, chosen in its Property Inspector
 		r.deck.rotate("dial-1", 5, false); // 5 ticks accelerate to 15: Shadows 15 → 30, held until Develop's vals
 		r.enterDevelop();
 		r.lr(1);
@@ -312,11 +315,11 @@ function play(fixture: Fixture, replay: (r: Replay) => void): Played {
 	const clock = new FakeClock();
 	const link = new FakeLink(clock);
 	const model = new LrModel(link, { clock });
-	const deck = new DialDeck(DEFAULT_BANKS, model, { clock });
+	const deck = new DialDeck(DEFAULT_SLIDERS, model, { clock });
 	const alerts: string[] = [];
 	for (let c = 0; c < 4; c++) {
 		const id = `dial-${c}`;
-		const surface: DialSurface = { setFeedback: () => undefined, showAlert: () => alerts.push(id) };
+		const surface: DialSurface = { setFeedback: () => undefined, showAlert: () => alerts.push(id), setSettings: () => undefined };
 		deck.add(id, c, surface);
 	}
 

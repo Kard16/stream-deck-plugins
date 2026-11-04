@@ -1,6 +1,6 @@
 # Lightroom Classic on the Stream Deck +
 
-Develop sliders on the four dials, plus culling, preset and Before/After keys, for Lightroom Classic 15.3 on this Mac. Two plugins talk over localhost:
+Develop sliders on the dials, plus culling, preset and Before/After keys, for Lightroom Classic 15.3 on this Mac. Two plugins talk over localhost:
 
 - **Deck Bridge** (`lua/DeckBridge.lrdevplugin`) runs inside Lightroom. It listens on ports 58780 (commands) and 58781 (events).
 - **The Stream Deck plugin** (`deck/`) runs in the Stream Deck app. It connects to Deck Bridge, and reconnects on its own when either side restarts.
@@ -9,21 +9,24 @@ The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, d
 
 ## The dials
 
-Place **Develop Dial** on all four dials. They page together through four banks:
+Place **Develop Dial** on a dial, then choose its slider in the dial's settings: select the dial in the Stream Deck app. A dial placed without a choice shows Temp, Tint, Exposure or Contrast, by its position. Two dials can show the same slider.
 
-| Bank | Dial 1 | Dial 2 | Dial 3 | Dial 4 |
+For more sliders, use Stream Deck pages, each with its own dials. Change pages with the Stream Deck app's own page navigation, for example by swiping the strip. A layout for the 17 sliders that starts with the old banks:
+
+| Page | Dial 1 | Dial 2 | Dial 3 | Dial 4 |
 |---|---|---|---|---|
 | 1 | Temp | Tint | Exposure | Contrast |
 | 2 | Highlights | Shadows | Whites | Blacks |
 | 3 | Texture | Clarity | Vibrance | Saturation |
-| 4 | Vignette | — | — | — |
+| 4 | Vignette | Dehaze | Sharpening | Noise |
+
+Grain fits on a fifth page, or in place of a slider you use less.
 
 **Gestures:**
 - **Turn** to adjust. Faster turns move further.
 - **Push and turn** for fine steps.
 - **Press** to reset that slider.
-- **Tap the strip** for the next bank.
-- **Long-touch the strip** to reset the slider, for when a dial stack takes the press.
+- **Tap the strip** for big steps. Each click then moves ten normal steps (1/3 EV, 500 K or 10 points), however fast you turn, and the strip shows a green ×10. They switch off after 2 s without turning, on another tap, when you press the dial, or when you change page or the dial's slider. A long touch does the same as a tap.
 
 **Behaviour:**
 - Each burst of turning is one history step, so Cmd-Z undoes it.
@@ -34,7 +37,8 @@ Place **Develop Dial** on all four dials. They page together through four banks:
 - **Offline:** Lightroom isn't running, or Deck Bridge isn't enabled.
 - **Busy:** a menu, a dialog or the Plug-in Manager is open in Lightroom.
 - **Mismatch:** the two plugins speak different protocol versions.
-- **Locked:** an AI process, such as Denoise, is working on the photo. The strip dims and keeps the last value. Turns and presses do nothing until the process finishes, and the dial alerts once per burst. Tapping the strip still changes the bank.
+- **Locked:** an AI process, such as Denoise, is working on the photo. The strip dims and keeps the last value. Turns and presses do nothing until the process finishes, and the dial alerts once per burst. Tapping the strip still switches big steps on or off.
+- **Not listed:** the dial's slider isn't in `sliders.json`, so the dial only alerts. Choose another in its settings.
 
 Strips also dim outside Develop, and while writes are off (see [the guard](#the-test-catalog-guard)).
 
@@ -88,16 +92,17 @@ To check these or find others, press Cmd-/ in Lightroom; it lists the current mo
 
 ## Adding sliders
 
-The banks live in `deck/com.karimdhanji.lightroom.sdPlugin/banks.json`, and its `help` field explains every field.
+The sliders live in `deck/com.karimdhanji.lightroom.sdPlugin/sliders.json`, and its `help` field explains every field.
 
-1. Add a slot to a bank. Use any `LrDevelopController` parameter name, such as Dehaze, Sharpness, LuminanceSmoothing or GrainAmount. Section 2.2 of `docs/research/lightroom-classic-sdk.md` lists them all.
-2. A bank holds up to 4 slots, and `null` is an empty dial.
+1. Add a slider to the list. Use any `LrDevelopController` parameter name, each once. Section 2.2 of `docs/research/lightroom-classic-sdk.md` lists them all.
+2. `macro` sets its big step. It defaults to ten normal steps.
 3. Restart the plugin, or quit and reopen the Stream Deck app. From `lightroom/deck`:
    ```bash
    mise exec -- npx streamdeck restart com.karimdhanji.lightroom
    ```
+4. Choose it in a dial's settings. The list there follows the file's order.
 
-If the file has a mistake, the plugin uses its built-in banks and logs why. Deck Bridge needs no change, because it watches whatever params the deck asks for.
+`macroSeconds` sets how long big steps stay on without a turn, from 0.5 to 10 seconds. If the file has a mistake, the plugin uses its built-in 17 sliders and logs why. Deck Bridge needs no change, because it watches whatever params the deck asks for.
 
 ## The test-catalog guard
 
@@ -121,7 +126,7 @@ Turn it on while an agent works on the Lua plugin. Only you decide to turn it of
   - Deck Bridge: `~/Library/Logs/Adobe/Lightroom/LrClassicLogs/DeckBridge.log`
   - The Stream Deck plugin: `deck/com.karimdhanji.lightroom.sdPlugin/logs/com.karimdhanji.lightroom.0.log`, where 0 is the newest.
   - The Stream Deck app: `~/Library/Logs/ElgatoStreamDeck/StreamDeck.log`
-- **More detail from the Stream Deck plugin:** it logs at info. Debug adds every dial tick and input, plus the reasoning behind each alert. To switch to debug, from `lightroom/deck`:
+- **More detail from the Stream Deck plugin:** it logs at info. Debug adds every dial tick and input, big steps going on and off, the ranges Lightroom reports, and the reasoning behind each alert. To switch to debug, from `lightroom/deck`:
   ```bash
   echo debug > com.karimdhanji.lightroom.sdPlugin/log-level.txt
   ```

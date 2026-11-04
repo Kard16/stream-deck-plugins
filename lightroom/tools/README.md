@@ -19,12 +19,13 @@ Run every command from the repo root through `mise exec --`, because the shell's
 mise exec -- node --test lightroom/tools/
 ```
 
-This runs about 180 tests in roughly 60 s, all on ephemeral ports:
+This runs about 185 tests in roughly 60 s, all on ephemeral ports:
 - the matcher;
 - all 21 fixtures, on the manual clock and the real clock;
 - `smoke.json` against the mock, including the main catalog with the guard off, several photos selected, Auto Advance on, and a photo change it hasn't heard of before its cleanup;
 - a short latency run, its refusals, and photo changes mid-run;
 - the mock's quirks, recovered from by the pair rule and the heartbeat;
+- the ranges of the dials' newer sliders: Sharpness 0..150, LuminanceSmoothing and GrainAmount 0..100 on every file type, and Dehaze -100..100, with `watch` reporting all 17 and `set` clamping to them;
 - the protocol rules the fixtures can't check:
   - no `vals` outside Develop;
   - gestures ending on a photo change, on leaving Develop and at shutdown;
@@ -76,7 +77,7 @@ mise exec -- node lightroom/tools/mock-lr/cli.mjs --ports 59780,59781 [--scenari
   - The observer is silent during a tracked gesture and fires once, about 4 ms after `stopTracking`.
   - A 200 ms poll diffs state and the watched values, leaving out the tracked param.
   - `vals` go out at most 20 a second, like the plugin's. That includes the full set owed after `hello`, `watch`, entering Develop and a photo change, which waits until 50 ms after the last `vals`.
-  - Ranges depend on the file format.
+  - Ranges depend on the file format: Temperature is 2000..50000 K on raw and DNG files and -100..100 on rendered ones, and Tint -150..150 or -100..100. Exposure is -5..5. Sharpness is 0..150, and LuminanceSmoothing and GrainAmount 0..100, on every file type: `docs/lightroom/plan.md`, Phase 7, still to confirm on the real Lightroom. Every other param, Dehaze included, is -100..100. `lib/params.mjs` has them, and `SLIDER_PARAMS`, the deck's 17 sliders in `sliders.json`'s order.
   - Gestures end on `done`, on another `p` or `g`, after 2 s without a `set`, on a disconnect, on a photo change, on leaving Develop and at shutdown. After one ends, `vals` carry its final value only if that changed.
   - The mock learns of the user's photo and module changes, and of Lightroom's own Auto Advance, only from its 200 ms poll, so a `set` can reach such a change first. The plugin also hears of a photo change in Develop from the adjustment observer, within milliseconds, so the mock hits the `stale` path far more often than Lightroom does. That suits testing; it isn't a model of Lightroom's timing.
   - A gesture belongs to the photo it started on. Once the photo or module changes under it, its later `set`s get `err stale` and change nothing. The deck's `nav` and a flag's `advance` end it as stale too, even at an end of the filmstrip where nothing moves, as the plugin does. The stale g is forgotten when the next gesture starts or a client is greeted.
@@ -188,7 +189,7 @@ Anything Lightroom writes on the cmd socket other than `ok` fails the next `expe
 
 **`fake-deck/smoke.json`** is the live check against the real plugin. Its `catalog` is the test catalog, so it never writes anywhere else, even with the guard off.
 1. hello, expecting `writable` true, then a state with exactly one photo selected.
-2. Develop, then watch the 13 bank params and expect ranges and vals.
+2. Develop, then watch the kickoff's 13 dial sliders and expect ranges and vals. The deck now watches 17, but the newer four's ranges aren't confirmed on Lightroom yet, so the script doesn't expect them.
 3. One Exposure gesture: +0.1 and back, then `done`. Each `set` carries `ph`, the photo the script read Exposure from, so Lightroom refuses it as stale on any other photo. That includes cleanup's `set`, after a photo change the script hasn't heard of.
 4. `nav next`, then `prev`.
 5. `view before`, then `after`.
@@ -207,46 +208,59 @@ Before running it against Lightroom:
 ## Deck vs mock
 
 ```
-mise exec -- node lightroom/tools/integration/deck-vs-mock.mjs [--keep]
+mise exec -- node lightroom/tools/integration/deck-vs-mock.mjs [--keep] [--plugin <.sdPlugin folder>]
 ```
 
-Verification ladder step 5: the deck plugin's built bundle against the mock, to find where the two tracks read `PROTOCOL.md` differently. It isn't part of `node --test`. It needs `lightroom/deck`'s `bin/plugin.js` (`npm run build` there) and its `node_modules`, for `ws`. A run takes about 70 s, and everything binds ephemeral ports.
+Verification ladder step 5: the deck plugin's built bundle against the mock, to find where the two tracks read `PROTOCOL.md` differently. It isn't part of `node --test`. It needs `lightroom/deck`'s `bin/plugin.js` (`npm run build` there) and its `node_modules`, for `ws`. A run takes about 100 s, and everything binds ephemeral ports.
 
 How it runs:
-- It copies the `.sdPlugin` folder to a temp folder, so the real plugin's logs stay untouched. The copy gets a `log-level.txt` saying `debug`, so the log checks see the plugin's debug lines too.
+- It copies the `.sdPlugin` folder to a temp folder, so the real plugin's logs stay untouched. The copy gets a `log-level.txt` saying `debug`, so the log checks see the plugin's debug lines too. `--plugin` copies another `.sdPlugin` folder instead, such as one with a patched `bin/plugin.js` for a negative control.
 - It runs `bin/plugin.js` with the deck's `scripts/smoke-guard.mjs` preloaded, so the plugin can't reach 58780/58781.
-- A fake Stream Deck app, after the deck's `smoke.mjs`, plays dial and key input.
+- A fake Stream Deck app, after the deck's `smoke.mjs`, plays dial and key input. Like the real app, it keeps each dial's settings: what the plugin saves with `setSettings`, and what the dial's Property Inspector chooses. It sends them with every event for that dial, and doesn't echo the plugin's own `setSettings` back.
+- Stream Deck pages are `willDisappear` for the shown page's dials, then `willAppear` for another page's, each with its own settings. Page 1 is four dials placed without settings. Pages 2-5 hold the other 13 sliders, as `lightroom/README.md` suggests, plus a dial whose settings name `SharpenRadius`, which `sliders.json` doesn't list, and two dials showing Exposure.
 - `startMock` runs on the real clock, and the plugin gets its ports through `DECKBRIDGE_CMD_PORT` and `DECKBRIDGE_EVT_PORT`.
+- What a strip should show comes from the deck's `sliders.json`: each slider's label, steps, big step and display. The script exits 2 if the file no longer has `plan.md`'s 17 sliders, or if its big steps aren't the plan's, which the checks' names state: 1/3 EV, 10 points and 500 K, each ten normal steps, and off after 2 s.
 
 What it checks: the mock's state, and what the plugin sends the app. The numbers are the script's sections, which its ok and FAIL lines and its checks refer to.
-1. The four dials and eight keys appear, and the plugin says hello and watches the 13 bank params.
+1. The four dials and eight keys appear:
+    - The plugin says hello and watches exactly `sliders.json`'s 17 sliders, in its order, which is `lib/params.mjs`'s `SLIDER_PARAMS`.
+    - The mock's ranges on a raw photo give Sharpness 0…150, LuminanceSmoothing and GrainAmount 0…100, and Dehaze -100…100.
+    - The plugin saves Temperature, Tint, Exposure and Contrast for the dials, by column, with `setSettings`, and the strips show them with the mock's values.
 2. Turns.
-3. Fine turns, press and long-touch resets, and the banks.
-4. Pick, Reject, Unflag with advance; Next and Previous, including a JPEG; Before/After; Apply Preset.
+3. Fine turns, a press that resets, and a long touch that turns big steps on and off and resets nothing. Then Phase 7's dials, in sections 3b-3e:
+    - **3b, big steps.** A tap shows ×10 and the bar fill in green, on that dial alone, and sends nothing. One click moves Exposure 1/3 EV, and three clicks in three events move it three big steps. One event of 4 ticks moves Contrast exactly 40, with no acceleration. A click moves Temperature 500 K on a raw photo. Each burst is one gesture with one `done`. Another tap, a press (which still resets) and push + turn (which is fine) each turn them off within 300 ms, too soon for the countdown to have done it. They go off by themselves after `macroSeconds` without a turn, and a big-step turn starts the count again. Two dials count down at once, each from its own tap or turn. The TICK lines carry each turn's `mode`.
+    - **3c, pages.** Big steps go off when their dial goes away with its page. Then once round pages 2-5 and back to 1, with the mock's values, the newer sliders' after a mouse edit. The same edit changes Highlights while page 2 is away: its dial gets no strip update until page 2 comes back, with the new value. Sharpening, Noise and Grain fill from the left over their ranges, with no +. Two dials can show Exposure. The unlisted param shows itself and Not listed, in the status colour, with no bar. The switches save no settings and send Lightroom nothing, and the dials of a page that went away get no strip updates.
+    - **3d, the unlisted dial.** Turns, a press and a tap alert it once each and send nothing. The tap turns no big steps on: its strip has no ×10 in any case, so the check reads the plugin's log, which says the tap was refused. Its Property Inspector's answer names its param.
+    - **3e, the Property Inspector.** After `propertyInspectorDidAppear`, `getSliders` gets the 17 in order with their labels, and the dial's param. A choice (`didReceiveSettings`) repaints only that dial at once, turns its big steps off, saves nothing and sends Lightroom nothing.
+4. Pick, Reject, Unflag with advance; Next and Previous, including a JPEG, whose ranges for the newer sliders match a raw's; Before/After; Apply Preset.
 5. A mouse edit reaching its strip.
 6. A user's photo change mid-gesture, while ticks keep coming, so Lightroom's `err stale` comes first. Section 6b does the same while the dial rests, so the deck's `state` comes first.
-7. A turn in Library.
-8. A relaunch, a stale event socket, a paused Lightroom, and Lightroom going away and coming back.
+7. A turn in Library. Then big steps there: a tap shows ×10 in dimmed green and sends nothing, and the clicks of a turn are held as big steps while a 300 ms switch to Develop lands (`moduleDelayMs`), then go out as three big steps.
+8. A relaunch, a stale event socket, a paused Lightroom, and Lightroom going away and coming back. Through the new instances the dials keep the sliders their Property Inspectors chose.
 9. The `ph` race. The user moves to another photo while the mock's poll is held (`holdPoll`), and the deck turns, then presses, before it hears. The `set` and the `reset` carry the old photo and get `err stale`. Nothing lands on either photo, and the turns held meanwhile go out with the new photo.
 10. Locked photos:
     - A lock mid-turn ends the turn with `done`.
-    - While `state.locked` is true, the strips say Locked. Turns, presses, push + turn and long touches send nothing and alert once per burst, and a turn in Library sends no `module`. Taps still change banks.
+    - While `state.locked` is true, the strips say Locked. Turns, presses and push + turn send nothing and alert once per burst, and a turn in Library sends no `module`.
+    - Taps and long touches still turn big steps on and off, in dimmed green, and send nothing. Dimmed green is green over red and blue, darker than the live green, and not the plain dimmed fill, which step 7 learns. With big steps on, a turn and a press are still refused. Every page says Locked.
     - Unlocking brings everything back.
     - With `delayEvents(300)`, sets cross `state.locked` on the wire and get `err locked`: one alert, one `done`.
-11. Read-only: a relaunch into another catalog, so `hello.writable` is false. The one `set` per burst, a reset, Pick and Apply Preset each get `err guard` and an alert. Then back to the test catalog.
+11. Read-only: a relaunch into another catalog, so `hello.writable` is false. The one `set` per burst, a step from the value, a reset, Pick and Apply Preset each get `err guard` and an alert. A tap still turns big steps on, dimmed, and then a burst's one `set` is a big step. Then back to the test catalog.
 12. A version mismatch, with `options({ protocolVersion: 2 })` and a reconnect. The strips say Mismatch, inputs alert, and only `hello` and `ping` go out until v1 is back.
 13. Two dials turned at once.
-14. Clamping at both ends of Exposure's range.
-15. Presets that change sliders. One is applied just after a turn's `done`, so its `vals` arrive in the deck's echo window.
+14. Clamping at both ends of Exposure's range, and big steps clamping at the top.
+15. Presets that change sliders, seen on every page. One is applied just after a turn's `done`, so its `vals` arrive in the deck's echo window.
 16. Held ticks dropped after 2 s outside Develop, while the switch to Develop takes 2.5 s (`moduleDelayMs`).
 17. For the whole session:
     - every command is valid (the deck's `validate.ts`), and every `set` and `reset` carries `ph`, the photo of the latest `state`;
     - the rates for `set`, `ping`, strip updates and `vals`;
+    - no strip updates for a dial whose page went away, until it comes back, while photo changes, presets and relaunches change the values;
     - one `done` per gesture, except where `stale`, `locked` or the guard says otherwise;
     - `err` and alerts only where a step expects them;
+    - quiet logs: steps 2-3e log nothing at info or above, and their big-step, slider and ranges lines are at debug;
     - nothing unexpected in the plugin's log.
+18. Quiet logs at the default level. A second copy of the plugin, with no `log-level.txt`, gets turns, a big step, a long touch, a press, push + turn, a page switch and its Property Inspector. It logs nothing below info, and at info only its startup, its sliders and the connection.
 
-It prints one ok/FAIL line per check, and the tails of the plugin's and the mock's logs on a failure. It exits 0 when every check passes, 1 when one fails, and 2 when it can't start. `--keep` keeps the temp folder, with the plugin's log and `conversation.jsonl`: every command, event and app message, in order.
+It prints one ok/FAIL line per check, and the tails of the plugin's and the mock's logs on a failure. It exits 0 when every check passes, 1 when one fails, and 2 when it can't start. `--keep` keeps the temp folder, with both copies' logs and `conversation.jsonl`: every command, event and app message, in order.
 
 ## Latency harness
 

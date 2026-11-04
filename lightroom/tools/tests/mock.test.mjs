@@ -6,6 +6,7 @@ import net from 'node:net';
 import { performance } from 'node:perf_hooks';
 import { PortInUseError, TIMING, loadScenario, startMock } from '../mock-lr/index.mjs';
 import { LrClient } from '../lib/client.mjs';
+import { SLIDER_PARAMS } from '../lib/params.mjs';
 import { holdPort, rawSocket, sleep, waitUntil, withMock } from './helpers.mjs';
 
 const now = () => performance.now();
@@ -440,6 +441,38 @@ describe('mock Lightroom: Develop', () => {
       }
       mock.control.setup({ photos: [{ id: '9', fmt: 'JPG' }], ranges: { JPG: { Exposure: [-4, 4] } } });
       assert.deepEqual(lr.rangesFor(['Exposure', 'Temperature']), { Exposure: [-4, 4], Temperature: [-100, 100] }, 'setup ranges override the defaults');
+    });
+  });
+
+  // plan.md, Phase 7: the dials' new sliders. The deck watches all 17 (SLIDER_PARAMS).
+  test('the newer dial sliders: Sharpness 0..150, LuminanceSmoothing and GrainAmount 0..100 on every file type, Dehaze -100..100; watch reports them, and set clamps to them', async () => {
+    await withMock({ clock: 'manual' }, async (mock) => {
+      const want = { Sharpness: [0, 150], LuminanceSmoothing: [0, 100], GrainAmount: [0, 100], Dehaze: [-100, 100] };
+      for (const id of ['101', '108', '106']) { // ARW, DNG and JPEG
+        mock.control.user({ photo: id });
+        assert.deepEqual(mock.lr.rangesFor(Object.keys(want)), want, `photo ${id}`);
+      }
+      mock.control.user({ photo: '101' });
+      await mock.control.step();
+      const c = await ready(mock);
+      try {
+        let t = now();
+        await line(mock, c, { t: 'watch', ps: SLIDER_PARAMS });
+        const [ranges] = since(c, t, 'ranges');
+        assert.deepEqual(Object.keys(ranges?.ranges ?? {}), SLIDER_PARAMS, 'ranges for all 17');
+        assert.deepEqual(Object.fromEntries(Object.keys(want).map((p) => [p, ranges.ranges[p]])), want);
+        assert.deepEqual(since(c, t, 'vals')[0]?.vals, Object.fromEntries(SLIDER_PARAMS.map((p) => [p, mock.control.state().photos[101].values[p]])), 'vals for all 17');
+        t = now();
+        await line(mock, c, { t: 'set', p: 'Sharpness', v: 200, g: 1, ph: '101' });
+        await line(mock, c, { t: 'set', p: 'GrainAmount', v: -5, g: 2, ph: '101' });
+        await line(mock, c, { t: 'set', p: 'LuminanceSmoothing', v: 140, g: 3, ph: '101' });
+        await line(mock, c, { t: 'done', g: 3 });
+        assert.deepEqual(since(c, t, 'ack').map((m) => [m.p, m.v]), [['Sharpness', 150], ['GrainAmount', 0], ['LuminanceSmoothing', 100]], 'each ack carries the clamped value');
+        const v = mock.control.state().photos[101].values;
+        assert.deepEqual([v.Sharpness, v.GrainAmount, v.LuminanceSmoothing], [150, 0, 100]);
+      } finally {
+        c.stop();
+      }
     });
   });
 

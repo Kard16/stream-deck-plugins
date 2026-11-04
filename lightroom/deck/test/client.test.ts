@@ -84,7 +84,7 @@ describe("LrClient", () => {
 		assert.equal(DEFAULT_TIMING.okWindowMs, 1500);
 	});
 
-	test("connects both sockets, says hello, goes online and watches the bank params once", async () => {
+	test("connects both sockets, says hello, goes online and watches the sliders once", async () => {
 		const { lr, client } = await setup(standardLightroom(hello(), state()));
 		client.start();
 		await waitFor(() => client.state === "online", "online");

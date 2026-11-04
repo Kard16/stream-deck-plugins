@@ -8,20 +8,20 @@ export const TEST_CATALOG = '/Users/karimdhanji/Pictures/Plugin Test/Plugin Test
 // The guard's rule for catalog paths (PROTOCOL.md, Guard): the same path, compared without case.
 export const sameCatalog = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
-// The dial banks' params, in bank order (plan.md, kickoff answer 1).
-export const BANK_PARAMS = Object.freeze([
+// The dials' sliders, in the order of the deck's sliders.json (plan.md, Phase 7): the deck watches all 17.
+export const SLIDER_PARAMS = Object.freeze([
   'Temperature', 'Tint', 'Exposure', 'Contrast',
   'Highlights', 'Shadows', 'Whites', 'Blacks',
-  'Texture', 'Clarity', 'Vibrance', 'Saturation',
-  'PostCropVignetteAmount',
+  'Texture', 'Clarity', 'Dehaze', 'Vibrance', 'Saturation',
+  'Sharpness', 'LuminanceSmoothing', 'PostCropVignetteAmount', 'GrainAmount',
 ]);
 
 // LrDevelopController parameter names the mock accepts (docs/research/lightroom-classic-sdk.md §2.2).
 // Anything else is a param getRange rejects, so set, reset and watch answer err bad.
 const COLORS = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'];
 export const PARAMS = Object.freeze([
-  ...BANK_PARAMS,
-  'Brightness', 'Dehaze', 'PresetAmount', 'ProfileAmount',
+  ...SLIDER_PARAMS,
+  'Brightness', 'PresetAmount', 'ProfileAmount',
   'ParametricDarks', 'ParametricLights', 'ParametricShadows', 'ParametricHighlights',
   'ParametricShadowSplit', 'ParametricMidtoneSplit', 'ParametricHighlightSplit', 'CurveRefineSaturation',
   ...COLORS.flatMap((c) => [`HueAdjustment${c}`, `SaturationAdjustment${c}`, `LuminanceAdjustment${c}`, `GrayMixer${c}`]),
@@ -29,12 +29,12 @@ export const PARAMS = Object.freeze([
   'SplitToningHighlightHue', 'SplitToningHighlightSaturation', 'ColorGradeHighlightLum',
   'ColorGradeMidtoneHue', 'ColorGradeMidtoneSat', 'ColorGradeMidtoneLum',
   'ColorGradeGlobalHue', 'ColorGradeGlobalSat', 'ColorGradeGlobalLum', 'SplitToningBalance', 'ColorGradeBlending',
-  'Sharpness', 'SharpenRadius', 'SharpenDetail', 'SharpenEdgeMasking',
-  'LuminanceSmoothing', 'LuminanceNoiseReductionDetail', 'LuminanceNoiseReductionContrast',
+  'SharpenRadius', 'SharpenDetail', 'SharpenEdgeMasking',
+  'LuminanceNoiseReductionDetail', 'LuminanceNoiseReductionContrast',
   'ColorNoiseReduction', 'ColorNoiseReductionDetail', 'ColorNoiseReductionSmoothness',
   'PostCropVignetteMidpoint', 'PostCropVignetteFeather', 'PostCropVignetteRoundness',
   'PostCropVignetteStyle', 'PostCropVignetteHighlightContrast',
-  'GrainAmount', 'GrainSize', 'GrainFrequency',
+  'GrainSize', 'GrainFrequency',
   'LensProfileDistortionScale', 'LensProfileVignettingScale', 'LensManualDistortionAmount',
   'DefringePurpleAmount', 'DefringePurpleHueLo', 'DefringePurpleHueHi',
   'DefringeGreenAmount', 'DefringeGreenHueLo', 'DefringeGreenHueHi',
@@ -45,10 +45,13 @@ export const PARAMS = Object.freeze([
   'straightenAngle',
 ]);
 
+// Sliders whose range doesn't depend on the file type and isn't -100..100: plan.md, Phase 7's ranges for the new
+// dial sliders, still to confirm on the real Lightroom. Dehaze keeps the -100..100 every other param has.
+const UNSIGNED_RANGES = { Sharpness: [0, 150], LuminanceSmoothing: [0, 100], GrainAmount: [0, 100] };
 // Ranges measured on the user's raws (PROTOCOL.md, Develop values). Every other param is -100..100.
-const RAW_RANGES = { Temperature: [2000, 50000], Tint: [-150, 150], Exposure: [-5, 5] };
+const RAW_RANGES = { Temperature: [2000, 50000], Tint: [-150, 150], Exposure: [-5, 5], ...UNSIGNED_RANGES };
 // JPEG and other rendered files: Temperature and Tint are -100..100 (PROTOCOL.md, Fixtures: setup.ranges).
-const RENDERED_RANGES = { Temperature: [-100, 100], Tint: [-100, 100], Exposure: [-5, 5] };
+const RENDERED_RANGES = { Temperature: [-100, 100], Tint: [-100, 100], Exposure: [-5, 5], ...UNSIGNED_RANGES };
 const OTHER_RANGE = [-100, 100];
 
 export const RAW_FORMATS = Object.freeze(['RAW', 'DNG']);

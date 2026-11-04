@@ -118,7 +118,7 @@ export type ClientOptions = {
 	client?: string;
 	/** `hello.ver`: this plugin's version. */
 	ver: string;
-	/** The params to `watch`: every param in the banks. */
+	/** The params to `watch`: every slider in sliders.json. */
 	watch?: readonly string[];
 	timing?: Partial<ClientTiming>;
 	log?: Log;

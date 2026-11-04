@@ -12,7 +12,7 @@
      "hint": "select exactly one photo in the test catalog, not the last one in the filmstrip. With Auto Sync on, Lightroom copies a dial edit to every selected photo"},
     {"log": "photo $photo0 ($file0), flag $flag0, in $module0"},
 
-    {"log": "Develop, then watch the 13 bank params"},
+    {"log": "Develop, then watch the kickoff's 13 dial sliders"},
     {"send": {"t": "module", "v": "develop"}},
     {"expect": {"t": "state", "module": "develop", "photo": "$photo0"}, "timeout": 6000},
     {"send": {"t": "watch", "ps": ["Temperature", "Tint", "Exposure", "Contrast", "Highlights", "Shadows", "Whites", "Blacks", "Texture", "Clarity", "Vibrance", "Saturation", "PostCropVignetteAmount"]}},

@@ -15,7 +15,9 @@ import {
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { Emitter } from "../util/emitter.js";
 import { nullLog, type Log } from "../util/log.js";
-import { clampToRange, type StepSpec, stepsFor } from "./steps.js";
+import { clampToRange, type StepSpec, type TurnMode, unitsPerTick } from "./steps.js";
+
+export type { TurnMode } from "./steps.js";
 
 /** Who asked for an input: the dial's action id. Alerts go back to it. */
 export type Origin = string;
@@ -118,7 +120,11 @@ type Gesture = {
 	stale: boolean;
 };
 
-type Held = { coarse: number; fine: number; spec: StepSpec; origin: Origin; origins: Set<Origin> };
+/** Ticks waiting for Develop or for a value, by mode: each applies as the mode it was turned in. */
+type Held = { ticks: Record<TurnMode, number>; spec: StepSpec; origin: Origin; origins: Set<Origin> };
+
+/** The order held ticks apply in, fine last as before. It matters only at the ends of a range, where each mode's ticks clamp in turn. */
+const HELD_ORDER: readonly TurnMode[] = ["normal", "macro", "fine"];
 
 type ModelEvents = { change: []; alert: [origin: Origin, reason: string] };
 
@@ -240,10 +246,11 @@ export class LrModel {
 	// ---- dial input ----
 
 	/**
-	 * Applies `ticks` (already accelerated, or raw fine ticks when `fine`) to `p`, using `spec`'s steps for the
-	 * param's current range.
+	 * Applies `ticks` to `p` in `mode`, using `spec`'s steps for the param's current range: normal ticks come
+	 * already accelerated, fine and big-step (macro) ticks raw. Only fine ticks mark the gesture pressed, so only
+	 * push + turn's dial-up ends a gesture early (see release).
 	 */
-	turn(p: string, ticks: number, fine: boolean, spec: StepSpec, origin: Origin): TurnResult {
+	turn(p: string, ticks: number, mode: TurnMode, spec: StepSpec, origin: Origin): TurnResult {
 		if (!Number.isFinite(ticks) || ticks === 0) return "ignored";
 		if (this.#conn !== "online") {
 			this.#alert(origin, `turned ${p} while Lightroom is ${this.#conn}`);
@@ -254,12 +261,12 @@ export class LrModel {
 			return "locked";
 		}
 		if (this.writable === false) {
-			this.#probe(p, ticks, fine, spec, origin);
+			this.#probe(p, ticks, mode, spec, origin);
 			return "readonly";
 		}
 		const param = this.#param(p);
 		if (!this.inDevelop || !this.#usable(param)) {
-			this.#hold(p, ticks, fine, spec, origin);
+			this.#hold(p, ticks, mode, spec, origin);
 			this.#changed();
 			return "held";
 		}
@@ -270,7 +277,7 @@ export class LrModel {
 			this.#noPhotoInput(origin, `turned ${p}`);
 			return "noPhoto";
 		}
-		this.#apply(p, ticks, fine, spec, origin);
+		this.#apply(p, ticks, mode, spec, origin);
 		this.#changed();
 		return "applied";
 	}
@@ -388,11 +395,10 @@ export class LrModel {
 		);
 	}
 
-	#apply(p: string, ticks: number, fine: boolean, spec: StepSpec, origin: Origin): void {
+	#apply(p: string, ticks: number, mode: TurnMode, spec: StepSpec, origin: Origin): void {
 		const param = this.#param(p);
 		if (param.value === null) return;
-		const steps = stepsFor(spec, param.range);
-		const delta = ticks * (fine ? steps.fine : steps.step);
+		const delta = ticks * unitsPerTick(spec, param.range, mode);
 		let g = this.#active;
 		// Turned again before a released gesture's final set went out: carry on with the same gesture.
 		if (g && g.open && g.p === p && g.ending) g.ending = false;
@@ -403,7 +409,7 @@ export class LrModel {
 		}
 		if (!g || !g.open) g = this.#begin(p, param.value, origin);
 		g.origin = origin;
-		if (fine) g.pressed = true;
+		if (mode === "fine") g.pressed = true;
 		g.value = clampToRange(g.value + delta, param.range);
 		param.value = g.value;
 		this.#scheduleSend(g);
@@ -619,7 +625,7 @@ export class LrModel {
 	 * With `hello.writable` false the guard refuses every write. The value doesn't move; the first tick of each
 	 * burst sends one `set`, so Lightroom shows its bezel saying why and answers `err guard`, which alerts the dial.
 	 */
-	#probe(p: string, ticks: number, fine: boolean, spec: StepSpec, origin: Origin): void {
+	#probe(p: string, ticks: number, mode: TurnMode, spec: StepSpec, origin: Origin): void {
 		const now = this.#clock.now();
 		const last = this.#probes.get(p);
 		this.#probes.set(p, now);
@@ -629,8 +635,7 @@ export class LrModel {
 			this.#alert(origin, `${p} is read-only and has no value yet`);
 			return;
 		}
-		const steps = stepsFor(spec, param.range);
-		const v = clampToRange(roundForSend(p, clampToRange(param.value + ticks * (fine ? steps.fine : steps.step), param.range)), param.range);
+		const v = clampToRange(roundForSend(p, clampToRange(param.value + ticks * unitsPerTick(spec, param.range, mode), param.range)), param.range);
 		const sent = this.#link.send(this.#withPhoto({ t: "set", p, v, g: ++this.#gseq }), { onErr: (err) => this.#alert(origin, `Lightroom refused set ${p}: ${err.code}`) });
 		if (sent) param.lastSentAt = now;
 		else this.#alert(origin, `couldn't send set ${p}`);
@@ -691,14 +696,13 @@ export class LrModel {
 
 	// ---- held ticks ----
 
-	#hold(p: string, ticks: number, fine: boolean, spec: StepSpec, origin: Origin): void {
+	#hold(p: string, ticks: number, mode: TurnMode, spec: StepSpec, origin: Origin): void {
 		let h = this.#held.get(p);
 		if (!h) {
-			h = { coarse: 0, fine: 0, spec, origin, origins: new Set() };
+			h = { ticks: { normal: 0, fine: 0, macro: 0 }, spec, origin, origins: new Set() };
 			this.#held.set(p, h);
 		}
-		if (fine) h.fine += ticks;
-		else h.coarse += ticks;
+		h.ticks[mode] += ticks;
 		h.spec = spec;
 		h.origin = origin;
 		h.origins.add(origin);
@@ -726,8 +730,7 @@ export class LrModel {
 		for (const [p, h] of [...this.#held]) {
 			if (!this.#usable(this.#param(p))) continue;
 			this.#held.delete(p);
-			if (h.coarse !== 0) this.#apply(p, h.coarse, false, h.spec, h.origin);
-			if (h.fine !== 0) this.#apply(p, h.fine, true, h.spec, h.origin);
+			for (const mode of HELD_ORDER) if (h.ticks[mode] !== 0) this.#apply(p, h.ticks[mode], mode, h.spec, h.origin);
 		}
 		if (this.#held.size === 0) this.#clearHold();
 	}
@@ -760,6 +763,8 @@ export class LrModel {
 				this.#onState(evt);
 				break;
 			case "ranges":
+				// Below info: one line per photo change. It shows the ranges the real Lightroom reports for each slider.
+				this.#log.debug(`ranges from Lightroom: ${Object.entries(evt.ranges).map(([p, [min, max]]) => `${p} ${min}…${max}`).join(", ")}`);
 				for (const [p, range] of Object.entries(evt.ranges)) {
 					const param = this.#param(p);
 					param.range = range;
@@ -867,7 +872,7 @@ export class LrModel {
 		this.#changed();
 	}
 
-	/** A new plugin instance doesn't know our gestures, values or ranges. Banks stay. */
+	/** A new plugin instance doesn't know our gestures, values or ranges. The dials keep their sliders. */
 	#onInst(): void {
 		this.#abortAll(false);
 		this.#clearPhotoChange();

@@ -1,0 +1,46 @@
+{
+	"help": [
+		"Sliders for the Develop Dial. Each dial shows one, chosen in its settings: select the dial in the Stream Deck app.",
+		"Its settings list them in this order, and each param can be listed once. The plugin reads this file when it starts,",
+		"so restart the plugin after editing. If anything here is invalid, the plugin uses its built-in 17 sliders instead and",
+		"says why in its log (com.karimdhanji.lightroom.sdPlugin/logs/com.karimdhanji.lightroom.0.log).",
+		"Slider fields: param (an LrDevelopController name such as Exposure), label (shown on the strip), step (value units",
+		"per tick; a number or a fraction such as \"1/30\"), fine (per tick during push + turn; default step / 4), macro (per",
+		"tick in big steps, after a tap on the strip; default 10 x step), precision (decimal places shown), unit (shown after",
+		"the value), signed (a + on positive values).",
+		"kelvin overrides those fields while Lightroom reports a Kelvin range for the param: Temperature on raw and DNG files.",
+		"acceleration is k in effective ticks = ticks x (1 + k x (|ticks| - 1)), per dial event; 0 turns it off. Fine and big",
+		"steps have none. macroSeconds: big steps switch off after this many seconds without a turn, from 0.5 to 10."
+	],
+	"acceleration": 0.5,
+	"macroSeconds": 2,
+	"sliders": [
+		{
+			"param": "Temperature",
+			"label": "Temp",
+			"step": 1,
+			"fine": 0.25,
+			"macro": 10,
+			"precision": 0,
+			"unit": "",
+			"signed": true,
+			"kelvin": { "step": 50, "fine": 12.5, "macro": 500, "precision": 0, "unit": "K", "signed": false }
+		},
+		{ "param": "Tint", "label": "Tint", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Exposure", "label": "Exposure", "step": "1/30", "fine": "1/120", "macro": "1/3", "precision": 2, "unit": "", "signed": true },
+		{ "param": "Contrast", "label": "Contrast", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Highlights", "label": "Highlights", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Shadows", "label": "Shadows", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Whites", "label": "Whites", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Blacks", "label": "Blacks", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Texture", "label": "Texture", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Clarity", "label": "Clarity", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Dehaze", "label": "Dehaze", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Vibrance", "label": "Vibrance", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Saturation", "label": "Saturation", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "Sharpness", "label": "Sharpening", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": false },
+		{ "param": "LuminanceSmoothing", "label": "Noise", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": false },
+		{ "param": "PostCropVignetteAmount", "label": "Vignette", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": true },
+		{ "param": "GrainAmount", "label": "Grain", "step": 1, "fine": 0.25, "macro": 10, "precision": 0, "unit": "", "signed": false }
+	]
+}

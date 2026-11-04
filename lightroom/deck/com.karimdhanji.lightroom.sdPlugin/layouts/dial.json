@@ -13,12 +13,12 @@
 			"text-overflow": "ellipsis"
 		},
 		{
-			"key": "bank",
+			"key": "mode",
 			"type": "text",
 			"rect": [140, 6, 48, 24],
 			"value": "",
 			"alignment": "right",
-			"color": "#8A8F99",
+			"color": "#3DDC84",
 			"font": { "size": 13, "weight": 500 }
 		},
 		{

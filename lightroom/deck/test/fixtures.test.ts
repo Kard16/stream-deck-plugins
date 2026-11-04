@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { DEFAULT_BANKS, watchList } from "../src/banks.js";
 import { LrClient } from "../src/lr/client.js";
 import { LrModel } from "../src/model/model.js";
+import { DEFAULT_SLIDERS, watchList } from "../src/sliders.js";
 import { FakeLr } from "./helpers/fake-lr.js";
 import { concrete, connectHello, connectState, loadFixtures, watchedValues } from "./helpers/fixtures.js";
 import { waitFor } from "./helpers/wait.js";
 
 type Obj = Record<string, unknown>;
 
-const WATCH = watchList(DEFAULT_BANKS);
+const WATCH = watchList(DEFAULT_SLIDERS);
 const INST = "fixture-inst";
 
 /**

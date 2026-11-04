@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Develop Dial</title>
+		<link rel="stylesheet" href="pi.css" />
+	</head>
+	<body>
+		<div class="item">
+			<span class="label">Slider</span>
+			<select class="field" id="slider">
+				<option value="">Loading sliders…</option>
+			</select>
+		</div>
+		<div class="item" id="status-row" hidden>
+			<span class="label"></span>
+			<span class="status error" id="status"></span>
+		</div>
+		<p class="hint">Press to reset, push and turn for fine steps, tap the strip for big steps.</p>
+		<script src="common.js"></script>
+		<script src="dial.js"></script>
+	</body>
+</html>

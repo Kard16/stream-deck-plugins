@@ -1,6 +1,6 @@
 # Lightroom Classic build plan
 
-**Status:** Phases 0–6 are done, with Phase 5 as scoped at kickoff. The guard is off, for daily use with the user's own catalogs. Written 2026-10-31 at the end of the research session.
+**Status:** Phases 0–7 are done, with Phase 5 as scoped at kickoff. The guard is off, for daily use with the user's own catalogs. Phase 7, dials on Stream Deck pages and big steps, was built on 2026-11-03, and the user checked it on the deck on 2026-11-04. Written 2026-10-31 at the end of the research session.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -261,6 +261,80 @@ Walk through a checklist with the user:
   - The Hotkey actions.
 
 Optional later: a histogram or thumbnail on the strip (`requestJpegThumbnail`, rendered in Node).
+
+### Phase 7: dials on Stream Deck pages, and big steps
+
+The user asked for this on 2026-11-03, after a session of daily use (see Log). Only the deck plugin changes. The wire protocol and the Lua plugin stay as they are.
+
+**Sliders replace banks**
+- `com.karimdhanji.lightroom.sdPlugin/sliders.json` replaces `banks.json`, which goes.
+- Top level:
+  - `help`: a list of strings.
+  - `acceleration`: as before, default 0.5.
+  - `macroSeconds`: big steps switch off after this long without a turn. Default 2, from 0.5 to 10.
+  - `sliders`: 1–64 sliders, in the order a dial's settings list them. Params are unique.
+- A slider has the old slot fields (`param`, `label`, `step`, `fine`, `precision`, `unit`, `signed`, `kelvin`), plus `macro`: units per click in big steps, a number or a fraction such as "1/3". It defaults to 10 × `step`, in `kelvin` too.
+- Any problem makes the whole file invalid. The plugin then uses its built-in sliders, the same 17, and logs why at warn, as it did for banks.
+- The 17, in Lightroom's panel order:
+
+  | Param | Label | Step | Fine | Big step | Shown |
+  |---|---|---|---|---|---|
+  | Temperature | Temp | 1; 50 K on raw | 0.25; 12.5 K | 10; 500 K | signed; Kelvin unsigned, with "K" |
+  | Tint | Tint | 1 | 0.25 | 10 | signed |
+  | Exposure | Exposure | 1/30 | 1/120 | 1/3 | signed, 2 decimals |
+  | Contrast, Highlights, Shadows, Whites, Blacks, Texture, Clarity, Dehaze, Vibrance, Saturation | the param | 1 | 0.25 | 10 | signed |
+  | Sharpness | Sharpening | 1 | 0.25 | 10 | unsigned |
+  | LuminanceSmoothing | Noise | 1 | 0.25 | 10 | unsigned |
+  | PostCropVignetteAmount | Vignette | 1 | 0.25 | 10 | signed |
+  | GrainAmount | Grain | 1 | 0.25 | 10 | unsigned |
+
+- Lightroom's ranges for the new four: Sharpness 0…150, LuminanceSmoothing 0…100, GrainAmount 0…100, Dehaze -100…100. Lightroom 15.3 reported these on a raw on 2026-11-03 (see Log). Rendered files weren't checked.
+- The deck watches all 17. The list is fixed at startup, as the banks' params were.
+
+**Each dial has its own slider**
+- A dial's settings are `{param}`, chosen in its Property Inspector. Banks, bank paging and the "n/4" text go.
+- A dial that appears without `param` gets its column's default and saves it with `setSettings`. Columns 1–4 get Temperature, Tint, Exposure and Contrast, which was bank 1, so the user's current page keeps working. Any other column gets the first slider.
+- A `param` that isn't in the list shows the param as the label and "Not listed" in the status colour, with no bar. Turns, presses and taps only alert the dial.
+- Pages are the Stream Deck app's own. Each placed dial is its own action instance, with its own id and settings. Switching pages fires `willDisappear` and `willAppear`. Two dials may show the same param.
+- The Property Inspector is `pi/dial.html` and `pi/dial.js`, in the style of the preset key's:
+  - One Slider list, in file order. Each entry is the label, with the param in brackets when they differ: "Temp (Temperature)".
+  - It asks the plugin with `sendToPlugin {t: "getSliders"}`, retrying as `preset.js` does. The plugin answers `{t: "sliders", items: [{param, label}], param}`, where `param` is that dial's current one.
+  - A choice saves `{param}`, and the dial repaints at once. A current param that isn't listed shows as "<param> (not in sliders.json)".
+  - A one-line hint: press to reset, push and turn for fine steps, tap the strip for big steps.
+
+**Gestures**
+- Turn: normal steps with acceleration. Push + turn: fine steps. Press without turning: reset. All as before.
+- Tap the strip: big steps on or off for that dial. A long touch does the same.
+- The long-touch reset goes. The user decided the press is enough, so this dial no longer follows `CLAUDE.md`'s touch-alternative rule.
+- With big steps on, a turn without the press moves `macro` per click, with no acceleration: an event of 4 ticks moves exactly 4 big steps. Values clamp and go out as for any turn, with the same gestures, rates and `ph`, and one history step per burst.
+- Big steps go off:
+  - after `macroSeconds` without a turn on that dial, counted from the tap and restarted by every turn while on;
+  - on another tap;
+  - on dial-down, so a press resets and push + turn is fine;
+  - when the dial disappears or its param changes.
+
+  Going off only repaints the strip. Nothing goes to Lightroom.
+- Taps work in every state (offline, busy, locked, read-only, outside Develop) and send nothing. While the photo is locked, turns and presses are still refused.
+- Held turns keep their mode: big-step ticks wait and then apply as big steps. The read-only probe uses the mode's step.
+- In the model, `turn()` takes a mode (normal, fine or macro) in place of `fine`. Only fine marks a gesture pressed, so only push + turn's dial-up ends a gesture early.
+
+**Strip**
+- The layout's top-right `bank` text becomes `mode`, in the same place. It's empty normally. With big steps on, it shows "×10": `macro` ÷ `step` for the variant in force, to at most one decimal place.
+- With big steps on, the "×10" and the bar fill turn green, `#3DDC84`, which stands apart from the blue fill and the amber status words. A dimmed strip dims them too.
+- Everything else stays. Ranges such as 0…150 fill from the left, like any range not centred on 0.
+
+**Manifest, logs and docs**
+- The dial action's tooltip: "Adjusts the Lightroom Develop slider chosen in its settings. Tap the strip for big steps."
+- Its triggers: Rotate "Adjust (push + turn: fine)", Push "Reset slider", Touch "Big steps on or off", and no LongTouch. `PropertyInspectorPath` is `pi/dial.html`.
+- Version 0.3.0.0, and 0.3.0 in `package.json`.
+- Normal use still logs nothing at info or above. Big steps on and off log at debug, and so do the ranges Lightroom reports, which shows the new four's ranges on the real Lightroom. The TICK record gains `mode`.
+- `lightroom/README.md`: the dials and adding-sliders sections, for dials on pages and big steps.
+
+**Checks**
+- The deck's typecheck, tests, build, validate and smoke.
+- The tools' tests and fixtures, on both clocks.
+- deck-vs-mock, reworked for per-dial sliders, pages, the Property Inspector and big steps.
+- Then the user, on hardware.
 
 ## Human-only steps
 
@@ -555,6 +629,54 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Lua 96 unit tests and 21/21 fixtures, with `GUARD = false` in `Config.lua`.
   - `CLAUDE.md` keeps agents out of the user's catalogs. Before driving Lightroom, they check that its log names the test catalog.
   - **In effect:** the user relaunched Lightroom at 11:38, and Deck Bridge started on their catalog with `guard off`. The deck reconnected 1.4 s later. The user reports that writes go through, and Lightroom's log has no refusal, warning or error in the 15 minutes since.
+- 2026-11-03, after a session of daily use, the user asked for two changes to the dials:
+  - "Tapping between 4 pages of dials is cumbersome, I'd rather use Elgato pages and set the dials per page."
+  - "Pushing in the dial resets the value, so no need for touching the bar to do that too. Instead, when touching the bar I want the dial to do macro movements, similar to how we can do micro-movements when pressing the dial in."
+  - Their answers to the follow-up questions:
+    - A tap turns big steps on, and they go off by themselves after about 2 s without turning. The SDK has no touch-down or touch-up event, only a tap or a long touch, so a touch can't be held the way the press is.
+    - A big step is 10 normal steps, fixed, with no acceleration: 1/3 EV, 500 K, 10 points.
+    - The dial's slider list adds Dehaze, Sharpening, Noise Reduction and Grain to their 13.
+  - The plan is Phase 7, above.
+- 2026-11-03, Phase 7 built and verified offline, then live against Lightroom on the test catalog. Workflow `wf_6363a2b7-11b`: a deck builder, then a tools builder, a reviewer for each track, and a fixer for each.
+  - **Deck 0.3.0.0,** as specified. Decisions the spec left open:
+    - A dial whose param isn't listed alerts once per burst (inputs under 800 ms apart), as while a photo is locked, and big steps never turn on for it. Its "Not listed" shows ahead of Offline, Busy, Mismatch and Locked.
+    - Dimmed, the big-step green is `#2F7A52`, for the ×10 and the bar fill.
+    - Push + turn is always fine, even with big steps on. That can happen only after a tap while the dial is held.
+    - Every turn event restarts the big-step countdown, including turns the model refuses.
+    - Choosing another slider while the dial is held, before it turns, drops the press, so the release resets neither slider. This came from the deck review.
+    - Held ticks apply as normal steps, then big steps, then fine ones. The order matters only where values clamp.
+    - The Property Inspector says "Loading sliders…" until the plugin answers, and "No answer from the plugin" after 3 retries 2 s apart.
+  - **Fixed in passing:** a dial that appeared again without disappearing painted through its first surface. It was harmless, because the SDK's surface for one context sends to the same context. The painter now sends through the dial's current surface.
+  - **Tools:**
+    - `BANK_PARAMS` is now `SLIDER_PARAMS`, the 17. The mock gives Sharpness 0…150, and LuminanceSmoothing and GrainAmount 0…100.
+    - deck-vs-mock covers dials with their own sliders. That means five pages, saved column defaults, the Property Inspector's round trip, and a dial whose param isn't listed. For big steps it covers on, off five ways, the auto-off timing, two dials counting down at once, held ticks, read-only and clamping. A second copy runs at the default log level.
+    - `--plugin <folder>` runs deck-vs-mock against a patched copy, for negative controls.
+    - `smoke.json` still watches the kickoff's 13.
+  - **Reviews:** both passed with fixes, and had no blocker or major finding.
+    - Deck, 6 minor: 4 gaps in the tests, now covered; the held press across a slider change, fixed as above; and PROTOCOL.md's ranges row, for the main thread.
+    - Tools, 5 minor, all fixed: checks that couldn't fail, a dimmed-green check that passed grey, big-step check names not tied to this plan's numbers, off-checks with too little headroom before the auto-off, and big-step paths not run end to end. deck-vs-mock went from 259 checks to 278.
+    - Every builder and fixer ran deliberate breaks that the checks caught, and put the files back.
+  - **The main thread's checks:**
+    - Deck: typecheck, 255/255 tests, build, validate and smoke 62/62.
+    - Lua: `luac -p` on 19 files, 96 unit tests and 21 fixtures.
+    - Tools: 186/186 tests, fixtures 42/42 on both clocks, and deck-vs-mock 278/278.
+    - No deliberate break or stray file is left in the tree.
+  - **Live:**
+    - Lightroom's log still named the test catalog.
+    - `log-level.txt` set to debug, and the plugin restarted at 23:26:04. The app reloaded it from disk ("Reloaded plugin"), so the new manifest, layout and Property Inspector are in place without an app restart.
+    - 0.3.0.0 was online 6 ms after STARTUP, watched all 17, and Lightroom logged its hello.
+    - On a raw, Lightroom reported the expected ranges: Sharpness 0…150, LuminanceSmoothing 0…100, GrainAmount 0…100 and Dehaze -100…100. PROTOCOL.md's table now lists them.
+    - Neither log had a warning or error.
+  - **Not seen yet:** the Stream Deck + has been disconnected since 22:18. So no dial has appeared on this build, and no column default has been saved. The deck stays at debug for the user's check on hardware. Afterwards, delete `log-level.txt` and restart the plugin.
+- 2026-11-04, the user's check on the deck. After light testing they said it "looks good", and asked for a commit. The deck's debug log, 08:03 to 08:09:
+  - The four dials appeared with no slider saved, and saved their columns' defaults: Temperature, Tint, Exposure and Contrast.
+  - Big steps on Temperature and Contrast went on by a tap 6 times. They went off by a tap 3 times, by a press twice and by a long touch once.
+  - All 47 turn events with big steps on were big steps, and the 14 after the last tap off were normal steps. Lightroom applied all 61.
+  - A press without a turn, the reset, logged no warning.
+  - Ten dials the user added saved their columns' defaults, then took the slider each was given in the Property Inspector: Vibrance, Saturation, Highlights, Shadows, Whites, Blacks, Texture, Clarity, Dehaze and Vignette.
+  - Neither log had a warning or error, and Lightroom's log still named the test catalog.
+  - **Not seen:** a turn on those ten dials, push and turn, and big steps going off by themselves after 2 s. They rest on the tests.
+  - **Logs back to info:** `log-level.txt` deleted and the plugin restarted at 17:13:21. STARTUP at log level info, online 6 ms later, and Lightroom logged the hello.
 
 ## Progress
 
@@ -566,3 +688,4 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Phase 4: integration on hardware, 2026-10-31. A Stream Deck app restart and a long-touch move to the next checklist.
 - [x] Phase 5: presets, as scoped at kickoff, 2026-10-31. The other one-click tools wait.
 - [x] Phase 6: hardening, verified offline, in Lightroom and on hardware (ladder steps 1–6), 2026-11-01. Bank changes on this build rest on the tests.
+- [x] Phase 7: dials on Stream Deck pages, and big steps. Built and verified offline and against Lightroom, 2026-11-03 (workflow `wf_6363a2b7-11b`), and checked on hardware by the user, 2026-11-04. Turns on the dials set up in the Property Inspector, push and turn, and the 2 s auto-off rest on the tests.

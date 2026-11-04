@@ -1,6 +1,6 @@
 # DeckBridge protocol, version 1
 
-The wire protocol between the Lua plugin inside Lightroom Classic (`lightroom/lua/DeckBridge.lrdevplugin`) and the Stream Deck plugin (`lightroom/deck`). Frozen on 2026-10-31 from the Phase 1 spike results in `docs/lightroom/plan.md`. Amended the same day with what the three Phase 3 tracks found, and again for Phase 6; [Amendments](#amendments) lists the changes.
+The wire protocol between the Lua plugin inside Lightroom Classic (`lightroom/lua/DeckBridge.lrdevplugin`) and the Stream Deck plugin (`lightroom/deck`). Frozen on 2026-10-31 from the Phase 1 spike results in `docs/lightroom/plan.md`. Amended the same day with what the three Phase 3 tracks found, again for Phase 6, and in wording for Phase 7; [Amendments](#amendments) lists the changes.
 
 Changes go through the main thread. A change that breaks either side bumps `v`.
 
@@ -27,7 +27,7 @@ Contents: [Transport](#transport) · [Connection lifecycle](#connection-lifecycl
 
 **There's no goodbye.** Lightroom closes plugin sockets before its shutdown hooks run, so any disconnect means "offline". Lightroom also closes connections on its own sometimes, for example around its menus and the Plug-in Manager; the deck just reconnects.
 
-**A new `inst` in `hello`** means the plugin was reloaded or Lightroom relaunched. The deck drops its cached values and ranges, keeps its banks, and sends `watch` again.
+**A new `inst` in `hello`** means the plugin was reloaded or Lightroom relaunched. The deck drops its cached values and ranges, keeps its dials' sliders, and sends `watch` again.
 
 **Version check:** if `hello.v` isn't 1, the deck shows a version mismatch and sends nothing but `hello` and `ping`.
 
@@ -45,7 +45,7 @@ Any command may carry an integer `id`. Replies to it (`pong`, `presets`, `applie
 |---|---|---|---|
 | `hello` | `v: 1`, `client`, `ver` | Sends `hello`, `state`, then `ranges` and `vals` as in lifecycle step 2. A deck `v` other than 1 still gets Lightroom's v1 `hello`, and is logged. | (those events) |
 | `ping` | `id` | Nothing | `pong {id, lt}` |
-| `watch` | `ps: [param]` | Replaces the watched params. Watching costs about 0.006 ms per param per read, so the deck watches every param in its banks, not just the visible four. An unknown param is dropped from the list, with `err {code: "bad"}` carrying the watch's `id`. `getRange` only works in Develop, so outside it Lightroom checks the list on entering Develop and sends that `err` then, still with the watch's `id`. Entries that aren't strings are dropped with `err bad` at once. | `ranges`, `vals` (Develop only) |
+| `watch` | `ps: [param]` | Replaces the watched params. Watching costs about 0.006 ms per param per read, so the deck watches every slider in its list, not just the ones on the visible dials. An unknown param is dropped from the list, with `err {code: "bad"}` carrying the watch's `id`. `getRange` only works in Develop, so outside it Lightroom checks the list on entering Develop and sends that `err` then, still with the watch's `id`. Entries that aren't strings are dropped with `err bad` at once. | `ranges`, `vals` (Develop only) |
 | `set` | `p`, `v`, `g` (all required); `ph` (optional) | Guarded. Switches to Develop if needed. Starts a gesture on `p` (see [Gestures](#gestures)), clamps `v` to `getRange(p)`, then `setValue(p, v)`. A missing `p`, a `v` or `g` that isn't a number, a `ph` that isn't a string, or a `p` that `getRange` rejects gets `err {code: "bad"}`. A set for a gesture that ended when the photo or module changed, or whose `ph` isn't the target photo, gets `err {code: "stale"}`, and so does one whose target photo changed during the switch to Develop. One on a [locked photo](#locked-photos) gets `err {code: "locked"}`. No refusal changes a value, and only those after the switch to Develop leave Lightroom in Develop ([Guard](#guard) has the order). | `ack {p, v, g}`, where `v` is `getValue(p)` straight after the set |
 | `done` | `g` (optional) | Ends the gesture: `stopTracking()`. Lightroom's observer then fires, and `vals` carries the final value if it differs from the last value Lightroom sent for `p`. A `done` whose `g` isn't the open gesture's is late and ignored; one without `g` ends whatever gesture is open. | none |
 | `reset` | `p`; `ph` (optional) | Guarded. Switches to Develop if needed, ends any gesture, `resetToDefault(p)`. A `ph` that isn't a string gets `err {code: "bad"}`, and one that isn't the target photo gets `err {code: "stale"}`, as does a reset whose target photo changed during the switch to Develop. A [locked photo](#locked-photos) gets `err {code: "locked"}`. No refusal changes a value, and only those after the switch leave Lightroom in Develop. | `ack {p, v}` with the value after the reset |
@@ -83,14 +83,16 @@ Params are `LrDevelopController` parameter names, for example `Exposure`, not th
 
 The deck rounds before sending: Exposure to 0.01, everything else to whole numbers. `setValue` clamps nothing, so Lightroom clamps `set.v` to the param's range first.
 
-**Ranges** come only from `getRange` in Develop, and the deck clamps its own values to them. Ranges measured on the user's raws (2026-10-31):
+**Ranges** come only from `getRange` in Develop, and the deck clamps its own values to them. Ranges measured on the user's raws (2026-10-31, and 2026-11-03 for the sliders Phase 7 added):
 
 | Param | Range on raw |
 |---|---|
 | Temperature | 2000 … 50000 (K) |
 | Tint | -150 … 150 |
 | Exposure | -5 … 5 |
-| Every other bank param | -100 … 100 |
+| Sharpness | 0 … 150 |
+| LuminanceSmoothing, GrainAmount | 0 … 100 |
+| Every other slider in the deck's list | -100 … 100 |
 
 **Outside Develop** there are no values, because `LrDevelopController` only works in Develop. The deck keeps showing the last values, dimmed. A dial turn sends `module {v: "develop"}` first. The deck holds the ticks until `ranges` and `vals` for the new photo arrive, then applies them. If nothing arrives within 2 s, it drops them. After any photo change, too, a param's turns wait for that photo's range and value.
 
@@ -133,7 +135,7 @@ A background AI process, such as Denoise, locks the photo it works on: `photo:is
   - It ends any open gesture with `done`.
   - It sends no `set` or `reset`, and no `module` for a dial turn outside Develop. It drops turns and presses rather than holding them.
   - Its strips show that the photo is locked. A dial that's turned or pressed shows an alert, once per burst.
-  - Tapping the strip still changes the bank.
+  - Tapping the strip still switches big steps on or off, and sends nothing.
 - **`err locked`** answers a `set` or `reset` the deck sent before `state.locked` reached it, so it usually arrives just after that `state`. The deck shows an alert on that dial. Lightroom may still be tracking a gesture: the `set`'s own, or the one a `reset` ended without `done`. If the deck hasn't sent that gesture's `done` yet, it sends it then.
 
 ## Guard
@@ -238,3 +240,8 @@ Every runner reads the same files: the Lua unit tests with stubbed `Lr*` modules
 - **New:** `state.locked` and `err {code: "locked"}`, for photos a background AI process holds (see [Locked photos](#locked-photos)). Fixture `locked.jsonl`.
 - **Fixtures:** the `user` line `{"locked": […]}`.
 - **Settled in review:** a `null` `ph` counts as absent. After a switch to Develop, `set` and `reset` check the target photo again. With no photo in its `state`, the deck sends no `set` or `reset`. Lightroom keeps only the latest stale `g`. `err locked` usually arrives just after `state.locked`.
+
+2026-11-03, for Phase 7. Wording only: nothing on the wire changes, and neither does `v`.
+- The deck's banks became a list of sliders, and each dial shows the one its settings name. The deck watches every slider in its list, now 17.
+- A tap on the strip switches big steps on or off for that dial, where it used to change the bank. Big steps are bigger, fixed steps per tick, sent as any `set` is.
+- The Develop values table gains the ranges Lightroom 15.3 reported for Sharpness, LuminanceSmoothing and GrainAmount. Dehaze is -100 … 100, like the rest.

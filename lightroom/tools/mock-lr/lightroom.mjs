@@ -16,7 +16,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import {
-  BANK_PARAMS, LABELS, MODULES, PARAMS, PROTOCOL_VERSION, TEST_CATALOG,
+  LABELS, MODULES, PARAMS, PROTOCOL_VERSION, SLIDER_PARAMS, TEST_CATALOG,
   defaultRange, defaultValue, lrTime,
 } from '../lib/params.mjs';
 
@@ -992,7 +992,7 @@ export class MockLightroom extends EventEmitter {
     const photos = {};
     for (const ph of this.photos) {
       const values = {};
-      for (const p of BANK_PARAMS) values[p] = this.getValue(ph, p);
+      for (const p of SLIDER_PARAMS) values[p] = this.getValue(ph, p);
       Object.assign(values, ph.values);
       photos[ph.id] = { file: ph.file, fmt: ph.fmt, flag: ph.flag, rating: ph.rating, label: ph.label, locked: ph.locked, values, applied: [...ph.applied] };
     }

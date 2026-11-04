@@ -1,10 +1,16 @@
 import type { Range } from "../lr/protocol.js";
 
-/** How far one dial tick moves a value, normally and in push + turn fine mode. */
-export type Steps = { step: number; fine: number };
+/** How far one dial tick moves a value: normally, in push + turn fine mode, and in big steps. */
+export type Steps = { step: number; fine: number; macro: number };
 
 /**
- * A slot's steps. `kelvin`, when set, replaces them while Lightroom reports a Kelvin range for the param:
+ * How a turn moves its param: normal steps with acceleration; fine steps during push + turn; big steps after a
+ * tap on the strip. Fine and big steps have no acceleration.
+ */
+export type TurnMode = "normal" | "fine" | "macro";
+
+/**
+ * A slider's steps. `kelvin`, when set, replaces them while Lightroom reports a Kelvin range for the param:
  * Temperature is 2000..50000 K on raw and DNG files but -100..100 on JPEGs (PROTOCOL.md, Develop values).
  */
 export type StepSpec = Steps & { kelvin?: Steps | null };
@@ -16,6 +22,14 @@ export function isKelvinRange(range: Range | null | undefined): boolean {
 
 export function stepsFor(spec: StepSpec, range: Range | null | undefined): Steps {
 	return isKelvinRange(range) && spec.kelvin ? spec.kelvin : spec;
+}
+
+/** Value units one tick of `mode` moves the param, by the steps for its current range. */
+export function unitsPerTick(spec: StepSpec, range: Range | null | undefined, mode: TurnMode): number {
+	const steps = stepsFor(spec, range);
+	if (mode === "fine") return steps.fine;
+	if (mode === "macro") return steps.macro;
+	return steps.step;
 }
 
 /**
