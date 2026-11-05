@@ -67,8 +67,25 @@ export const HOST_PATTERN = /^local_[A-Za-z0-9-]{1,64}$/
  */
 export const MODE_TOOL = 'mcp__ccd_session_mgmt__set_session_permission_mode'
 
-/** Requests for these are held for display only: the deck never answers them, and a press jumps. */
+/**
+ * Requests for these are kind ask (PROTOCOL.md, "Permission requests", as amended on 2026-11-04 for session keys):
+ * Claude Code needs the person for them, so it ignores a plain Allow and takes an Allow only with updatedInput. Only
+ * the session's own Session Slot dial answers one, with an Answer, an Approve plan or a Deny; on the Approve and Deny
+ * keys a press jumps to the session.
+ */
 export const ASK_TOOLS = Object.freeze(['AskUserQuestion', 'ExitPlanMode'])
+
+/**
+ * A held ask request keeps its tool_input when its JSON is at most this many bytes, so the dial can show it and echo
+ * it back (PROTOCOL.md, "Held requests"). Over that, the dial shows "Answer in app", and a press jumps.
+ */
+export const ASK_INPUT_MAX = 64 * 1024
+
+/** The modes an Approve plan may leave Plan mode into: Auto, Accept edits, Manual. Never plan or bypassPermissions. */
+export const PLAN_MODES = Object.freeze(['auto', 'acceptEdits', 'default'])
+
+/** What a fixture's dial line, or the fake's dial, may do with a plan: approve it into one of PLAN_MODES, or reject it. */
+export const DIAL_PLANS = Object.freeze([...PLAN_MODES, 'reject'])
 
 /** The modes a mode command may ask for. Never bypassPermissions. */
 export const MODES = Object.freeze(['default', 'acceptEdits', 'plan', 'auto'])
@@ -81,7 +98,11 @@ const deepFreeze = (o) => {
   return Object.freeze(o)
 }
 
-/** The three answers to a permission request. The deck never sends updatedPermissions or updatedInput. */
+/**
+ * Three of the five answers to a permission request: Allow, Deny and no decision. The other two, the Answer and the
+ * Approve plan, carry the request's own tool_input (answerBody, approvePlanBody). The deck sends updatedInput only in
+ * those two, and updatedPermissions only in an Approve plan.
+ */
 export const ALLOW = deepFreeze({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } })
 export const DENY = deepFreeze({
   hookSpecificOutput: {
@@ -97,6 +118,39 @@ export function answerFor(decision) {
   if (decision === 'deny') return DENY
   if (decision === 'none') return NO_DECISION
   throw new Error(`no answer for ${decision}`)
+}
+
+/**
+ * The Answer, for an AskUserQuestion, from its session's dial only (PROTOCOL.md, "Permission requests"): Allow with
+ * updatedInput, the request's tool_input exactly as it came with one key added, `answers`, from each question's text
+ * to its answer. Claude Code fails an updatedInput that doesn't fit the tool's schema as a deny, so nothing else of
+ * the input changes. Its keys are written as their own properties, `__proto__` included.
+ */
+export function answerBody(input, answers) {
+  return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...input, answers } } } }
+}
+
+/**
+ * The Approve plan, for an ExitPlanMode, from its session's dial only (PROTOCOL.md, "Permission requests"): Allow with
+ * the request's tool_input unchanged, and one setMode for the session, which leaves Plan mode into `mode`, one of
+ * PLAN_MODES. `destination` is always `session`: the others write settings files.
+ */
+export function approvePlanBody(input, mode) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow', updatedInput: input, updatedPermissions: [{ type: 'setMode', mode, destination: 'session' }] },
+    },
+  }
+}
+
+/**
+ * A multi-select question's answer (PROTOCOL.md, "Permission requests"): the chosen labels, given in the order of the
+ * question's options, joined with ", ", each label that holds ", " or a double quote written as a JSON string, as
+ * Claude Code joins its own. A single-select answer is its label as it is, and doesn't come here.
+ */
+export function joinLabels(labels) {
+  return labels.map((l) => (l.includes(', ') || l.includes('"') ? JSON.stringify(l) : l)).join(', ')
 }
 
 /**

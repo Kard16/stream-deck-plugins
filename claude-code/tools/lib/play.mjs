@@ -20,14 +20,15 @@
 //   file (Identity). A driver may skip a press too, and the replies to polls that expect a command then go with it:
 //   only a press queues one.
 // The deck's command ids bind to the fixture's names at their first appearance in a reply. An answer to a
-// permission request must also be exactly one of PROTOCOL.md's three, and one to a mode check one of its two,
-// whatever its reply line expects, since it's what Claude Code acts on, or an error answer when it isn't 2xx.
+// permission request must also be exactly one of PROTOCOL.md's five, fitting the request it answers, and one to a
+// mode check one of its two, whatever its reply line expects, since it's what Claude Code acts on, or an error answer
+// when it isn't 2xx. An Answer or an Approve plan must equal the line's body exactly, updatedInput included.
 
 import { performance } from 'node:perf_hooks'
 
 import { hostHeader, send, within } from './client.mjs'
-import { Bindings, commandIdHook, mismatch, show } from './match.mjs'
-import { ALLOW, DENY, HOOK_ROUTES, MOD_ROUTES, PRE_ALLOW, ROUTES, summary } from './protocol.mjs'
+import { ANY, Bindings, commandIdHook, exactMismatch, mismatch, show } from './match.mjs'
+import { ALLOW, ASK_TOOLS, DENY, HOOK_ROUTES, MOD_ROUTES, PLAN_MODES, PRE_ALLOW, ROUTES, summary } from './protocol.mjs'
 
 /** A line that didn't go as the fixture says. */
 export class PlayFailure extends Error {
@@ -69,8 +70,10 @@ function settledWithin(promise, ms) {
 }
 
 /**
- * What Claude Code applies along with a PermissionRequest decision: a rewritten tool input, and rules,
- * directories or a mode for the session or a settings file. PROTOCOL.md: the deck never sends either.
+ * What Claude Code applies along with a decision: a rewritten tool input, and rules, directories or a mode for the
+ * session or a settings file. PROTOCOL.md, "Permission requests", as amended on 2026-11-04 for session keys: the deck
+ * sends updatedInput only in an Answer or an Approve plan, and updatedPermissions only in an Approve plan, both in a
+ * PermissionRequest's allow; a mode check's answer has neither.
  */
 const NEVER_SENT = Object.freeze(['updatedPermissions', 'updatedInput'])
 
@@ -82,16 +85,113 @@ const NEVER_SENT = Object.freeze(['updatedPermissions', 'updatedInput'])
  */
 const HOOK_FIELDS = Object.freeze(['continue', 'stopReason', 'decision', 'reason', 'systemMessage', 'suppressOutput'])
 
-/** The first of `keys` anywhere in `v`, as `{at, key, value}`, or null. */
-function findKey(v, keys, at) {
-  if (v === null || typeof v !== 'object') return null
+/** The first of `keys` anywhere in `v`, as `{at, key, value}`, or null; it doesn't look inside a value `skip` names. */
+function findKey(v, keys, at, skip = null) {
+  if (v === null || typeof v !== 'object' || v === skip) return null
   for (const [k, x] of Object.entries(v)) {
     const p = Array.isArray(v) ? `${at}[${k}]` : `${at}.${k}`
     if (!Array.isArray(v) && keys.includes(k)) return { at: p, key: k, value: x }
-    const found = findKey(x, keys, p)
+    const found = findKey(x, keys, p, skip)
     if (found) return found
   }
   return null
+}
+
+/**
+ * NEVER_SENT anywhere it doesn't belong in an answer to `route`, as findKey gives it, or null. In a mode check's answer
+ * it belongs nowhere. In a permission request's, an allow's decision is where an Answer or an Approve plan has them,
+ * and what's inside its updatedInput is the request's own input, echoed: so an allow's decision is left to the
+ * checks of the body it is, and the rest searched.
+ */
+function misplaced(route, actual) {
+  const decision = route === ROUTES.permission && isObject(actual) && isObject(actual.hookSpecificOutput) ? actual.hookSpecificOutput.decision : undefined
+  return findKey(actual, NEVER_SENT, 'body', isObject(decision) && decision.behavior === 'allow' ? decision : null)
+}
+
+/**
+ * Which of PROTOCOL.md's decisions a permission answer's `hookSpecificOutput` is, by its decision: a deny is Deny; an
+ * allow with updatedPermissions an Approve plan, with updatedInput alone an Answer, with neither Allow.
+ */
+function permissionBodyOf(out) {
+  const d = isObject(out) ? out.decision : undefined
+  if (!isObject(d)) return 'Allow'
+  if (d.behavior === 'deny') return 'Deny'
+  if (Object.hasOwn(d, 'updatedPermissions')) return 'Approve plan'
+  return Object.hasOwn(d, 'updatedInput') ? 'Answer' : 'Allow'
+}
+
+/** Each decision's body, exactly: `"*"` stands for the request's own input, which the checks after compare. */
+const PERMISSION_BODIES = Object.freeze({
+  Allow: ALLOW,
+  Deny: DENY,
+  Answer: { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: ANY } } },
+  'Approve plan': { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: ANY, updatedPermissions: ANY } } },
+})
+
+/**
+ * Why a permission answer's decision, `name`, doesn't fit the request it answers, `request` being the hook's input as
+ * the fixture sends it, or null. An Answer goes only to an AskUserQuestion, an Approve plan only to an ExitPlanMode,
+ * and Claude Code ignores a plain Allow for either of those: it needs the person for them.
+ */
+function requestMismatch(name, request) {
+  const tool = isObject(request) && typeof request.tool_name === 'string' ? request.tool_name : null
+  const at = 'body.hookSpecificOutput.decision'
+  const is = tool === null ? 'for no tool' : `for ${tool}`
+  if (name === 'Answer' && tool !== 'AskUserQuestion') return `${at}: an Answer goes only to an AskUserQuestion, and this request is ${is} (PROTOCOL.md, "Permission requests")`
+  if (name === 'Approve plan' && tool !== 'ExitPlanMode') return `${at}: an Approve plan goes only to an ExitPlanMode, and this request is ${is} (PROTOCOL.md, "Permission requests")`
+  if (name === 'Allow' && ASK_TOOLS.includes(tool)) {
+    return `${at}: Claude Code ignores a plain Allow for ${tool}, which needs the person: the deck answers one with ${tool === 'AskUserQuestion' ? 'an Answer' : 'an Approve plan'}, a Deny or {}`
+  }
+  return null
+}
+
+/**
+ * Why an Answer's updatedInput isn't the request's tool_input exactly as it came with `answers` added, or null
+ * (PROTOCOL.md, "Permission requests"): an object from each question's text to its answer, a string, every question
+ * with one. Without the request, only its shape is checked.
+ */
+function answerMismatch(out, request) {
+  const at = 'body.hookSpecificOutput.decision.updatedInput'
+  const input = out.decision.updatedInput
+  if (!isObject(input)) return `${at}: expected the request's tool_input with answers added, got ${show(input)}`
+  if (!isObject(input.answers)) return `${at}.answers: expected an object from each question's text to its answer, got ${show(input.answers)}`
+  const odd = Object.entries(input.answers).find(([, v]) => typeof v !== 'string')
+  if (odd) return `${at}.answers.${odd[0]}: an answer is a string, got ${show(odd[1])}`
+  if (request === undefined) return null
+  const asked = isObject(request) ? request.tool_input : undefined
+  if (!isObject(asked)) return `${at}: the request has no tool_input for an Answer to echo, got ${show(asked)}`
+  // Everything but `answers`, which the Answer adds, or replaces should the request have had one.
+  const { answers, ...rest } = input
+  const askedRest = { ...asked }
+  delete askedRest.answers
+  const why = exactMismatch(askedRest, rest, at, { wildcard: false })
+  if (why) return `${why} (an Answer's updatedInput is the request's tool_input exactly as it came, with answers added)`
+  const texts = Array.isArray(asked.questions) ? asked.questions.map((q) => (isObject(q) ? q.question : undefined)) : []
+  if (texts.length && texts.every((q) => typeof q === 'string')) {
+    const missing = texts.find((q) => !Object.hasOwn(answers, q))
+    if (missing !== undefined) return `${at}.answers: no answer for ${show(missing)}, and every question gets one`
+    const stray = Object.keys(answers).find((k) => !texts.includes(k))
+    if (stray !== undefined) return `${at}.answers.${stray}: none of the request's questions asks it`
+  }
+  return null
+}
+
+/**
+ * Why an Approve plan isn't the request's tool_input unchanged with one setMode for the session into one of
+ * PLAN_MODES, or null (PROTOCOL.md, "Permission requests"). Without the request, only its shape is checked.
+ */
+function approvePlanMismatch(out, request) {
+  const at = 'body.hookSpecificOutput.decision'
+  const d = out.decision
+  if (!isObject(d.updatedInput)) return `${at}.updatedInput: expected the request's tool_input, an object, got ${show(d.updatedInput)}`
+  const perms = d.updatedPermissions
+  if (!Array.isArray(perms) || perms.length !== 1) return `${at}.updatedPermissions: expected one setMode for the session, got ${show(perms)}`
+  const why = exactMismatch({ type: 'setMode', mode: ANY, destination: 'session' }, perms[0], `${at}.updatedPermissions[0]`)
+  if (why) return `${why} (an Approve plan's updatedPermissions is one setMode, for the session)`
+  if (!PLAN_MODES.includes(perms[0].mode)) return `${at}.updatedPermissions[0].mode: expected one of ${PLAN_MODES.join(', ')}, got ${show(perms[0].mode)}`
+  if (request === undefined) return null
+  const echo = exactMismatch(isObject(request) ? request.tool_input : undefined, d.updatedInput, `${at}.updatedInput`, { wildcard: false })
+  return echo && `${echo} (an Approve plan's updatedInput is the request's tool_input, unchanged)`
 }
 
 /** Why `actual` has a field that `expected` lacks, at any depth, or null: mismatch() checks the other way. */
@@ -109,40 +209,62 @@ function extraField(expected, actual, at, name) {
 /**
  * What a 2xx answer to each hook's route may be (PROTOCOL.md, "Permission requests" and "Mode checks"): `names` in
  * words, `decision(out)` the one whose `hookSpecificOutput` an answer that has one must be exactly, as `[name,
- * body]`, and `exactly` what that means.
+ * body]`, `exactly` what that means, `never` how to say a NEVER_SENT field is where it doesn't belong, and for a
+ * permission request `request(name, request)` whether the decision fits the request it answers and `input(name, out,
+ * request)` whether an Answer's or an Approve plan's own fields are right.
  */
 const HOOK_ANSWERS = Object.freeze({
   [ROUTES.permission]: {
-    names: 'Allow, Deny or {}',
-    decision: (out) => (out?.decision?.behavior === 'deny' ? ['Deny', DENY] : ['Allow', ALLOW]),
-    exactly: 'a decision is Allow or Deny exactly as PROTOCOL.md writes them',
+    names: 'Allow, Deny, an Answer, an Approve plan or {}',
+    decision: (out) => {
+      const name = permissionBodyOf(out)
+      return [name, PERMISSION_BODIES[name]]
+    },
+    exactly: 'a decision is Allow, Deny, an Answer or an Approve plan exactly as PROTOCOL.md writes them',
+    never: (key) => `the deck sends ${key} only in ${key === 'updatedInput' ? 'an Answer or an Approve plan' : 'an Approve plan'}, in its allow's decision (PROTOCOL.md)`,
+    request: requestMismatch,
+    input: (name, out, request) => (name === 'Answer' ? answerMismatch(out, request) : name === 'Approve plan' ? approvePlanMismatch(out, request) : null),
   },
   [ROUTES.pretool]: {
     names: "the mode check's allow or {}",
     decision: () => ["the mode check's allow", PRE_ALLOW],
     exactly: 'the bridge never denies or asks in a mode check, and its allow is exactly as PROTOCOL.md writes it',
+    never: (key) => `the deck never sends ${key} in a mode check (PROTOCOL.md)`,
+    request: () => null,
+    input: () => null,
   },
 })
+
+/** Whether a permission answer, or a line's expected body, is an Answer or an Approve plan: its decision carries updatedInput or updatedPermissions. */
+function carriesInput(body) {
+  const d = isObject(body) && isObject(body.hookSpecificOutput) ? body.hookSpecificOutput.decision : undefined
+  return isObject(d) && NEVER_SENT.some((k) => Object.hasOwn(d, k))
+}
 
 /**
  * Why an answer to one of Claude Code's requests, the hooks', isn't one PROTOCOL.md allows, or null. It holds
  * whatever the reply line expects, since Claude Code acts on the answer: "Transport" exempts these routes from
  * "unknown fields are ignored".
- * - `updatedPermissions` and `updatedInput` are nowhere in it. A deck that echoed a PermissionRequest's
- *   `permission_suggestions` would otherwise raise the session's mode, or add rules to the user's settings, at
- *   every press, and still pass; one that put `updatedInput` in a mode check's allow could change the mode the call
- *   asks for.
- * - A 2xx answer, the one Claude Code parses, is exactly one of the route's bodies: Allow, Deny or {} for a
- *   permission request, the allow or {} for a mode check. No field of its own, at the top (Claude Code's own
- *   HOOK_FIELDS among them) or inside `hookSpecificOutput`.
+ * - `updatedPermissions` and `updatedInput` are only where PROTOCOL.md puts them: in an Answer's and an Approve plan's
+ *   decision, and nowhere in a mode check's answer. A deck that echoed a PermissionRequest's `permission_suggestions`
+ *   into a Deny would otherwise add rules to the user's settings at every press, and still pass; one that put
+ *   `updatedInput` in a mode check's allow could change the mode the call asks for.
+ * - A 2xx answer, the one Claude Code parses, is exactly one of the route's bodies: Allow, Deny, an Answer, an Approve
+ *   plan or {} for a permission request, the allow or {} for a mode check. No field of its own, at the top (Claude
+ *   Code's own HOOK_FIELDS among them) or inside `hookSpecificOutput`. An Answer's answers are strings; an Approve
+ *   plan's updatedPermissions is one setMode for the session, into auto, acceptEdits or default.
+ * - With `request`, the hook's input the answer is for (a permission request's): the decision fits it. An Answer goes
+ *   only to an AskUserQuestion, with its tool_input exactly as it came plus an answer for every question; an Approve
+ *   plan only to an ExitPlanMode, with its tool_input unchanged; and a plain Allow to neither, as Claude Code ignores
+ *   it there. A deck that answered a Write with an Answer would rewrite the call it allowed.
  * - Any other is an error answer, which Claude Code doesn't parse: `{"error": "<reason>"}` exactly, as
  *   "Transport" writes it. auth's 405 for `GET /v1/permission` is one.
  */
-export function hookAnswerMismatch(route, actual, status = 200) {
+export function hookAnswerMismatch(route, actual, status = 200, request = undefined) {
   const answers = HOOK_ANSWERS[route]
   if (!answers) throw new Error(`${route} isn't one of the hooks' routes`)
-  const stray = findKey(actual, NEVER_SENT, 'body')
-  if (stray) return `${stray.at}: the deck never sends ${stray.key} (PROTOCOL.md), got ${show(stray.value)}`
+  const stray = misplaced(route, actual)
+  if (stray) return `${stray.at}: ${answers.never(stray.key)}, got ${show(stray.value)}`
   if (status < 200 || status > 299) {
     const extra = isObject(actual) ? Object.keys(actual).find((k) => k !== 'error') : undefined
     if (extra !== undefined) return `body.${extra}: not in an error answer, got ${show(actual[extra])} (an error answer is {"error": "<reason>"} exactly)`
@@ -156,27 +278,39 @@ export function hookAnswerMismatch(route, actual, status = 200) {
   if (!Object.hasOwn(actual, 'hookSpecificOutput')) return null
   const out = actual.hookSpecificOutput
   const [name, want] = answers.decision(out)
+  if (request !== undefined) {
+    const unfit = answers.request(name, request)
+    if (unfit) return unfit
+  }
   const at = 'body.hookSpecificOutput'
   const why = mismatch(want.hookSpecificOutput, out, { at, skip: [] }) ?? extraField(want.hookSpecificOutput, out, at, name)
-  return why && `${why} (${answers.exactly})`
+  if (why) return `${why} (${answers.exactly})`
+  return answers.input(name, out, request)
 }
 
-/** hookAnswerMismatch for a permission request. */
-export const permissionAnswerMismatch = (actual, status = 200) => hookAnswerMismatch(ROUTES.permission, actual, status)
+/** hookAnswerMismatch for a permission request, and with `request`, for that request. */
+export const permissionAnswerMismatch = (actual, status = 200, request = undefined) => hookAnswerMismatch(ROUTES.permission, actual, status, request)
 
 /**
  * Why a reply's body doesn't match, or null; `expected` is undefined when the reply line gives no body, and
  * `actual` when the answer had none that parses. An answer to a hook's request, with its `status`, must be one
- * PROTOCOL.md allows first (hookAnswerMismatch). Then an expected `{}` for it means no decision, so it fails on an
- * answer that carries one: by the general rule an empty object would match any answer, an Allow included, and the
- * fixture would pass on the very thing it rules out.
+ * PROTOCOL.md allows first (hookAnswerMismatch), for `request`, the hook's input it answers, when that's known. Then:
+ * - An expected `{}` for it means no decision, so it fails on an answer that carries one: by the general rule an empty
+ *   object would match any answer, an Allow included, and the fixture would pass on the very thing it rules out.
+ * - An Answer or an Approve plan, expected or got, must equal the expected body exactly, updatedInput included
+ *   (PROTOCOL.md, "Matching"): by the general rule an Allow expected would match an Answer, and an Answer expected one
+ *   whose updatedInput has a key of its own, which Claude Code fails as a deny.
  */
-export function replyMismatch(route, expected, actual, bindings, status = 200) {
+export function replyMismatch(route, expected, actual, bindings, status = 200, request = undefined) {
   if (HOOKS.has(route)) {
-    const why = hookAnswerMismatch(route, actual, status)
+    const why = hookAnswerMismatch(route, actual, status, request)
     if (why) return why
     if (isObject(expected) && Object.keys(expected).length === 0) {
       return isObject(actual) && !Object.hasOwn(actual, 'hookSpecificOutput') ? null : `body: expected no decision ({}), got ${show(actual)}`
+    }
+    if (route === ROUTES.permission && expected !== undefined && (carriesInput(expected) || carriesInput(actual))) {
+      const exact = exactMismatch(expected, actual, 'body')
+      return exact && `${exact} (an Answer or an Approve plan must equal the expected body exactly, updatedInput included)`
     }
   }
   return expected === undefined ? null : mismatch(expected, actual, { at: 'body', hook: commandIdHook(bindings) })
@@ -396,8 +530,11 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     }
     if (r.status !== status) throw new PlayFailure(line, `${to}: status: expected ${status}, got ${r.status} ${r.text}`)
     if (body !== undefined && r.json === undefined) throw new PlayFailure(line, `${to}: expected a JSON body, got ${show(r.text)}`)
-    // Checked even when the line gives no body: an answer to a hook's request must still be PROTOCOL.md's.
-    const why = r.json === undefined && !HOOKS.has(entry.route) ? null : replyMismatch(entry.route, body, r.json, bindings, r.status)
+    // Checked even when the line gives no body: an answer to a hook's request must still be PROTOCOL.md's, and fit the
+    // request it answers, the hook's input as the fixture sent it.
+    const sentBody = entry.line.value.raw === undefined && isObject(entry.line.value.body) ? entry.line.value.body : undefined
+    const request = entry.route === ROUTES.permission ? sentBody : undefined
+    const why = r.json === undefined && !HOOKS.has(entry.route) ? null : replyMismatch(entry.route, body, r.json, bindings, r.status, request)
     if (why) throw new PlayFailure(line, `${to}: ${why}`)
     result.checked++
     say(`✓ reply ${to}: ${status}${r.text ? ` ${r.text.length > 100 ? `${r.text.slice(0, 99)}…` : r.text}` : ''}`)

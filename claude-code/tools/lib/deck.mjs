@@ -6,9 +6,12 @@
 //
 // No I/O here: bridge.mjs feeds it HTTP requests and folder readings, and reads the registry once more when a
 // request asks for it (hookNeedsReading, helloNeedsReading). Its clocks and timers are injected, so the tests drive
-// it directly. Presses come from the control interface in place of the keys.
+// it directly. Presses come from the control interface in place of the keys and the Session Slot dials.
 
-import { ASK_TOOLS, AT_ONCE_MS, FINAL_STATES, HELLO_FIRST, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, NOT_THIS_SESSION, PRE_ALLOW, VERSION, answerFor, fingerprint, summary } from './protocol.mjs'
+import {
+  ASK_INPUT_MAX, ASK_TOOLS, AT_ONCE_MS, DENY, DIAL_PLANS, FINAL_STATES, HELLO_FIRST, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, NOT_THIS_SESSION,
+  PRE_ALLOW, VERSION, answerBody, answerFor, approvePlanBody, fingerprint, joinLabels, summary,
+} from './protocol.mjs'
 
 /** A control call, or a mod request, that can't be carried out as asked: bridge.mjs answers it with 400. */
 export class BadRequest extends Error {}
@@ -50,6 +53,125 @@ function display(v) {
 const IN_FLIGHT = new Set(['delivered', 'waiting'])
 const FINAL = new Set(FINAL_STATES)
 const RECENT_KEPT = 50
+/** The `surface` of the desktop app's own `attach` and `detach`, the only ones the deck counts (PROTOCOL.md, "Events"). */
+const DESKTOP_SURFACE = 'desktop'
+
+// ---- a Session Slot dial's strip ----------------------------------------------------------------------------
+//
+// PROTOCOL.md, "Held requests", as amended on 2026-11-04 for session keys, and docs/claude-code/session-keys.md, "The
+// strip": a held ask request keeps its tool_input, up to ASK_INPUT_MAX of JSON, so its session's dial can show the
+// form and echo it back. What the strip shows for a request is worked out once, when it's held: its input doesn't
+// change.
+
+/**
+ * Why a held ask request's tool_input isn't kept for the dial, or null when it is: its JSON is over ASK_INPUT_MAX
+ * bytes (UTF-8, as JSON.stringify writes it), it can't be written out, or there's none. `scrubbed`: the bridge took a
+ * run of the token out of it before reading it, as it does every body, so it can't go back as it came.
+ */
+function notKept(input, scrubbed) {
+  if (scrubbed) return "the bridge scrubbed a run of the token out of its tool_input, so it can't echo the input back as it came"
+  let text
+  try {
+    text = JSON.stringify(input)
+  } catch {
+    return "its tool_input can't be written out"
+  }
+  if (text === undefined) return 'it has no tool_input'
+  const bytes = Buffer.byteLength(text)
+  return bytes > ASK_INPUT_MAX ? `its tool_input is ${bytes} bytes of JSON, over the ${ASK_INPUT_MAX} the deck keeps` : null
+}
+
+/**
+ * An AskUserQuestion's form as the dial reads it: `{questions}`, each `{question, header, multiSelect, labels}`, or
+ * `{why}` for one it can't read, which shows "Answer in app". The same rules as the real deck's parseAskForm
+ * (claude-code/deck/src/protocol/ask.ts), in its order, and the list PROTOCOL.md's "Held requests" gives: no
+ * `questions` array, or an empty one; a question that isn't an object, or whose `question` isn't a non-empty string, or
+ * repeats another's (the answers go by it); a `header` that's there and isn't a string, null included; a `multiSelect`
+ * that's there and isn't a boolean (a missing one is single-select); `options` that isn't a non-empty array; an option
+ * that isn't an object, or whose `label` isn't a non-empty string, or repeats another's of its question; a
+ * `description` that's there and isn't a string, null included. Any other field goes back unchanged in the Answer.
+ */
+function readQuestions(input) {
+  if (!isObject(input) || !Array.isArray(input.questions) || input.questions.length === 0) return { why: 'it has no list of questions to read' }
+  const questions = []
+  for (const [i, q] of input.questions.entries()) {
+    const which = `question ${i + 1}`
+    if (!isObject(q) || typeof q.question !== 'string' || q.question === '') return { why: `${which} has no text` }
+    if (questions.some((x) => x.question === q.question)) return { why: `two questions ask ${display(q.question)}, and the answers go by a question's text` }
+    if (q.header !== undefined && typeof q.header !== 'string') return { why: `${which}'s header isn't a string` }
+    if (q.multiSelect !== undefined && typeof q.multiSelect !== 'boolean') return { why: `${which}'s multiSelect isn't a boolean` }
+    if (!Array.isArray(q.options) || q.options.length === 0) return { why: `${which} has no options to pick from` }
+    const labels = []
+    for (const o of q.options) {
+      if (!isObject(o) || typeof o.label !== 'string' || o.label === '') return { why: `an option of ${which} has no label` }
+      if (labels.includes(o.label)) return { why: `two options of ${which} have the label ${display(o.label)}` }
+      if (o.description !== undefined && typeof o.description !== 'string') return { why: `the description of ${which}'s option ${display(o.label)} isn't a string` }
+      labels.push(o.label)
+    }
+    questions.push({ question: q.question, header: q.header ?? null, multiSelect: q.multiSelect === true, labels })
+  }
+  return { questions }
+}
+
+/**
+ * A plan's first heading or line, for the strip, as the real deck's planFirstLine reads it
+ * (claude-code/deck/src/protocol/ask.ts): `plan` split into lines at \r\n, \n or \r, each with a heading's `#` marks
+ * and the spaces before and after them taken off, then trimmed, and the first with text in it, whole. Null when
+ * there's no `plan` string, as when Claude wrote no plan file, or no line with text.
+ */
+function planLine(plan) {
+  if (typeof plan !== 'string') return null
+  for (const raw of plan.split(/\r\n|\n|\r/)) {
+    const line = raw.replace(/^\s*#+\s*/, '').trim()
+    if (line !== '') return line
+  }
+  return null
+}
+
+/**
+ * What a Session Slot dial's strip shows for a held request, once it's its session's oldest:
+ * - `approval` for a tool request, which the dial allows or denies;
+ * - `question` for an AskUserQuestion whose form it reads (readQuestions), with its questions and their labels;
+ * - `plan` for an ExitPlanMode whose tool_input is an object (`{}`, or `{plan, planFilePath}`), with the plan's first
+ *   line (planLine), or null;
+ * - `answer-in-app`, with `why`, for an ask request whose tool_input the deck didn't keep or can't read: a press jumps.
+ */
+function screenOf(kind, tool, input, scrubbed) {
+  if (kind !== 'ask') return { screen: 'approval' }
+  const why = notKept(input, scrubbed)
+  if (why) return { screen: 'answer-in-app', why }
+  if (tool === 'ExitPlanMode') {
+    return isObject(input) ? { screen: 'plan', plan: planLine(input.plan) } : { screen: 'answer-in-app', why: "its tool_input isn't an object" }
+  }
+  const form = readQuestions(input)
+  return form.why ? { screen: 'answer-in-app', why: form.why } : { screen: 'question', questions: form.questions }
+}
+
+/**
+ * The answers a dial's picks make on a question screen (PROTOCOL.md, "Permission requests"): every question gets one,
+ * a single-select question's its one label as it is, a multi-select one's its labels, at least one, in the order of
+ * its options and joined (joinLabels), whatever order they were picked in. `{answers}`, or `{error}` for picks the dial
+ * can't make on the strip: for a question it doesn't ask, none for one it does, a label that isn't one of the
+ * question's options, or more than one for a single-select question. A label picked twice is picked once.
+ */
+function answersFrom(questions, picks) {
+  const asked = questions.map((q) => q.question)
+  const stray = Object.keys(picks).find((k) => !asked.includes(k))
+  if (stray !== undefined) return { error: `the strip asks no question ${display(stray)}; it asks ${asked.map(display).join(', ')}` }
+  const answers = []
+  for (const q of questions) {
+    if (!Object.hasOwn(picks, q.question)) return { error: `nothing picked for ${display(q.question)}: every question gets an answer` }
+    const picked = new Set(picks[q.question])
+    const unknown = [...picked].find((l) => !q.labels.includes(l))
+    if (unknown !== undefined) return { error: `${display(q.question)} has no option ${display(unknown)}; its options are ${q.labels.map(display).join(', ')}` }
+    if (picked.size === 0) return { error: `nothing picked for ${display(q.question)}: ${q.multiSelect ? 'a multi-select question needs at least one tick' : 'every question gets an answer'}` }
+    if (!q.multiSelect && picked.size > 1) return { error: `${display(q.question)} is single-select, and got ${picked.size} picks` }
+    const inOrder = q.labels.filter((l) => picked.has(l))
+    answers.push([q.question, q.multiSelect ? joinLabels(inOrder) : inOrder[0]])
+  }
+  // Each question's text as a key of its own, `__proto__` included.
+  return { answers: Object.fromEntries(answers) }
+}
 
 /**
  * A host id from a request or a registry file (PROTOCOL.md, "Identity"). A value that doesn't match counts as
@@ -180,6 +302,13 @@ export class FakeDeck {
   #records = new Map()
   /** Held permission requests, oldest first. */
   #held = []
+  /**
+   * host → the id of the request its Session Slot dial showed last: its session's oldest held request, from when it
+   * became the oldest. Kept once the request has gone, so the dial's press for it alerts, until the session's next
+   * request is held: a request answered elsewhere makes the press alert only while nothing newer is on the strip
+   * (PROTOCOL.md, "Held requests"; dial-next). #heldChanged, dial.
+   */
+  #dialShown = new Map()
   /** Requests that ended, newest last, so `answer` can say how one ended. */
   #recent = []
   /** Held requests that no tool.start has paired with by fp yet, oldest first. */
@@ -334,6 +463,16 @@ export class FakeDeck {
   /** The session's held requests, oldest first. Every one has a host: only a confirmed session's are held. */
   #heldOf(host) {
     return this.#held.filter((h) => h.host === host)
+  }
+
+  /**
+   * The session's held requests changed: its dial's strip shows its oldest now, if it has one, and that's the request
+   * the dial showed last, whether it was held behind the one that went or came after it. With none left, the strip
+   * goes back to its pages, and the request it showed last stays, so a press for it alerts until a newer one is held.
+   */
+  #heldChanged(host) {
+    const oldest = this.#heldOf(host)[0]
+    if (oldest) this.#dialShown.set(host, oldest.id)
   }
 
   // ---- POST /v1/hello ------------------------------------------------------------------------------------
@@ -563,12 +702,17 @@ export class FakeDeck {
         // Replaces what the deck had, whichever source it came from, a PermissionRequest included.
         for (const k of ['model', 'mode', 'effort']) this.#take(s, k, e[k], 'settings')
         break
+      // PROTOCOL.md, "Events", as amended on 2026-11-04 for session keys: only `surface` `desktop`, the app's own, counts.
+      // The mods API sends them per client, so another's, a phone's say, or one with no surface, changes nothing: a
+      // phone leaving a session would otherwise take it off a desktop that still shows it.
       case 'attach':
+        if (e.surface !== DESKTOP_SURFACE) break
         // When the deck got it: `at` is by the mod's clock.
         s.attachAt = this.#now()
         s.onScreen = true
         break
       case 'detach':
+        if (e.surface !== DESKTOP_SURFACE) break
         s.onScreen = false
         break
       case 'end':
@@ -695,9 +839,12 @@ export class FakeDeck {
    * A PermissionRequest (PROTOCOL.md, "Permission requests"), taken only from a session the registry confirms
    * ("Desktop sessions only"): any other gets no decision at once. A confirmed one is sorted into its kind: a `mode`
    * request is allowed at once, and `ask` and `tool` requests are held. `responder` is `{open, send(status, json)}`.
-   * Returns `{kind, id}` for a held request, `{kind: 'mode', cmd}` for one allowed, `{kind: 'unconfirmed'}`.
+   * An `ask` request keeps its tool_input, up to ASK_INPUT_MAX of JSON, for its session's dial (PROTOCOL.md, "Held
+   * requests", as amended on 2026-11-04 for session keys); `inputScrubbed` says the bridge took a run of the token out
+   * of the tool_input before the deck read it, so it isn't kept: it can't go back as it came. Returns `{kind, id}` for
+   * a held request, `{kind: 'mode', cmd}` for one allowed, `{kind: 'unconfirmed'}`.
    */
-  permission({ body, hostHeader, responder }) {
+  permission({ body, hostHeader, responder, inputScrubbed = false }) {
     const b = isObject(body) ? body : {}
     const host = this.#confirmed(hostHeader, b.session_id)
     if (!host) return this.#unconfirmed('permission', b, hostHeader, responder)
@@ -725,12 +872,18 @@ export class FakeDeck {
     }
 
     const kind = ASK_TOOLS.includes(tool) ? 'ask' : 'tool'
+    // What its session's dial shows for it, and for an ask request the input it echoes back. A tool request's input
+    // isn't kept: its dial sends the keys' Allow or Deny, and a Write can carry a whole file.
+    const screen = screenOf(kind, tool, input, inputScrubbed)
     const h = {
       id: `p${++this.#heldSeq}`, host, sid, tool, kind, summary: sum, fp,
       arrived: this.#now(), seenWaiting: false, responder,
+      screen, input: screen.screen === 'question' || screen.screen === 'plan' ? input : undefined,
     }
     this.#held.push(h)
-    this.#log({ kind: 'held', id: h.id, host, sid, tool, requestKind: kind, summary: sum, fp, say: `${h.id} HELD ${kind} ${host} ${tool}: ${sum} fp ${fp}` })
+    this.#heldChanged(host)
+    const dial = screen.screen === 'answer-in-app' ? `; its dial shows Answer in app: ${screen.why}` : ''
+    this.#log({ kind: 'held', id: h.id, host, sid, tool, requestKind: kind, summary: sum, fp, dial: screen.screen, say: `${h.id} HELD ${kind} ${host} ${tool}: ${sum} fp ${fp}${dial}` })
     this.#fpFromHeld(h, s)
     return { kind, id: h.id }
   }
@@ -794,6 +947,7 @@ export class FakeDeck {
   #end(h, end, why, extra = {}) {
     const i = this.#held.indexOf(h)
     if (i >= 0) this.#held.splice(i, 1)
+    this.#heldChanged(h.host)
     this.#recent.push({ id: h.id, host: h.host, tool: h.tool, kind: h.kind, summary: h.summary, end, ...extra, heldMs: this.#now() - h.arrived })
     if (this.#recent.length > RECENT_KEPT) this.#recent.shift()
     this.#fpEnded(h, why, extra.rule)
@@ -809,10 +963,22 @@ export class FakeDeck {
 
   /** Answers a held request: allow, deny or none. False when its client had already gone. */
   #answerHeld(h, decision, by) {
+    return this.#answerWith(h, answerFor(decision), decision, by)
+  }
+
+  /**
+   * Answers a held request with `body`, one of PROTOCOL.md's five: `what` names it ('allow', 'deny', 'none', 'answer'
+   * or 'approve plan'), `by` says who ('press', a key; 'dial', its session's dial; 'control', the control route), and
+   * `extra` goes in the log and the request's end: an Answer's `answers`, an Approve plan's `mode`. False when its
+   * client had already gone.
+   */
+  #answerWith(h, body, what, by, extra = {}) {
     const sent = h.responder.open
-    if (sent) h.responder.send(200, answerFor(decision))
-    this.#log({ kind: 'answered', id: h.id, decision, by, sent, say: `${h.id} ${sent ? decision : `gone before its ${decision}`} (${by})` })
-    this.#end(h, sent ? 'answered' : 'gone', `answered ${decision} by ${by === 'press' ? 'a press' : 'the control route'}`, { decision, by })
+    if (sent) h.responder.send(200, body)
+    const mode = extra.mode ? ` into ${extra.mode}` : ''
+    this.#log({ kind: 'answered', id: h.id, decision: what, by, sent, ...extra, say: `${h.id} ${sent ? what : `gone before its ${what}`}${mode} (${by})` })
+    const from = by === 'press' ? 'a press' : by === 'dial' ? "its session's dial" : 'the control route'
+    this.#end(h, sent ? 'answered' : 'gone', `answered ${what}${mode} by ${from}`, { decision: what, by, ...extra })
     return sent
   }
 
@@ -1044,7 +1210,8 @@ export class FakeDeck {
 
   #pressed(p) {
     this.#lastPress = { at: this.#now(), alert: false, jumped: null, ...p }
-    const what = p.alert ? `ALERT: ${p.error}` : p.jumped ? `jumps to ${p.jumped}` : p.answered ? `${p.answered} ${p.request}` : p.cmd ? `queued ${p.cmd}` : ''
+    const answered = p.answered ? `${p.answered}${p.mode ? ` into ${p.mode}` : ''} ${p.request}` : ''
+    const what = p.alert ? `ALERT: ${p.error}` : p.jumped ? `jumps to ${p.jumped}${p.why ? ` (Answer in app: ${p.why})` : ''}` : p.answered ? answered : p.cmd ? `queued ${p.cmd}` : ''
     this.#log({ kind: 'press', ...this.#lastPress, say: `press ${p.key}${p.session ? ` ${p.session}` : ''}: ${what}` })
     return { ok: !p.alert, ...this.#lastPress }
   }
@@ -1069,6 +1236,74 @@ export class FakeDeck {
     const decision = key === 'approve' ? 'allow' : 'deny'
     this.#answerHeld(h, decision, 'press')
     return this.#pressed({ key, request: h.id, answered: decision })
+  }
+
+  /**
+   * A Session Slot dial's press (PROTOCOL.md, "Held requests", as amended on 2026-11-04 for session keys), for the
+   * request its strip showed last: its session's oldest held request, of any kind. One of
+   * - `decision`, allow or deny, for a tool request: the keys' own Allow or Deny;
+   * - `picks`, the labels picked for each question by its text, for an AskUserQuestion: the Answer (answersFrom);
+   * - `plan`, for an ExitPlanMode: an Approve plan into auto, acceptEdits or default, or `reject`, the keys' Deny,
+   *   which stops the turn, so the user says in the app what to change.
+   * An ask request whose tool_input the deck didn't keep or can't read shows "Answer in app": any press on it jumps to
+   * its session and answers nothing. `shown` is the id of the request the strip showed, as a key's: undefined for the
+   * one it showed last, null for none.
+   *
+   * The keys and the dials answer the same requests, and the first answer wins: a press for a request that has gone,
+   * answered by a key or another press, or released, alerts and sends nothing while nothing newer is on the strip, and
+   * so does one its strip doesn't take, a decision for a question say, or picks that aren't the question's options.
+   * Once the session's next request is held, the strip shows it, and a press acts on that one (dial-next). The deck's
+   * 1 s before a press counts, and its 300 ms before a choice does, are off here, as the fixtures' runners turn them
+   * off: a press on the control route is a deliberate press on what the strip shows. Whether the session has a current
+   * instance doesn't matter, as for Approve and Deny. The fake has no slots: a dial is named by its session.
+   */
+  dial({ host, picks, decision, plan, shown } = {}) {
+    if (typeof host !== 'string' || host === '') throw new BadRequest('host must be a session host (local_…)')
+    const given = [['picks', picks], ['decision', decision], ['plan', plan]].filter(([, v]) => v !== undefined).map(([k]) => k)
+    if (given.length !== 1) throw new BadRequest(`a dial press has one of picks, decision and plan; got ${given.join(', ') || 'none'}`)
+    if (decision !== undefined && decision !== 'allow' && decision !== 'deny') throw new BadRequest('decision must be allow or deny')
+    if (plan !== undefined && !DIAL_PLANS.includes(plan)) throw new BadRequest(`plan must be one of ${DIAL_PLANS.join(', ')}`)
+    if (picks !== undefined && (!isObject(picks) || !Object.values(picks).every((v) => Array.isArray(v) && v.every((l) => typeof l === 'string')))) {
+      throw new BadRequest("picks maps each question's text to a list of the labels picked for it")
+    }
+    if (shown !== undefined && shown !== null && typeof shown !== 'string') throw new BadRequest('shown must be the id of a request (p3), or null')
+    const press = { key: 'dial', session: host }
+    const alert = (error, request) => this.#pressed({ ...press, ...(request ? { request } : {}), alert: true, error })
+    const target = shown === undefined ? (this.#dialShown.get(host) ?? null) : shown
+    if (target === null) return alert(`${host}'s dial has shown no request`)
+    const h = this.#held.find((x) => x.id === target)
+    if (!h) {
+      const ended = this.#recent.findLast((x) => x.id === target)
+      return alert(ended ? `${target}, the request the dial showed, has gone (${ended.end})` : `no request ${target}`, target)
+    }
+    if (h.host !== host) return alert(`${h.id} is ${h.host}'s request, not ${host}'s`, h.id)
+    const oldest = this.#heldOf(host)[0]
+    if (oldest !== h) return alert(`the dial showed ${h.id}; ${host}'s oldest held request is ${oldest.id}`, h.id)
+    if (!h.responder.open) {
+      this.#end(h, 'gone', 'its client had gone')
+      return alert(`${h.id} had gone`, h.id)
+    }
+    const { screen } = h.screen
+    if (screen === 'answer-in-app') return this.#pressed({ ...press, request: h.id, jumped: host, why: h.screen.why })
+    if (screen === 'approval') {
+      if (decision === undefined) return alert(`${h.id} is an approval for ${h.tool}: its dial allows or denies it`, h.id)
+      this.#answerWith(h, answerFor(decision), decision, 'dial')
+      return this.#pressed({ ...press, request: h.id, answered: decision })
+    }
+    if (screen === 'question') {
+      if (picks === undefined) return alert(`${h.id} is a question: its dial answers it with picks`, h.id)
+      const r = answersFrom(h.screen.questions, picks)
+      if (r.error) return alert(r.error, h.id)
+      this.#answerWith(h, answerBody(h.input, r.answers), 'answer', 'dial', { answers: r.answers })
+      return this.#pressed({ ...press, request: h.id, answered: 'answer', answers: r.answers })
+    }
+    if (plan === undefined) return alert(`${h.id} is a plan: its dial approves it into a mode, or rejects it`, h.id)
+    if (plan === 'reject') {
+      this.#answerWith(h, DENY, 'deny', 'dial')
+      return this.#pressed({ ...press, request: h.id, answered: 'deny' })
+    }
+    this.#answerWith(h, approvePlanBody(h.input, plan), 'approve plan', 'dial', { mode: plan })
+    return this.#pressed({ ...press, request: h.id, answered: 'approve plan', mode: plan })
   }
 
   /**
@@ -1139,7 +1374,8 @@ export class FakeDeck {
 
   /**
    * The control interface's own answer to one `tool` request, by id: allow, deny or none. An ask request is
-   * refused, as the deck never answers one: a press on it jumps to its session instead.
+   * refused: only its session's Session Slot dial answers one (dial), with a body made for it, and a key press on it
+   * jumps to its session.
    */
   answer({ id, decision }) {
     if (!['allow', 'deny', 'none'].includes(decision)) throw new BadRequest('decision must be allow, deny or none')
@@ -1149,7 +1385,7 @@ export class FakeDeck {
       return { ok: false, id, error: r ? `${id} already ended (${r.end})` : `no request ${id}` }
     }
     if (h.kind === 'ask') {
-      throw new BadRequest(`${id} is an ask request (${h.tool}), which the deck never answers: a press on it jumps to ${h.host ?? 'its session'} instead, and the user answers in the app`)
+      throw new BadRequest(`${id} is an ask request (${h.tool}), which only ${h.host}'s Session Slot dial answers: use dial (POST /control/dial); a key press on it jumps to ${h.host}, and the user answers in the app`)
     }
     const sent = this.#answerHeld(h, decision, 'control')
     const out = { ok: sent, id, decision, kind: h.kind }
@@ -1324,7 +1560,7 @@ export class FakeDeck {
 
   /**
    * With no dial to pick one, the target is the session most recently on screen in the app: for each, the
-   * later of its latest attach, by when the deck got it, and its record's lastFocusedAt.
+   * later of its latest desktop attach, by when the deck got it, and its record's lastFocusedAt.
    */
   #target(hosts) {
     let best = null
@@ -1356,7 +1592,8 @@ export class FakeDeck {
     const now = this.#now()
     return {
       sessions: listed,
-      held: this.#held.map((h) => ({ id: h.id, host: h.host, tool: h.tool, kind: h.kind, summary: h.summary, fp: h.fp, ageMs: now - h.arrived })),
+      // `dial`: what its session's dial strip shows for it, once it's the session's oldest (screenOf).
+      held: this.#held.map((h) => ({ id: h.id, host: h.host, tool: h.tool, kind: h.kind, summary: h.summary, fp: h.fp, ageMs: now - h.arrived, dial: h.screen })),
       status,
       doing,
       context,
@@ -1391,6 +1628,8 @@ export class FakeDeck {
       commands: [...this.#commands.values()].map(({ timer, ...c }) => c),
       recent: this.#recent,
       lastPress: this.#lastPress,
+      // host → the request its Session Slot dial showed last, which a dial press with no id is for.
+      dials: Object.fromEntries(this.#dialShown),
     }
   }
 
@@ -1426,6 +1665,7 @@ export class FakeDeck {
     }
     for (const c of this.#commands.values()) this.#clearTimer(c.timer)
     this.#fpWaiting = []
+    this.#dialShown.clear()
     this.#sessions.clear()
     this.#commands.clear()
     this.#promptKeys.clear()

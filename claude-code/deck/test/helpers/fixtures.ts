@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { ALLOW_DECISION, DENY_DECISION, NO_DECISION, PRETOOL_ALLOW, ROUTES } from "../../src/protocol/wire.js";
+import { ALLOW_DECISION, DENY_DECISION, isPlanMode, NO_DECISION, PRETOOL_ALLOW, ROUTES } from "../../src/protocol/wire.js";
 import { fixturesDir } from "./paths.js";
 
 export type Obj = Record<string, unknown>;
@@ -75,31 +75,69 @@ export function mismatches(want: unknown, got: unknown, at = "$"): string[] {
 }
 
 /**
- * The answers Claude Code reads, by route, from the deck's own wire module: PROTOCOL.md's three to a
- * PermissionRequest, and its two to a mode check.
+ * The answers Claude Code reads, by route, from the deck's own wire module: PROTOCOL.md's five to a PermissionRequest
+ * (Allow, Deny and `{}` exactly, and an Answer or an Approve plan by their shape, updatedAllowKind), and its two to a
+ * mode check.
  */
-const HOOK_ANSWERS: Readonly<Record<string, { bodies: readonly unknown[]; names: string }>> = {
-	[ROUTES.permission]: { bodies: [ALLOW_DECISION, DENY_DECISION, NO_DECISION], names: "Allow, Deny or {}" },
-	[ROUTES.pretool]: { bodies: [PRETOOL_ALLOW, NO_DECISION], names: "the mode check's allow or {}" },
+const HOOK_ANSWERS: Readonly<Record<string, { bodies: readonly unknown[]; updated: boolean; names: string }>> = {
+	[ROUTES.permission]: { bodies: [ALLOW_DECISION, DENY_DECISION, NO_DECISION], updated: true, names: "Allow, Deny, {}, an Answer or an Approve plan" },
+	[ROUTES.pretool]: { bodies: [PRETOOL_ALLOW, NO_DECISION], updated: false, names: "the mode check's allow or {}" },
 };
+
+function plain(v: unknown): v is Obj {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function keysAre(o: Obj, keys: readonly string[]): boolean {
+	const own = Object.keys(o).sort();
+	return own.length === keys.length && [...keys].sort().every((k, i) => own[i] === k);
+}
+
+/**
+ * Whether a body is one of PROTOCOL.md's Allows that carry `updatedInput`, by shape: exactly `hookSpecificOutput`, with
+ * exactly `hookEventName` "PermissionRequest" and `decision`, whose `behavior` is "allow" and which has either
+ * - exactly `updatedInput`, an object with an `answers` object of strings: an Answer; or
+ * - exactly `updatedInput`, an object, and `updatedPermissions`, one `{type: "setMode", mode, destination: "session"}`
+ *   with a mode an Approve plan may set: an Approve plan.
+ * Anything else, a field more or less at any level included, is neither (null).
+ */
+export function updatedAllowKind(body: unknown): "answer" | "approve plan" | null {
+	if (!plain(body) || !keysAre(body, ["hookSpecificOutput"])) return null;
+	const out = body.hookSpecificOutput;
+	if (!plain(out) || !keysAre(out, ["hookEventName", "decision"]) || out.hookEventName !== "PermissionRequest") return null;
+	const d = out.decision;
+	if (!plain(d) || d.behavior !== "allow" || !plain(d.updatedInput)) return null;
+	if (keysAre(d, ["behavior", "updatedInput"])) {
+		const answers = d.updatedInput.answers;
+		return plain(answers) && Object.values(answers).every((v) => typeof v === "string") ? "answer" : null;
+	}
+	if (!keysAre(d, ["behavior", "updatedInput", "updatedPermissions"]) || !Array.isArray(d.updatedPermissions) || d.updatedPermissions.length !== 1) return null;
+	const set: unknown = d.updatedPermissions[0];
+	if (!plain(set) || !keysAre(set, ["type", "mode", "destination"]) || set.type !== "setMode" || !isPlanMode(set.mode) || set.destination !== "session") return null;
+	return "approve plan";
+}
 
 /**
  * What a `reply` line finds wrong with an answer, or an empty list; `want` is undefined when the line gives no
  * body. A 2xx from a hook's route, `/v1/permission` or `/v1/pretool`, is held to more than PROTOCOL.md's general
- * matching, whatever the line expects: it must be exactly one of the bodies its route allows (Allow, Deny or `{}`
- * for a PermissionRequest; the allow or `{}` for a mode check), and an expected `{}` means no decision, so no
- * `hookSpecificOutput`. By the general rule alone, `{}` matches any answer, an Allow included, and extra fields
- * such as `updatedPermissions` pass. Any other status, from any route, must carry `{"error": "<reason>"}`
- * (Transport).
+ * matching, whatever the line expects: it must be one of the bodies its route allows (Allow, Deny or `{}` exactly, or
+ * an Answer or an Approve plan by its shape, for a PermissionRequest; the allow or `{}` for a mode check). An expected
+ * body that's one of those exactly (Allow, Deny, `{}`, the mode check's allow, an Answer, an Approve plan) must be
+ * equal exactly, `updatedInput` included, and an expected `{}` means no decision, so no `hookSpecificOutput`. By the
+ * general rule alone, `{}` matches any answer, an Allow included, and extra fields such as `updatedPermissions` or an
+ * Answer's `updatedInput` pass where a plain Allow is expected. Any other status, from any route, must carry
+ * `{"error": "<reason>"}` (Transport).
  */
 export function replyMismatches(route: string, status: number, want: unknown, got: unknown): string[] {
 	const problems: string[] = [];
 	const ok = status >= 200 && status < 300;
 	const hook = Object.hasOwn(HOOK_ANSWERS, route) ? HOOK_ANSWERS[route] : undefined;
 	if (hook && ok) {
-		if (!hook.bodies.some((d) => isDeepStrictEqual(d, got))) problems.push(`$: expected exactly ${hook.names}, got ${JSON.stringify(got)}`);
+		const isBody = (b: unknown): boolean => hook.bodies.some((d) => isDeepStrictEqual(d, b)) || (hook.updated && updatedAllowKind(b) !== null);
+		if (!isBody(got)) problems.push(`$: expected exactly ${hook.names}, got ${JSON.stringify(got)}`);
 		const none = typeof want === "object" && want !== null && Object.keys(want).length === 0;
 		if (none && typeof got === "object" && got !== null && "hookSpecificOutput" in got) problems.push(`$: expected no decision ({}), got ${JSON.stringify(got)}`);
+		else if (want !== undefined && isBody(want) && !isDeepStrictEqual(want, got)) problems.push(`$: expected exactly ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
 	}
 	if (!ok && !(typeof got === "object" && got !== null && typeof (got as Obj).error === "string")) problems.push(`$: expected {"error": "<reason>"} with ${status}, got ${JSON.stringify(got)}`);
 	if (want !== undefined) problems.push(...mismatches(want, got));

@@ -1,0 +1,79 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+	"id": "com.karimdhanji.claude.slot-plan",
+	"items": [
+		{
+			"key": "head",
+			"type": "text",
+			"rect": [8, 2, 148, 22],
+			"value": "",
+			"alignment": "left",
+			"color": "#F2C94C",
+			"font": { "size": 16, "weight": 700 },
+			"text-overflow": "ellipsis"
+		},
+		{
+			"key": "since",
+			"type": "text",
+			"rect": [158, 2, 34, 22],
+			"value": "",
+			"alignment": "right",
+			"color": "#A7ADB8",
+			"font": { "size": 13, "weight": 600 }
+		},
+		{
+			"key": "line1",
+			"type": "text",
+			"rect": [8, 26, 184, 20],
+			"value": "",
+			"alignment": "left",
+			"color": "#E8E8E8",
+			"font": { "size": 14, "weight": 500 },
+			"text-overflow": "ellipsis"
+		},
+		{
+			"key": "c0",
+			"type": "text",
+			"rect": [8, 50, 70, 22],
+			"value": "",
+			"alignment": "center",
+			"color": "#A7ADB8",
+			"font": { "size": 13, "weight": 700 },
+			"text-overflow": "ellipsis",
+			"background": "#2A2F3A"
+		},
+		{
+			"key": "c1",
+			"type": "text",
+			"rect": [82, 50, 110, 22],
+			"value": "",
+			"alignment": "center",
+			"color": "#A7ADB8",
+			"font": { "size": 13, "weight": 700 },
+			"text-overflow": "ellipsis",
+			"background": "#2A2F3A"
+		},
+		{
+			"key": "c2",
+			"type": "text",
+			"rect": [8, 76, 70, 22],
+			"value": "",
+			"alignment": "center",
+			"color": "#A7ADB8",
+			"font": { "size": 13, "weight": 700 },
+			"text-overflow": "ellipsis",
+			"background": "#2A2F3A"
+		},
+		{
+			"key": "c3",
+			"type": "text",
+			"rect": [82, 76, 110, 22],
+			"value": "",
+			"alignment": "center",
+			"color": "#A7ADB8",
+			"font": { "size": 13, "weight": 700 },
+			"text-overflow": "ellipsis",
+			"background": "#2A2F3A"
+		}
+	]
+}

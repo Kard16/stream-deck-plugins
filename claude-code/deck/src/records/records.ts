@@ -23,6 +23,19 @@ export type AppRecord = {
 	 * `need_input` show it. Null when the indicator ignores the record.
 	 */
 	turnCategory: string | null;
+	/** `isArchived: true`: the user archived the session in the app. Anything else is false. */
+	isArchived: boolean;
+	/** When the session last did something, wall-clock ms (session-keys.md, `seen` after a deck restart). */
+	lastActivityAt: number | null;
+	/** The session's folder, for a session the registry doesn't list. */
+	cwd: string | null;
+	/**
+	 * What the last turn did, as the app's summary or wrap-up says: a valid summary's `status_detail`, read only when the
+	 * record counts as status rule 6 reads it, else a valid wrap-up's `description` (see lastTurn).
+	 */
+	summary: string | null;
+	/** What the app says it needs from the user: a valid wrap-up's `needsUser`, else the counted summary's `needs_action`. */
+	needs: string | null;
 };
 
 /** The file-system calls the reader makes, so tests can watch them. */
@@ -42,10 +55,40 @@ export const nodeRecordsFs: RecordsFs = {
  * A turn wrap-up as the app's record loader keeps it (its `jM`): an object with a string `description`, empty
  * included, and a `needsUser` that's missing or a string. The loader drops any other, so it's null here.
  */
-function wrapUp(v: unknown): { needsUser: string | null } | null {
+function wrapUp(v: unknown): { description: string; needsUser: string | null } | null {
 	if (!isObj(v) || typeof v.description !== "string") return null;
-	if (v.needsUser === undefined) return { needsUser: null };
-	return typeof v.needsUser === "string" ? { needsUser: v.needsUser } : null;
+	if (v.needsUser === undefined) return { description: v.description, needsUser: null };
+	return typeof v.needsUser === "string" ? { description: v.description, needsUser: v.needsUser } : null;
+}
+
+/** The longest summary or needs text kept; the strips cut it further. */
+const MAX_TURN_TEXT = 300;
+
+/** A string with text in it, trimmed and cut to MAX_TURN_TEXT; anything else is null. */
+function turnText(v: unknown): string | null {
+	if (typeof v !== "string") return null;
+	const t = v.trim();
+	if (t === "") return null;
+	return t.length > MAX_TURN_TEXT ? `${t.slice(0, MAX_TURN_TEXT - 1)}…` : t;
+}
+
+/**
+ * What the record says about the last turn, read the way status rule 6 reads the record (turnCategory): the summary
+ * counts only when the record does, that is with a valid wrap-up or a summary written for the last assistant message,
+ * and only a valid one (validSummary).
+ * - `summary`: the counted summary's `status_detail`, else the valid wrap-up's `description`.
+ * - `needs`: the valid wrap-up's `needsUser`, else the counted summary's `needs_action`. A wrap-up's `needsUser`
+ *   replaces the summary's `needs_action`, as it does for the category (PROTOCOL.md's 2026-11-01 amendment 7).
+ * Text that's empty or only spaces counts as none.
+ */
+function lastTurn(o: Obj): { summary: string | null; needs: string | null } {
+	const w = wrapUp(o.turnWrapUp);
+	const forLast = typeof o.postTurnSummaryFor === "string" && typeof o.lastAssistantUuid === "string" && o.postTurnSummaryFor === o.lastAssistantUuid;
+	const s = w !== null || forLast ? validSummary(o.postTurnSummary) : null;
+	return {
+		summary: turnText(s?.status_detail) ?? turnText(w?.description),
+		needs: turnText(w?.needsUser) ?? turnText(s?.needs_action),
+	};
 }
 
 /** The post-turn summary's fields that the app's record loader keeps only when each is missing or a string. */
@@ -94,25 +137,32 @@ export function parseRecord(host: string, text: string): AppRecord | null {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
 	const o = raw as Record<string, unknown>;
 	const str = (v: unknown, max = 200): string | null => (typeof v === "string" && v !== "" ? v.slice(0, max) : null);
+	const time = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+	const turn = lastTurn(o);
 	return {
 		host,
 		title: str(o.title),
 		model: str(o.model, 80),
 		effort: str(o.effort, 40),
 		permissionMode: str(o.permissionMode, 40),
-		lastFocusedAt: typeof o.lastFocusedAt === "number" && Number.isFinite(o.lastFocusedAt) ? o.lastFocusedAt : null,
+		lastFocusedAt: time(o.lastFocusedAt),
 		// Cut short like the rest: one that's cut keeps 40 characters, so it can't turn into one the indicator shows.
 		turnCategory: str(turnCategory(o), 40),
+		isArchived: o.isArchived === true,
+		lastActivityAt: time(o.lastActivityAt),
+		cwd: str(o.cwd, 1000),
+		summary: turn.summary,
+		needs: turn.needs,
 	};
 }
 
 type Known = { file: string; sig: string; record: AppRecord | null };
 
 /**
- * Reads the app's records for the sessions the registry lists. A session's file is found once, by looking in
- * every `<account>/<org>/` folder, then only stat'ed each scan and read again when it changed. A file that
- * doesn't parse keeps the last good record; one that disappears is looked for again. Only `<host>.json`
- * files of hosts that match the app's own id pattern are ever opened.
+ * Reads the app's records for the sessions the registry lists, and for the slotted ones it doesn't (src/slots/). A
+ * session's file is found once, by looking in every `<account>/<org>/` folder, then only stat'ed each scan and read
+ * again when it changed. A file that doesn't parse keeps the last good record; one that disappears is looked for
+ * again. Only `<host>.json` files of hosts that match the app's own id pattern are ever opened.
  */
 export class RecordsReader {
 	readonly #root: string;
@@ -120,6 +170,7 @@ export class RecordsReader {
 	readonly #log: Log;
 	readonly #known = new Map<string, Known>();
 	#problem: string | null = null;
+	#missing: ReadonlySet<string> = new Set();
 
 	constructor(root: string, opts: { fs?: RecordsFs; log?: Log } = {}) {
 		this.#root = root;
@@ -131,13 +182,23 @@ export class RecordsReader {
 		return this.#root;
 	}
 
+	/**
+	 * The hosts the last scan looked for that have no record file in any folder: a slot whose session the registry
+	 * doesn't list either frees on that (session-keys.md, Stay put). A file that's there but doesn't parse isn't
+	 * missing. When the scan couldn't list every folder, it can't tell, so none is missing.
+	 */
+	get missing(): ReadonlySet<string> {
+		return this.#missing;
+	}
+
 	/** The records of `hosts` that exist now. */
 	async scan(hosts: readonly string[]): Promise<Map<string, AppRecord>> {
 		const wanted = new Set(hosts.filter((h) => HOST_PATTERN.test(h)));
 		for (const host of [...this.#known.keys()]) if (!wanted.has(host)) this.#known.delete(host);
 
 		const out = new Map<string, AppRecord>();
-		let folders: string[] | null = null;
+		const missing = new Set<string>();
+		let listing: { folders: string[]; complete: boolean } | null = null;
 		for (const host of wanted) {
 			let known = this.#known.get(host) ?? null;
 			if (known && !(await this.#refresh(host, known))) {
@@ -145,17 +206,22 @@ export class RecordsReader {
 				known = null;
 			}
 			if (!known) {
-				folders ??= await this.#folders();
-				known = await this.#find(host, folders);
+				listing ??= await this.#folders();
+				known = await this.#find(host, listing.folders);
 				if (known) this.#known.set(host, known);
+				else missing.add(host);
 			}
 			if (known?.record) out.set(host, known.record);
 		}
+		this.#missing = listing === null || listing.complete ? missing : new Set();
 		return out;
 	}
 
-	/** The `<account>/<org>` folders. A missing root means no records, logged once. */
-	async #folders(): Promise<string[]> {
+	/**
+	 * The `<account>/<org>` folders, and whether every one could be listed. A missing root means no records, logged
+	 * once.
+	 */
+	async #folders(): Promise<{ folders: string[]; complete: boolean }> {
 		let accounts: string[];
 		try {
 			accounts = await this.#fs.readdir(this.#root);
@@ -163,11 +229,12 @@ export class RecordsReader {
 			const code = (err as NodeJS.ErrnoException).code ?? describeError(err);
 			if (this.#problem !== code) this.#log.warn(`can't list ${this.#root} (${code}): no app records`);
 			this.#problem = code;
-			return [];
+			return { folders: [], complete: false };
 		}
 		if (this.#problem !== null) this.#log.info(`${this.#root} is readable again`);
 		this.#problem = null;
 		const out: string[] = [];
+		let complete = true;
 		for (const account of accounts) {
 			if (account.startsWith(".")) continue;
 			const dir = path.join(this.#root, account);
@@ -176,11 +243,12 @@ export class RecordsReader {
 				if (!(await this.#fs.stat(dir)).isDirectory()) continue;
 				orgs = await this.#fs.readdir(dir);
 			} catch {
+				complete = false;
 				continue;
 			}
 			for (const org of orgs) if (!org.startsWith(".")) out.push(path.join(dir, org));
 		}
-		return out;
+		return { folders: out, complete };
 	}
 
 	async #find(host: string, folders: string[]): Promise<Known | null> {
@@ -218,16 +286,24 @@ export class RecordsReader {
 export const RECORDS_POLL_MS = 1000;
 
 /**
- * Re-reads the records of the sessions the registry lists, at once when the list changes and every second
- * after, and tells listeners when any record changed.
+ * What the watcher tells its listeners: the records that exist, by host, and the hosts it looked for that have no
+ * record file (RecordsReader's `missing`).
+ */
+export type RecordsListener = (records: Map<string, AppRecord>, missing: ReadonlySet<string>) => void;
+
+/**
+ * Re-reads the records of the sessions the registry lists, and of the slotted ones it doesn't, at once when the list
+ * changes and every second after (unchanged files are only stat'ed), and tells listeners when any record changed, or
+ * which hosts have no file.
  */
 export class RecordsWatcher {
 	readonly #reader: RecordsReader;
 	readonly #log: Log;
 	readonly #pollMs: number;
-	readonly #listeners = new Set<(records: Map<string, AppRecord>) => void>();
+	readonly #listeners = new Set<RecordsListener>();
 	#hosts: string[] = [];
 	#records = new Map<string, AppRecord>();
+	#missing: ReadonlySet<string> = new Set();
 	#json = "";
 	#timer: ReturnType<typeof setInterval> | null = null;
 	#running: Promise<void> | null = null;
@@ -243,7 +319,12 @@ export class RecordsWatcher {
 		return this.#records;
 	}
 
-	onChange(listener: (records: Map<string, AppRecord>) => void): () => void {
+	/** The hosts the last scan found no record file for. */
+	get missing(): ReadonlySet<string> {
+		return this.#missing;
+	}
+
+	onChange(listener: RecordsListener): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
 	}
@@ -292,14 +373,16 @@ export class RecordsWatcher {
 				this.#log.warn(`records scan failed: ${describeError(err)}`);
 				continue;
 			}
-			const json = JSON.stringify([...records.entries()].sort(([a], [b]) => (a < b ? -1 : 1)));
+			const missing = new Set(this.#reader.missing);
+			const json = JSON.stringify([[...records.entries()].sort(([a], [b]) => (a < b ? -1 : 1)), [...missing].sort()]);
 			if (json === this.#json) continue;
 			this.#json = json;
 			this.#records = records;
-			this.#log.debug(`${records.size} app record(s) read`);
+			this.#missing = missing;
+			this.#log.debug(`${records.size} app record(s) read${missing.size > 0 ? `; no file for ${missing.size}` : ""}`);
 			for (const listener of [...this.#listeners]) {
 				try {
-					listener(records);
+					listener(records, missing);
 				} catch (err) {
 					this.#log.error(`a listener threw: ${describeError(err)}`);
 				}

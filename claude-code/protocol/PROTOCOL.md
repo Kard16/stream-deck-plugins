@@ -23,6 +23,7 @@ Nothing else talks to the bridge, and the bridge never calls the plugin.
   - `Host: 127.0.0.1:47600` or `localhost:47600`. Anything else gets 403, before the token is looked at. That stops a web page that rebinds a DNS name to 127.0.0.1.
   - `Authorization: Bearer <token>`. Missing or wrong: 401, with `WWW-Authenticate: Bearer realm="streamdeck"`.
 - **The token** is the trimmed content of the deck plugin's `com.karimdhanji.claude.sdPlugin/run/token`, which the deck creates on first start (file `0600`, folder `0700`). The plugin reads it from the environment variable `DECK_TOKEN`. The `deck-sandbox` preset sets it for throwaway sessions, and the `env` block of `~/.claude/settings.json` sets it for the user's own (Phase 5). In a desktop session the launch environment wins key by key, so a preset's value beats the settings' (the route research, 2026-11-03). Neither side ever logs it.
+- **The token scrub:** once the bridge has parsed a body, it takes the token out of every string in it, names included. The whole token, and every run of 8 or more characters that's also part of it, become `<token>`. So nothing the deck shows or logs can carry any of it, and an `ask` request whose `tool_input` had any value or name changed is display-only ([Held requests](#held-requests)).
 - Bodies are JSON in UTF-8, at most 8 MiB (413 above). A body that isn't JSON gets 400, an unknown route 404, a wrong method 405. Error answers are `{"error": "<reason>"}`.
 - Unknown fields are ignored on both sides, so either side can add fields without a version bump. Answers to `/v1/permission` and `/v1/pretool` are the exception: Claude Code reads them, and a 2xx answer is exactly one of the bodies in [Permission requests](#permission-requests) or [Mode checks](#mode-checks). Any other status carries `{"error": "<reason>"}`, like every error answer.
 - No CORS headers.
@@ -90,15 +91,25 @@ Every mod request names its session with `sid`, `host` and `inst`: in the body, 
 
 The bridge sorts each request into one kind:
 - **mode:** `tool_name` is `mcp__ccd_session_mgmt__set_session_permission_mode`, `tool_input.session_id` is `"self"`, and the same session has a `mode` command in flight ([Commands](#commands)) whose `mode` equals `tool_input.mode`. The bridge answers Allow at once, to the first such request only: a second one for the same command is an ordinary `tool` request. Along with the mode check's allow ([Mode checks](#mode-checks)), it's the only answer the bridge gives without a key press, and a key press started both (the user's answer after S4).
-- **ask:** `tool_name` is `AskUserQuestion` or `ExitPlanMode`. Held for display only: the deck never answers it, and a press on it jumps to the session (kickoff answer 3).
+- **ask:** `tool_name` is `AskUserQuestion` or `ExitPlanMode`. Claude Code needs the person for these, so it ignores a plain Allow and takes an Allow only with `updatedInput` (the engine check, 2026-11-04). Held until the session's own Session Slot dial answers it with an Answer, an Approve plan or a Deny, or released ([Held requests](#held-requests)). The Approve and Deny keys never answer one: a press on them jumps to the session (kickoff answer 3).
 - **tool:** everything else, the app's mode tool included when no matching command is in flight. Held until Approve or Deny, or released ([Held requests](#held-requests)).
 
 Answers, all 200:
 - **Allow:** `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}`
 - **Deny:** `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "Denied from the Stream Deck.", "interrupt": true}}}`. The turn stops, as with the app's own No. Claude gets the standard rejection text, not the message (S2), but S2 verified this shape with a message, so it stays.
 - **No decision:** `{}`. The app's dialog decides.
+- **Answer,** for an `AskUserQuestion`, from its session's dial only: `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": <the answered input>}}}`.
+  - The answered input is the request's `tool_input` exactly as it came, with one key added: `answers`, an object from each question's `question` to its answer. Every question gets one.
+  - A single-select answer is the chosen option's `label`.
+  - A multi-select answer is the chosen labels in the order of `options`, joined with `", "`. A label that holds `", "` or `"` is written as a JSON string (`JSON.stringify`), as Claude Code joins its own.
+  - Claude then reads `Your questions have been answered: "<question>"="<answer>". You can now continue with these answers in mind.` (T5), and the app's form closes.
+- **Approve plan,** for an `ExitPlanMode`, from its session's dial only: `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": <the request's tool_input, unchanged>, "updatedPermissions": [{"type": "setMode", "mode": <mode>, "destination": "session"}]}}}`.
+  - `<mode>` is `auto`, `acceptEdits` or `default`. The session leaves Plan mode into it, as when the app's own card approves, and the app's card closes (T6).
+  - `destination` is always `session`: the others write settings files.
+  - `tool_input` is `{}` when Claude wrote no plan file, and `{plan, planFilePath}` when it did. Either way it goes back unchanged: Claude Code writes a changed `plan` to the plan file.
+- A dial **rejects a plan with Deny,** which stops the turn. The user then says in the app what to change.
 
-Every answer is exactly one of these three bodies. The deck never sends `updatedPermissions` or `updatedInput`, never adds a field inside `hookSpecificOutput`, and never sends Claude Code's own top-level hook fields (`continue`, `stopReason`, `decision`, `reason`, `systemMessage`, `suppressOutput`).
+Every answer is exactly one of these five bodies. The deck sends `updatedInput` only in an Answer or an Approve plan, and `updatedPermissions` only in an Approve plan. An `updatedInput` that fails the tool's schema becomes a deny, and the question or plan is lost, so the deck echoes `tool_input` as it came and adds only `answers`. The deck never adds another field inside `hookSpecificOutput`, and never sends Claude Code's own top-level hook fields (`continue`, `stopReason`, `decision`, `reason`, `systemMessage`, `suppressOutput`).
 
 ## Mode checks
 
@@ -121,6 +132,16 @@ Every 2xx answer is exactly one of these two bodies. The bridge never denies or 
 
 - A held request belongs to a session, and has its kind, `tool`, `summary` and `fp` ([Fingerprints and summaries](#fingerprints-and-summaries)) and the time it arrived. The bridge holds any number, from any number of sessions.
 - **Approve and Deny** act on the oldest held request across all sessions, and only on the one the key showed when pressed (S6). The request must have been on the key for 1 s, timed from its first paint, or from the key's last OK or alert if that came later. An earlier press alerts and answers nothing, so a double press can't answer a request nobody has seen. On a `tool` request, Approve answers Allow and Deny answers Deny. On an `ask` request, either press jumps to its session and answers nothing; the key reads "Answer in app", and the press shows the OK.
+- **A Session Slot dial** acts on its own session's oldest held request, of any kind: Allow or Deny for a `tool` request, an Answer for an AskUserQuestion, an Approve plan or a Deny for an ExitPlanMode.
+  - It answers only the request its strip showed when pressed, once that request has been on the strip for 1 s, timed from its first paint there, or from the strip's last alert or answer if that came later.
+  - It sends only the choice its strip showed: the chip, or the question and the place on its list, once that has been on the strip for 300 ms. A turn just before a push can't send a choice nobody saw.
+  - An earlier press alerts and answers nothing.
+  - The keys and the dials answer the same requests, and the first answer wins: a press for a request that has gone alerts and answers nothing. Its strip moves on to the session's next request, or back to its pages. Until it shows a newer request, and for at most 1 s, a press on it alerts rather than jumping or answering. Once the strip shows the session's next request, a press acts on that one, under the rules above (`dial-next`).
+- **A held `ask` request keeps its `tool_input`** when its JSON, as UTF-8 bytes of `JSON.stringify`, is at most 64 KiB, so the dial can show it and echo it back. The dial shows "Answer in app", and a press jumps, for:
+  - one over that;
+  - one where the bridge's token scrub ([Transport](#transport)) changed any value or name in its `tool_input`, since it couldn't go back as it came. This reason comes before the others;
+  - an ExitPlanMode whose `tool_input` isn't an object;
+  - an AskUserQuestion whose form the deck can't read: no `questions` array, or an empty one; a question that isn't an object, or whose `question` isn't a non-empty string or repeats another's; a `header` that's there but not a string; a `multiSelect` that's there but not a boolean; `options` that isn't a non-empty array; an option that isn't an object, or whose `label` isn't a non-empty string or repeats another's; a `description` that's there but not a string. A missing `multiSelect` is single-select, and other fields go back unchanged.
 - **Answering in the app doesn't end the hook's request** (S2), so the bridge releases a held request with `{}` at the first of:
   1. The mod reports `tool.end` with the same `fp`, from the same session. Each `tool.end` releases one request, the session's oldest with that `fp`, and a subagent's counts too.
   2. The registry shows the session leaving `waiting`, and this is the session's only held request, held from before that change. That means it arrived before the new status's `statusUpdatedAt`, or, without that field, before the deck saw the change.
@@ -184,7 +205,7 @@ The Saved Prompt key shows waiting, sent (`done`) or refused (`refused` or `fail
 | `tool.end` | `tool`, `use`, `agent`?, `fp`, `ok`, `denied`? | `tool.call`, after `next` | The call ended: it ran (`ok` is false if it errored), or it was refused (`denied` holds the reason, and `ok` is false). |
 | `measure` | `context: {percent?, tokens?, window}`, `cost`?: `{usd}` | `session.measure` | Context use or cost changed. `percent` and `tokens` are missing until the engine has them. |
 | `settings` | `model`?, `mode`?, `effort`? | `$.session.model()` after each main-loop turn and once each hello is answered; `permission_mode` and `effort.level` in the main loop's classic UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop and StopFailure inputs; a finished mode command | One of them changed. Only the changed fields are sent, and `mode` always after a finished mode command. |
-| `attach`, `detach` | `surface` | `session.attach`, `session.detach` | The session came on screen in the app, or left it (S3). |
+| `attach`, `detach` | `surface` | `session.attach`, `session.detach` | The session came on screen in the app, or left it (S3). The deck counts only `surface` `desktop`, the app's own: another client, a phone say, coming or going changes nothing for it. |
 | `end` | `reason` | `session.end` | The session is ending. With reason `clear`, only its conversation was cleared: the mod carries on under the new `sid` with the same `inst`. The deck takes a session's end from the registry, never from this event. |
 
 `use` is the engine's `tool_use_id`. `tool` is the name a PermissionRequest would carry: `mcp__<server>__<tool>` for MCP tools.
@@ -254,7 +275,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 
 **Context %:** the latest `measure`.
 
-**The target session** for prompts and mode is the one last picked on the Sessions dial. If it ends, it stays the target, and presses alert until another is picked: a prompt never goes to a session the user didn't pick. Until one is picked, it's the session most recently on screen in the app. For each session, that's the later of its latest `attach` (when the deck got it) and its record's `lastFocusedAt`. That refines kickoff answer 4 with S3's finding.
+**The target session** for prompts and mode is the one last picked on the Sessions dial. If it ends, it stays the target, and presses alert until another is picked: a prompt never goes to a session the user didn't pick. Until one is picked, it's the session most recently on screen in the app. For each session, that's the later of its latest desktop `attach` (when the deck got it) and its record's `lastFocusedAt`. That refines kickoff answer 4 with S3's finding.
 
 ## Failure and recovery
 
@@ -341,7 +362,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 | `{"engine": {"call": "<$ call>", "args": {...}, "returns": {...}}}` | The plugin side's fake `$` answers the mod's next call of that name with `returns`, after checking `args`. `prompt.submit` takes its one argument as `args`; `mcp.call` takes `{server, tool, args}`. |
 | `{"plugin": {"as"?: "<label>", "method", "path", "headers"?, "body"?, "raw"?}}` | A request the plugin sends. The plugin side checks the mod sent it; the deck side sends it to the bridge. `raw` is a body sent as is. |
 | `{"reply": {"to": "<label>", "status", "body"?}}` | The bridge's answer to the labeled request. |
-| `{"press": {...}}` | The user presses something on the deck: `{"approve": {}}`, `{"deny": {}}`, `{"prompt": {"session": "<host>", "text": "..."}}` or `{"mode": {"session": "<host>", "mode": "..."}}`. Approve and Deny press whatever the key shows. |
+| `{"press": {...}}` | The user presses something on the deck: `{"approve": {}}`, `{"deny": {}}`, `{"prompt": {"session": "<host>", "text": "..."}}`, `{"mode": {"session": "<host>", "mode": "..."}}`, or a Session Slot dial's `{"dial": {"session": "<host>", ...}}` with `"picks": {"<question>": ["<label>", ...]}`, `"decision": "allow" \| "deny"` or `"plan": "auto" \| "acceptEdits" \| "default" \| "reject"`. Approve and Deny press whatever the key shows. A dial line picks those with turns and presses on that session's dial and sends them, for the request its strip showed last; a runner first gives the session a slot if it has none. If that request has gone and nothing newer shows, the press alerts. |
 | `{"registry": {"pid", ...}}` | A registry file changes: the given fields are set, and `{"gone": true}` deletes the file. A line for a file that's gone writes it anew, with `pid` and the given fields. |
 | `{"expect": {...}}` | The deck's state now. `sessions`: the hosts the deck lists (exact, any order). `held`: the held requests, oldest first, each `{host, tool, kind, summary}` (exact list, partial objects). `status`: `{host: status}`. `doing`: `{host: summary}` of the current tool, `null` for none. `context`: `{host: percent}`. `settings`: `{host: {model, effort, mode}}`, partial. `cmds`: `{label: state}` of commands, where a queued but undelivered one is `queued`. `jumped`: the `host` the last press jumped to. `alert`: whether the last press alerted. |
 
@@ -361,12 +382,12 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 - It gives the deck a wall clock that follows the registry's times in the fixture. These are absolute around T0 = 1793600000000 (2026-11-02T06:13:20Z). The clock starts at the setup's `statusUpdatedAt` and moves up to each registry line's.
   - Release rules 2 and 3 and status rule 3 compare arrival times on that clock with `statusUpdatedAt`. An event's `at` is the mod's clock and plays no part.
   - A fake bridge may judge all three by what it saw instead.
-- It turns off the deck's 1 s wait before a press counts, since a fixture's press is a deliberate press on what the key shows.
+- It turns off the deck's 1 s wait before a press counts, and a dial's 300 ms wait for the choice its strip shows, since a fixture's press is a deliberate press on what the key or the strip shows. A dial's press for a request that has gone keeps alerting until its strip shows a newer one.
 - A runner that plays fixtures to a deck it didn't reset binds each fixture `inst` to a fresh one per play, or the deck drops the replay's events as retries.
 
 **Matching:**
 - Every field of an expected object must be present and equal; extra fields are allowed. `"*"` matches any value. Arrays match when they have the same length and each element matches, in order.
-- Answers to `/v1/permission` and `/v1/pretool` are checked more strictly. An expected `{}` means no decision, so the answer must have no `hookSpecificOutput`. Every 2xx answer, whatever the line expects, must be one of the bodies its route allows: the three in [Permission requests](#permission-requests), or the two in [Mode checks](#mode-checks). Any other status on any route must carry `{"error": "<reason>"}`, as [Transport](#transport) says.
+- Answers to `/v1/permission` and `/v1/pretool` are checked more strictly. An expected `{}` means no decision, so the answer must have no `hookSpecificOutput`. Every 2xx answer, whatever the line expects, must be one of the bodies its route allows: the five in [Permission requests](#permission-requests), or the two in [Mode checks](#mode-checks). An Answer or an Approve plan must equal the expected body exactly, `updatedInput` included. Any other status on any route must carry `{"error": "<reason>"}`, as [Transport](#transport) says.
 - A `path` with a query matches when the route is equal and each listed parameter is present and equal; other parameters may be there too.
 - `at` is never compared. The plugin side binds the mod's real `inst` to the fixture's at its first appearance.
 - Command ids are `"c1"`, `"c2"`… The deck side binds the deck's real id to the fixture's name at its first appearance in a `reply`, and uses the real one from then on.
@@ -467,3 +488,21 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 1. **When the current instance stops polling, the deck remembers which instances have said hello.** While none is current, any instance's hello makes its own current, which isn't a restart; from then on the others don't count. Round 3's review found that forgetting them let a live predecessor's later hello take the session back as a restart, failing the live mod's commands for another minute. (Identity)
 2. **No hello replaces a `mode` or `effort` the deck took from a PermissionRequest.** Round 3's review found a hello putting back an older mode after the 60 s, and after a deck restart when a PermissionRequest came before the mod's first hello. The Mode dial's press without a turn applies the mode it shows. (The deck's session model)
 3. **Wording:** the bullet on instances that don't count said that the hello of one that hasn't said hello before changes nothing. While another is current, that hello is a restart, as the bullet before it says and the deck has always done. (Identity)
+
+**2026-11-04, session keys** (Phase 7, `docs/claude-code/session-keys.md`; nothing changes for the plugin, so `v` stays 1):
+1. **A Session Slot dial answers its own session's requests:** Allow or Deny for a tool, an Answer for a question, an Approve plan or a Deny for a plan. The Approve and Deny keys don't change. The user asked for it on 2026-11-04. (Permission requests, Held requests)
+2. **Two new answer bodies, Answer and Approve plan.** Claude Code needs the person for AskUserQuestion and ExitPlanMode, so it ignores a plain Allow for them: T5's plan stayed on the app's card. It honours an Allow with `updatedInput`, then cancels the app's request, and the app removes its card (the engine check). T5 checked the Answer live with one question and with two, one of them multi-select. T6 checked Approve plan into Accept edits and into Auto, a Deny with feedback that kept Claude planning, and an Allow with no `setMode`, which went back to the mode from before Plan. (Permission requests)
+3. **A held `ask` request keeps its `tool_input`,** up to 64 KiB. (Held requests)
+4. **Fixtures:**
+   - Dial `press` lines, and strict matching of the new bodies.
+   - New: `answer-question`, `answer-questions`, `dial-gone`, `dial-next`, `dial-approve`, `plan-approve` and `plan-reject`, 26 in all.
+   - `answer-questions` picks out of option order and has a label that holds a double quote, so both runners check the whole join rule.
+   - `needs-you` keeps the keys' jump.
+   - (Fixtures)
+5. **A dial sends only the choice its strip showed,** once it has shown 300 ms. The deck's review found that a tick just before a push could send a choice the strip never showed, such as Allow when Deny was on screen. (Held requests)
+6. **A request answered elsewhere blocks its dial only while nothing newer shows.**
+   - The deck kept the block for 1 s even after its strip showed the session's next request. Its fixture runner holds the clock still, so there the block lasted to the end of the fixture. The fake deck acted on the next request at once, so the two runners differed (`dial-next`).
+   - On the device, the 1 s from the next request's first paint already guarded every send. The change reaches only the presses that rule doesn't guard: a jump, a pick that moves on, a tick, Next and Other….
+   - (Held requests, Fixtures)
+7. **Display-only asks:** the AskUserQuestion forms the deck can't read are listed, and the two sides now agree on them. An `ask` whose `tool_input` the token scrub changed is display-only, so an echo is always exact. (Transport, Held requests)
+8. **Only the desktop app's `attach` and `detach` count.** The mods API sends them per client, so a phone leaving a session would have hidden it from a desktop that still shows it. (Events, The deck's session model)

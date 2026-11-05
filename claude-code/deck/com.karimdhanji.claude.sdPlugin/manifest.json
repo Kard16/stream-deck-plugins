@@ -2,9 +2,9 @@
 	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 	"UUID": "com.karimdhanji.claude",
 	"Name": "Claude Code",
-	"Version": "0.3.3.0",
+	"Version": "0.4.0.0",
 	"Author": "Karim Dhanji",
-	"Description": "Claude Code desktop sessions on the dials and keys: session status and jump, approvals, saved prompts and mode.",
+	"Description": "Live status for Claude Code desktop sessions, with a key and a dial for each session, answers to questions, plans and approvals, saved prompts and mode changes.",
 	"Category": "Claude Code",
 	"CategoryIcon": "imgs/plugin/category-icon",
 	"Icon": "imgs/plugin/icon",
@@ -151,6 +151,49 @@
 			"States": [
 				{
 					"Image": "imgs/actions/session/key"
+				}
+			]
+		},
+		{
+			"UUID": "com.karimdhanji.claude.slot",
+			"Name": "Session Slot",
+			"Tooltip": "One session per key: its state, title, context and what it's doing. Press to jump to it; hold to put the session on screen in the app on this key. On a dial, the session on the key above: turn to page or pick, press or tap to jump or send.",
+			"Icon": "imgs/actions/slot/icon",
+			"Controllers": [
+				"Keypad",
+				"Encoder"
+			],
+			"SupportedInMultiActions": false,
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/slot/key"
+				}
+			],
+			"Encoder": {
+				"layout": "layouts/slot-empty.json",
+				"Icon": "imgs/actions/slot/encoder",
+				"TriggerDescription": {
+					"Rotate": "Page details or pick an answer",
+					"Push": "Jump, or send the answer",
+					"Touch": "Jump, or send the answer",
+					"LongTouch": "Back a step"
+				}
+			}
+		},
+		{
+			"UUID": "com.karimdhanji.claude.others",
+			"Name": "Other Sessions",
+			"Tooltip": "How many sessions on no Session Slot need you. Press to jump to the one that has waited longest.",
+			"Icon": "imgs/actions/others/icon",
+			"Controllers": [
+				"Keypad"
+			],
+			"SupportedInMultiActions": false,
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/others/key"
 				}
 			]
 		}

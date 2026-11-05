@@ -12,13 +12,15 @@ export type Sources = { registry: RegistryWatcher; records: RecordsWatcher; mode
 /**
  * The session model and the two folders it reads, wired as the plugin runs them (src/plugin.ts), so tests run the
  * same wiring:
- * - each registry reading goes to the model, and the hosts it lists to the records watcher, which reads their new
- *   records at once;
- * - each change to the records goes to the model;
+ * - each registry reading goes to the model, and the hosts whose records it reads to the records watcher, which
+ *   reads their new records at once: the hosts the registry lists, and the slotted ones it doesn't (the model's
+ *   keepHosts), whenever those change;
+ * - each change to the records goes to the model, with the hosts that have no record file;
  * - a hook's request or a hello that the model's latest reading doesn't confirm has the registry read once more,
  *   through the same watcher, at once rather than at its next scan (PROTOCOL.md, Desktop sessions only).
  *
- * Nothing is read until the caller starts the watchers or scans, and the caller stops them.
+ * Nothing is read until the caller starts the watchers or scans, and the caller stops them. The front-app check for
+ * `seen` comes with `model.front` (front.ts's lsappinfoCheck in the plugin); without it, nothing is spawned.
  */
 export function connectSources(opts: {
 	registryDir: string;
@@ -36,6 +38,8 @@ export function connectSources(opts: {
 		model.setRegistry(sessions);
 		records.setHosts(model.hosts());
 	});
-	records.onChange((recs) => model.setRecords(recs));
+	// The slotted hosts change with the slots, not the registry. setHosts does nothing while the list is the same.
+	model.onChange(() => records.setHosts(model.hosts()));
+	records.onChange((recs, missing) => model.setRecords(recs, missing));
 	return { registry, records, model };
 }

@@ -153,7 +153,7 @@ describe("Sessions dial", () => {
 	});
 
 	test("strip details: no context hides the bar; a full context turns it orange; names and models", () => {
-		const view = { key: "local_1", host: "local_1", pid: "1", title: "T", status: "idle" as const, doing: null, context: null, model: null, effort: null, mode: null, plugin: false, listed: true };
+		const view = { key: "local_1", host: "local_1", pid: "1", title: "T", status: "idle" as const, doing: null, context: null, model: null, effort: null, mode: null, plugin: false, listed: true, running: true, need: null, since: null, seen: null, tokens: null, window: null, cost: null, summary: null, needs: null, project: null, startedAt: null, archived: false };
 		assert.deepEqual(sessionsStrip(view, 0, 1, false).bar, { value: 0, opacity: 0, bar_fill_c: STRIP_COLORS.fill });
 		assert.equal(sessionsStrip({ ...view, context: 91.6 }, 0, 1, true).bar.bar_fill_c, STRIP_COLORS.full);
 		assert.equal(sessionsStrip({ ...view, context: 91.6 }, 0, 1, true).ctx.value, "92%");
@@ -286,7 +286,7 @@ describe("strip layouts (com.karimdhanji.claude.sdPlugin/layouts)", () => {
 
 	// streamdeck validate doesn't catch a strip key missing from its layout, or live data in the app's own keys.
 	test("each strip fills exactly its layout's keys, none of them the app's own title or icon", () => {
-		const view = { key: "local_1", host: "local_1", pid: "1", title: "T", status: "idle" as const, doing: null, context: 50, model: null, effort: null, mode: "plan", plugin: true, listed: true };
+		const view = { key: "local_1", host: "local_1", pid: "1", title: "T", status: "idle" as const, doing: null, context: 50, model: null, effort: null, mode: "plan", plugin: true, listed: true, running: true, need: null, since: null, seen: null, tokens: null, window: null, cost: null, summary: null, needs: null, project: null, startedAt: null, archived: false };
 		const cases: [string, string[]][] = [
 			["sessions.json", Object.keys(sessionsStrip(view, 0, 1, true))],
 			["sessions.json", Object.keys(sessionsStrip(null, 0, 0, false))],

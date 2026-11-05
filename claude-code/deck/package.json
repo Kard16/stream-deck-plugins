@@ -1,8 +1,8 @@
 {
   "name": "claude-deck",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "private": true,
-  "description": "Stream Deck + plugin for Claude Code desktop sessions: it hosts the bridge (claude-code/protocol/PROTOCOL.md), with session status and jump, approvals, saved prompts and mode",
+  "description": "Stream Deck + plugin for Claude Code desktop sessions: it hosts the bridge (claude-code/protocol/PROTOCOL.md), with a key and a dial for each session, session status and jump, approvals, saved prompts and mode",
   "type": "module",
   "scripts": {
     "build": "rollup -c",

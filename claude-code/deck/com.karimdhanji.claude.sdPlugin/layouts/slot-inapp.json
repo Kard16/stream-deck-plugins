@@ -1,0 +1,56 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+	"id": "com.karimdhanji.claude.slot-inapp",
+	"items": [
+		{
+			"key": "head",
+			"type": "text",
+			"rect": [8, 2, 148, 24],
+			"value": "",
+			"alignment": "left",
+			"color": "#F2C94C",
+			"font": { "size": 17, "weight": 700 },
+			"text-overflow": "ellipsis"
+		},
+		{
+			"key": "since",
+			"type": "text",
+			"rect": [158, 2, 34, 24],
+			"value": "",
+			"alignment": "right",
+			"color": "#A7ADB8",
+			"font": { "size": 13, "weight": 600 }
+		},
+		{
+			"key": "line1",
+			"type": "text",
+			"rect": [8, 28, 184, 19],
+			"value": "",
+			"alignment": "left",
+			"color": "#E8E8E8",
+			"font": { "size": 14, "weight": 500 },
+			"text-overflow": "ellipsis"
+		},
+		{
+			"key": "line2",
+			"type": "text",
+			"rect": [8, 48, 184, 19],
+			"value": "",
+			"alignment": "left",
+			"color": "#A7ADB8",
+			"font": { "size": 14, "weight": 500 },
+			"text-overflow": "ellipsis"
+		},
+		{
+			"key": "chip",
+			"type": "text",
+			"rect": [8, 70, 184, 28],
+			"value": "",
+			"alignment": "center",
+			"color": "#FFFFFF",
+			"font": { "size": 15, "weight": 700 },
+			"text-overflow": "ellipsis",
+			"background": "#7A5A12"
+		}
+	]
+}

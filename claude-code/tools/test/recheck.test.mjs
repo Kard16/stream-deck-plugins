@@ -36,7 +36,7 @@ function record(i, over = {}) {
     sessionId: `local_secret-${i}`, cliSessionId: `cli-secret-${i}`, title: `Secret record ${i}`, model: 'claude-haiku-5-5', effort: 'low',
     permissionMode: 'default', lastFocusedAt: T0 + i, lastAssistantUuid: `uuid-secret-${i}`, postTurnSummaryFor: `uuid-secret-${i}`,
     postTurnSummary: { status_category: 'completed', status_detail: 'Secret detail', needs_action: 'Secret action' },
-    turnWrapUp: { description: 'Secret wrap-up' }, ...over,
+    turnWrapUp: { description: 'Secret wrap-up' }, isArchived: false, lastActivityAt: T0 + 10 + i, cwd: `/Users/someone/secret-${i}`, ...over,
   }
 }
 
@@ -386,9 +386,9 @@ test('recheck: the records are ok with every field the deck reads, sparse ones m
 
 test('recheck: record fields of another type, a mode the deck has no name for, odd file names or a summary for an older message warn', async (t) => {
   const f = fixture(t)
-  writeRecord(f, 1, record(1, { turnWrapUp: { description: 5 }, postTurnSummaryFor: 'uuid-older' }))
-  writeRecord(f, 2, record(2, { permissionMode: 'yolo', lastFocusedAt: 'yesterday', postTurnSummaryFor: 'uuid-older' }))
-  writeRecord(f, 3, record(3, { title: '', postTurnSummary: { status_category: null }, postTurnSummaryFor: 'uuid-older' }))
+  writeRecord(f, 1, record(1, { turnWrapUp: { description: 5 }, postTurnSummaryFor: 'uuid-older', isArchived: 'no' }))
+  writeRecord(f, 2, record(2, { permissionMode: 'yolo', lastFocusedAt: 'yesterday', postTurnSummaryFor: 'uuid-older', cwd: '' }))
+  writeRecord(f, 3, record(3, { title: '', postTurnSummary: { status_category: null }, postTurnSummaryFor: 'uuid-older', lastActivityAt: undefined }))
   fs.writeFileSync(path.join(f.orgDir, 'local_secret!.json'), '{}')
   fs.writeFileSync(path.join(f.orgDir, 'local_secret-4.json'), '{"title": "Secret half-wri')
 
@@ -404,9 +404,16 @@ test('recheck: record fields of another type, a mode the deck has no name for, o
     'records.turnWrapUp': 'warn',
     'records.title': 'warn',
     'records.lastFocusedAt': 'warn',
+    'records.isArchived': 'warn',
+    'records.lastActivityAt': 'warn',
+    'records.cwd': 'warn',
     'records.summary-for-last': 'warn',
     'records.lookup': 'warn',
   })
+  // Phase 7's: a slot's archive, the seen fallback after a deck restart, and a slotted session's project.
+  assert.match(byId(rows, 'records.isArchived').reason, /^2\/3 boolean; 1 string\. A Session Slot keeps its session/)
+  assert.match(byId(rows, 'records.lastActivityAt').reason, /^2\/3 number; 1 missing\. With no turn end seen/, 'in every record: one without it warns')
+  assert.match(byId(rows, 'records.cwd').reason, /^2\/3 non-empty string; 1 empty string\. The project/)
   assert.match(byId(rows, 'records').reason, /^3 records in 1 account\/org folder of .*; 1 more didn't parse as a JSON object .*; 1 local_\*\.json whose id the deck's HOST_PATTERN refuses$/)
   assert.match(byId(rows, 'records.permissionMode').reason, /^2\/3 mode name: default 2; 1 mode the deck has no name for\. /)
   assert.match(byId(rows, 'records.turnWrapUp').reason, /^2\/3 object with a string description; 1 object without a string description\. /)
@@ -730,13 +737,13 @@ test('recheck: the command prints a table or JSON, exits 0 when nothing fails an
   assert.doesNotMatch(r.out, /mods API:/)
   assert.match(r.out, /^ok\s+bundle: summary loader\s+/m)
   assert.match(r.out, /^ok\s+engine: refused \$\.mcp\.call\s+\$\.mcp\.call\(<server>, <tool>\) refused: <reason> ×1, as the mod reads it$/m)
-  assert.match(r.out, /\n\n30 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
+  assert.match(r.out, /\n\n33 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
 
   r = await cli([...flags(f), '--skip-plugin', '--json'], { env: { HOME: f.root } })
   assert.equal(r.code, 0)
   const j = JSON.parse(r.out)
   assert.equal(j.ok, true)
-  assert.deepEqual(j.summary, { ok: 30, warn: 0, fail: 0 })
+  assert.deepEqual(j.summary, { ok: 33, warn: 0, fail: 0 })
   assert.deepEqual(j.skipped, ['mods'])
   assert.equal(j.paths.sessions, '~/sessions', 'paths under HOME read ~')
   assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle', 'engine'])
@@ -782,7 +789,7 @@ test('recheck: the command runs check 5 too, keeps DECK_TOKEN from Claude Code a
   r = await cli([...flags(f), '--repo', repo], { env: { HOME: f.root, TMPDIR: f.tmp } })
   assert.equal(r.code, 1)
   assert.match(r.out, /^fail\s+mods API: plugin test\s+2\.1\.309 failed \(exit 1\): 1 of 2 failed/m)
-  assert.match(r.out, /\n31 ok, 0 warn, 1 fail\n$/)
+  assert.match(r.out, /\n34 ok, 0 warn, 1 fail\n$/)
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 

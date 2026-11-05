@@ -25,8 +25,12 @@ export type RouteAnswer = { status: number; body?: unknown; logged?: boolean };
  * the request.
  */
 export interface BridgeRoutes {
-	/** `POST /v1/permission`: the hook's input, and the `X-Deck-Host` header as sent. */
-	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void>;
+	/**
+	 * `POST /v1/permission`: the hook's input, and the `X-Deck-Host` header as sent. `inputScrubbed`: the token scrub
+	 * changed something inside the body's `tool_input` (scrubJson), so that input as it came is gone, and an `ask`
+	 * request is display-only (PROTOCOL.md, Held requests).
+	 */
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply, inputScrubbed: boolean): void | Promise<void>;
 	/** `POST /v1/pretool`: the mode hook's input, and the `X-Deck-Host` header as sent. Answered, never held. */
 	pretool(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void>;
 	hello(body: Obj): RouteAnswer | Promise<RouteAnswer>;
@@ -300,13 +304,14 @@ export class BridgeServer {
 					// on a key, a line in the log) can carry part of it. It's taken out after parsing, since a run of the
 					// token's digits in the raw text could be part of a number. It can't fail on a body that parsed,
 					// however long its strings or deep its nesting, so a valid body never gets 400 for it; were it to
-					// throw all the same, the guard answers 500 and the bridge carries on.
-					const body = scrubJson(parsed, this.#scrubber);
+					// throw all the same, the guard answers 500 and the bridge carries on. A PermissionRequest whose
+					// tool_input it changed goes to the route flagged: that input can't go back as it came.
+					const { body, inputScrubbed } = scrubJson(parsed, this.#scrubber);
 					if (hook) {
 						const header = req.headers["x-deck-host"];
 						const deckHost = typeof header === "string" ? header : undefined;
 						const held = this.#heldReply(req, res);
-						return target === ROUTES.permission ? routes.permission(body, deckHost, held) : routes.pretool(body, deckHost, held);
+						return target === ROUTES.permission ? routes.permission(body, deckHost, held, inputScrubbed) : routes.pretool(body, deckHost, held);
 					}
 					const obj = body as Obj;
 					const answer = target === ROUTES.hello ? routes.hello(obj) : target === ROUTES.events ? routes.events(obj) : routes.result(obj);
@@ -403,28 +408,50 @@ function methodFor(target: string): "GET" | "POST" | undefined {
 }
 
 /**
- * A parsed body with the token taken out of every string in it, names included (see Scrubber). The body is
+ * A parsed body with the token taken out of every string in it, names included (see Scrubber), and whether that
+ * changed anything inside the body's own `tool_input`, the input itself included when it's a string: a value or a
+ * name at any depth (`inputScrubbed`). A change anywhere else, a transcript path say, doesn't count. The body is
  * changed in place, since nothing else holds it, and walked from a list of the objects and arrays still to visit
  * rather than by recursion, so no depth of nesting can overflow the stack.
  */
-function scrubJson(body: unknown, scrubber: Scrubber): unknown {
-	if (typeof body === "string") return scrubber.scrub(body);
+function scrubJson(body: unknown, scrubber: Scrubber): { body: unknown; inputScrubbed: boolean } {
+	if (typeof body === "string") return { body: scrubber.scrub(body), inputScrubbed: false };
+	let inputScrubbed = false;
+	// Beside each object or array still to visit, whether it's the body's tool_input or inside it.
 	const todo: unknown[] = [body];
+	const inInput: boolean[] = [false];
 	while (todo.length > 0) {
 		const value = todo.pop();
+		const inside = inInput.pop() === true;
 		if (Array.isArray(value)) {
 			for (let i = 0; i < value.length; i++) {
 				const v: unknown = value[i];
-				if (typeof v === "string") value[i] = scrubber.scrub(v);
-				else if (typeof v === "object" && v !== null) todo.push(v);
+				if (typeof v === "string") {
+					const s = scrubber.scrub(v);
+					if (inside && s !== v) inputScrubbed = true;
+					value[i] = s;
+				} else if (typeof v === "object" && v !== null) {
+					todo.push(v);
+					inInput.push(inside);
+				}
 			}
 		} else if (isObj(value)) {
 			let renamed = false;
 			for (const k of Object.keys(value)) {
 				const v = value[k];
-				if (typeof v === "string") value[k] = scrubber.scrub(v);
-				else if (typeof v === "object" && v !== null) todo.push(v);
-				if (scrubber.scrub(k) !== k) renamed = true;
+				const input = inside || (value === body && k === "tool_input");
+				if (typeof v === "string") {
+					const s = scrubber.scrub(v);
+					if (input && s !== v) inputScrubbed = true;
+					value[k] = s;
+				} else if (typeof v === "object" && v !== null) {
+					todo.push(v);
+					inInput.push(input);
+				}
+				if (scrubber.scrub(k) !== k) {
+					renamed = true;
+					if (inside) inputScrubbed = true;
+				}
 			}
 			if (!renamed) continue;
 			// The names go back in their order, each defined as JSON.parse defines it, so a "__proto__" among them
@@ -434,7 +461,7 @@ function scrubJson(body: unknown, scrubber: Scrubber): unknown {
 			for (const [k, v] of entries) Object.defineProperty(value, scrubber.scrub(k), { value: v, writable: true, enumerable: true, configurable: true });
 		}
 	}
-	return body;
+	return { body, inputScrubbed };
 }
 
 /** Reads a request body as UTF-8, failing with TooLarge past `max` bytes, or with the error if the client aborts. */

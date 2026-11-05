@@ -20,7 +20,7 @@ const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","
 const DENY_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from the Stream Deck.","interrupt":true}}}';
 
 function req(tool: string, fields: Partial<Omit<Held, "id">> = {}): Omit<Held, "id"> {
-	return { at: 1000, host: "local_a", tool, kind: "tool", summary: tool, fp: "00000000", ...fields };
+	return { at: 1000, host: "local_a", tool, kind: "tool", summary: tool, fp: "00000000", ask: null, ...fields };
 }
 
 describe("held requests", () => {

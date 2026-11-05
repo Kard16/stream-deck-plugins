@@ -97,6 +97,19 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
     [['bogus'], /unknown command bogus/],
     [['state', '--url', 'not a url'], /--url not a url isn't a URL/],
     [['state', '--port', 'x'], /--port must be a whole number/],
+    // The dial's presses: a host, then allow or deny, plan and its choice, or picks and its JSON, and at most an id.
+    [['dial'], /^fake-bridge: dial takes <host> allow\|deny \[<id>\], <host> plan auto\|acceptEdits\|default\|reject \[<id>\] or <host> picks <json> \[<id>\]$/],
+    [['dial', 'local_x'], /dial takes <host> allow\|deny/],
+    [['dial', 'local_x', 'approve'], /dial takes <host> allow\|deny/],
+    [['dial', 'local_x', 'allow', 'p1', 'p2'], /dial allow takes the host, then at most the id/],
+    [['dial', 'local_x', 'plan'], /dial plan takes one of auto, acceptEdits, default, reject/],
+    [['dial', 'local_x', 'plan', 'plan'], /dial plan takes one of/],
+    [['dial', 'local_x', 'plan', 'auto', 'p1', 'p2'], /dial plan takes one of/],
+    [['dial', 'local_x', 'picks'], /dial picks takes a JSON object/],
+    [['dial', 'local_x', 'picks', '{"Q?": ["A"]', 'p1'], /dial picks: \{"Q\?": \["A"\] isn't JSON/],
+    [['dial', 'local_x', 'picks', '[["A"]]'], /dial picks: \[\["A"\]\] isn't an object from each question's text to a list of labels/],
+    [['dial', 'local_x', 'picks', '{"Q?": "A"}'], /isn't an object from each question's text/],
+    [['dial', 'local_x', 'picks', '{"Q?": ["A"]}', 'p1', 'p2'], /dial picks takes a JSON object/],
   ]
   for (const [args, why] of cases) {
     r = await run(BRIDGE, [...args, '--token-file', missing], { env: home })
@@ -105,14 +118,14 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
   }
 })
 
-test('cli: fake-claude --against-fake plays all 19 fixtures against the fake bridge\'s own CLI', async (t) => {
+test('cli: fake-claude --against-fake plays all 26 fixtures against the fake bridge\'s own CLI', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
   const r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile], { env: home })
   assert.equal(r.code, 0, `${r.out}${r.err}`)
-  assert.match(r.out, /19 passed, 0 failed \(against-fake\)/)
-  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 19)
+  assert.match(r.out, /26 passed, 0 failed \(against-fake\)/)
+  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 26)
 
   const one = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, '--verbose', 'two-held'], { env: home })
   assert.equal(one.code, 0, one.out)
@@ -234,13 +247,18 @@ test('cli: the control commands', async (t) => {
   assert.equal(r.code, 0, r.out)
   assert.equal((await bash.answer).json.hookSpecificOutput.decision.behavior, 'deny')
 
-  // answer never answers an ask request: the deck doesn't, and a press on one jumps.
+  // answer never answers an ask request: only its session's dial does, and a key press on one jumps.
   const ask = hold('AskUserQuestion', { questions: [{ question: 'Red or blue?' }] })
   await sleep(100)
   const [askId] = JSON.parse((await ctl('state')).out).deck.held.map((h) => h.id)
   r = await ctl('answer', askId, 'none')
   assert.equal(r.code, 1)
-  assert.match(JSON.parse(r.out).error, /never answers: a press on it jumps to local_seven instead/)
+  assert.match(JSON.parse(r.out).error, /which only local_seven's Session Slot dial answers: use dial/)
+  assert.equal(ask.settled, false, 'still held')
+  // This question has no options, so its dial shows Answer in app, and a press jumps.
+  r = await ctl('dial', 'local_seven', 'picks', '{"Red or blue?": ["Blue"]}')
+  assert.equal(r.code, 0, r.out)
+  assert.deepEqual([JSON.parse(r.out).jumped, JSON.parse(r.out).why], ['local_seven', 'question 1 has no options to pick from'])
   assert.equal(ask.settled, false, 'still held')
 
   r = await ctl('reset')
@@ -252,6 +270,56 @@ test('cli: the control commands', async (t) => {
   r = await run(BRIDGE, ['state', '--url', url, '--token-file', path.join(env.root, 'token-wrong')], { env: home })
   assert.equal(r.code, 1)
   assert.match(r.err, /refused the token \(401\)/)
+})
+
+test("cli: dial presses a session's Session Slot dial: allow or deny, a plan's choice, or a question's picks, for the request its strip showed", async (t) => {
+  const env = tempEnv(t)
+  const home = { HOME: env.root }
+  fs.writeFileSync(path.join(env.registryDir, '7.json'), JSON.stringify({ pid: 7, sessionId: 's7', hostSessionId: 'local_seven', status: 'waiting', statusUpdatedAt: 1 }))
+  const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
+  const ctl = (...args) => run(BRIDGE, [...args, '--url', url, '--token-file', env.tokenFile], { env: home })
+  const hold = async (tool, input) => {
+    const h = send(url, {
+      method: 'POST', path: '/v1/permission',
+      headers: { host: hostHeader(url), authorization: `Bearer ${env.token}`, 'x-deck-host': 'local_seven' },
+      body: JSON.stringify({ session_id: 's7', tool_name: tool, tool_input: input }),
+    })
+    await sleep(100)
+    return h
+  }
+  const ask = { questions: [{ question: 'Which fruits?', options: [{ label: 'Apple' }, { label: 'Pear, ripe' }], multiSelect: true }] }
+  const plan = { plan: '# Plan\n', planFilePath: '/p.md' }
+
+  let r = await ctl('dial', 'local_seven', 'allow')
+  assert.equal(r.code, 1, 'nothing shown yet: the press alerts')
+  assert.equal(JSON.parse(r.out).error, "local_seven's dial has shown no request")
+
+  const write = await hold('Write', { file_path: '/s/a.txt', content: 'a' })
+  const question = await hold('AskUserQuestion', ask)
+  const planned = await hold('ExitPlanMode', plan)
+  const [w, q, p] = JSON.parse((await ctl('state')).out).deck.held.map((h) => h.id)
+  // As a dial that showed the question while the Write is still the session's oldest: it alerts, and sends nothing.
+  r = await ctl('dial', 'local_seven', 'picks', '{"Which fruits?": ["Pear, ripe", "Apple"]}', q)
+  assert.equal(r.code, 1)
+  assert.equal(JSON.parse(r.out).error, `the dial showed ${q}; local_seven's oldest held request is ${w}`)
+  r = await ctl('dial', 'local_seven', 'allow', w)
+  assert.equal(r.code, 0, r.out)
+  assert.deepEqual((await write.answer).json, { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } })
+  // The question, its picks in the options' order, a label with ", " written as a JSON string.
+  r = await ctl('dial', 'local_seven', 'picks', '{"Which fruits?": ["Pear, ripe", "Apple"]}')
+  assert.equal(r.code, 0, r.out)
+  assert.deepEqual((await question.answer).json, { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...ask, answers: { 'Which fruits?': 'Apple, "Pear, ripe"' } } } } })
+  r = await ctl('dial', 'local_seven', 'plan', 'acceptEdits', p)
+  assert.equal(r.code, 0, r.out)
+  assert.deepEqual((await planned.answer).json, {
+    hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: plan, updatedPermissions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }] } },
+  })
+  // The first answer won: the strip's last request has gone, so a press alerts.
+  r = await ctl('dial', 'local_seven', 'plan', 'reject')
+  assert.equal(r.code, 1)
+  assert.equal(JSON.parse(r.out).error, `${p}, the request the dial showed, has gone (answered)`)
+  r = await ctl('approve', p)
+  assert.equal(r.code, 1, 'and so does a key that showed it')
 })
 
 test('cli: fake-claude won\'t write fixture files into the app\'s folders', async (t) => {

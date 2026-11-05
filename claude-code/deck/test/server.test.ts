@@ -6,6 +6,7 @@ import { allowedHosts, BRIDGE_HOST, BRIDGE_PORT, MAX_BODY_BYTES } from "../src/b
 import { type BridgeRoutes, BridgeServer } from "../src/bridge/server.js";
 import { SessionModel } from "../src/model/sessions.js";
 import { fingerprint } from "../src/protocol/fingerprint.js";
+import { answerDecision } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { SCRUB_RUN, Scrubber } from "../src/util/log.js";
 import { QUIET_MS } from "../src/util/quiet-log.js";
@@ -395,6 +396,60 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.equal(model.held.oldest?.fp, fingerprint("Custom", expected));
 		model.held.press(1, "allow");
 		assert.equal(status(await outcome), 200);
+	});
+
+	test("a PermissionRequest whose tool_input the token scrub changed, at any depth, reaches the route flagged; a run of the token elsewhere in the body doesn't flag it", async () => {
+		const got: { input: unknown; inputScrubbed: boolean }[] = [];
+		const routes: BridgeRoutes = {
+			permission: (body, _host, reply, inputScrubbed) => {
+				got.push({ input: (body as { tool_input?: unknown }).tool_input, inputScrubbed });
+				reply.send(200, "{}");
+			},
+			pretool: (_body, _host, reply) => reply.send(200, "{}"),
+			hello: () => ({ status: 200, body: { v: 1, ok: true } }),
+			events: () => ({ status: 204 }),
+			next: () => {},
+			result: () => ({ status: 204 }),
+		};
+		server = new BridgeServer({ port: 0, token: TOKEN, routes });
+		const port = await server.listen();
+		const run = TOKEN.slice(7, 7 + SCRUB_RUN);
+		const form = (label: string) => ({ questions: [{ question: "Red or blue?", header: "Color", options: [{ label: "Red" }, { label }], multiSelect: false }] });
+		const cases: [string, Record<string, unknown>, unknown, boolean][] = [
+			["a run in an option's label, deep in the input", { tool_name: "AskUserQuestion", tool_input: form(`Blue ${run}`) }, form("Blue <token>"), true],
+			["the token as a name in the input", { tool_name: "ExitPlanMode", tool_input: { plan: "# Plan", [TOKEN]: 1 } }, { plan: "# Plan", "<token>": 1 }, true],
+			["the input a string that holds the token", { tool_name: "Custom", tool_input: `x${TOKEN}` }, "x<token>", true],
+			["runs in the tool's name, the transcript path, the cwd, and a field's name and its own tool_input", { tool_name: `T${run}`, transcript_path: `/x/${run}.jsonl`, cwd: `/p/${TOKEN}`, [`k${run}`]: { tool_input: `y${TOKEN}` }, tool_input: form("Blue") }, form("Blue"), false],
+			["nothing to scrub", { tool_name: "Bash", tool_input: { command: "ls" } }, { command: "ls" }, false],
+		];
+		for (const [what, fields, input, inputScrubbed] of cases) {
+			const answer = await atOnce(port, { token: TOKEN, body: JSON.stringify({ session_id: MOD.sid, hook_event_name: "PermissionRequest", ...fields }), headers: HOOK });
+			assert.equal(status(answer), 200, what);
+			assert.deepEqual(got.at(-1), { input, inputScrubbed }, what);
+		}
+		assert.equal(got.length, cases.length);
+	});
+
+	test("through the model: a question whose tool_input held a run of the token is held display-only; one with the run elsewhere keeps its input, and its Answer echoes it as it came", async () => {
+		const { model, port } = await start();
+		const run = TOKEN.slice(3, 3 + SCRUB_RUN);
+		const input = (label: string) => ({ questions: [{ question: "Red or blue?", options: [{ label: "Red" }, { label }] }] });
+		/** Sends a question and waits for the bridge to hold it, as the `n`th held. */
+		const hold = async (fields: Record<string, unknown>, n: number): Promise<{ outcome: Promise<Outcome> }> => {
+			const { outcome } = send(port, { token: TOKEN, body: JSON.stringify({ session_id: MOD.sid, tool_name: "AskUserQuestion", ...fields }), headers: HOOK });
+			await waitFor(() => model.held.size === n, `request ${n} to be held`);
+			return { outcome };
+		};
+		const scrubbed = await hold({ tool_input: input(`Blue ${run}`) }, 1);
+		const kept = await hold({ transcript_path: `/x/${run}.jsonl`, tool_input: input("Blue") }, 2);
+		const [first, second] = model.held.list();
+		assert.deepEqual(first?.ask, { t: "inApp", why: "scrubbed" });
+		assert.deepEqual(second?.ask?.t === "question" ? second.ask.input : null, input("Blue"));
+		assert.equal(model.held.answer(HOST, first?.id ?? -1, { t: "answers", picks: { "Red or blue?": ["Red"] } }).ok, false, "display-only: no answer fits");
+		model.held.release(first?.id ?? -1, "the test");
+		assert.deepEqual(json(await within(scrubbed.outcome, 2000)), {});
+		assert.equal(model.held.answer(HOST, second?.id ?? -1, { t: "answers", picks: { "Red or blue?": ["Blue"] } }).ok, true);
+		assert.deepEqual(json(await within(kept.outcome, 2000)), answerDecision(input("Blue"), { "Red or blue?": "Blue" }));
 	});
 
 	test("POST /v1/pretool is answered at once: the allow for the deck's own mode change in flight, once, and {} for anything else", async () => {

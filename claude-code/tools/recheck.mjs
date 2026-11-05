@@ -192,9 +192,25 @@ export const RECORD_FIELDS = Object.freeze([
   },
   {
     // Sparse: a session that has never been on screen has none (seen on this Mac, 2026-11-02).
-    field: 'lastFocusedAt', expect: 'number', need: 'optional', presence: 'sparse', reads: [RECORDS_TS, 'lastFocusedAt: typeof o.lastFocusedAt'],
+    field: 'lastFocusedAt', expect: 'number', need: 'optional', presence: 'sparse', reads: [RECORDS_TS, 'lastFocusedAt: time(o.lastFocusedAt)'],
     why: 'Until a session is picked on the dial, the target is the one last on screen, by this or the mod\'s attach.',
     check: aNumber,
+  },
+  // Phase 7, session keys (docs/claude-code/session-keys.md): in every one of this Mac's records on 2026-11-04.
+  {
+    field: 'isArchived', expect: 'boolean', need: 'optional', presence: 'always', reads: [RECORDS_TS, 'isArchived: o.isArchived === true'],
+    why: 'A Session Slot keeps its session until the app\'s record says it\'s archived; without it, only a long press or a record gone frees the slot.',
+    check: (v) => (typeof v === 'boolean' ? null : kind(v)),
+  },
+  {
+    field: 'lastActivityAt', expect: 'number', need: 'optional', presence: 'always', reads: [RECORDS_TS, 'lastActivityAt: time(o.lastActivityAt)'],
+    why: 'With no turn end seen since a deck restart, an idle session counts as not seen when this is later than lastFocusedAt.',
+    check: aNumber,
+  },
+  {
+    field: 'cwd', expect: 'non-empty string', need: 'optional', presence: 'always', reads: [RECORDS_TS, 'cwd: str(o.cwd'],
+    why: 'The project, its last segment, of a slotted session the registry doesn\'t list.',
+    check: aNonEmptyString,
   },
 ])
 

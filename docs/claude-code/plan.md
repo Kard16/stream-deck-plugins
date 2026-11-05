@@ -1,6 +1,6 @@
 # Claude Code build plan
 
-**Status:** Phase 5, started 2026-11-03 as an overnight run at the user's word. Phase 4 has step 11 left. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
+**Status:** Phase 7, session keys and dials, started 2026-11-04 at the user's word, and live on deck 0.4.0 the same day; its spec is `docs/claude-code/session-keys.md`. Phase 5's day of use and Phase 4's step 11 are still open. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -231,6 +231,14 @@ Walk through a checklist with the user, with two or three throwaway sessions:
 
 - **Reliability:** a reboot, given macOS 26's localhost delay; a Claude app update, with a script that re-checks the undocumented internals (registry fields, the jump route, the mod calls we use) on a new bundled Claude Code; many sessions at once.
 - **Finish:** quiet logs in normal use, and a short guide in `claude-code/README.md`.
+
+### Phase 7: session keys and dials (only when the user says so)
+
+The user's revision after a day of use, 2026-11-04. The spec, with the user's answers, the spike results and the design, is `docs/claude-code/session-keys.md`.
+- The 4 bottom keys are Session Slot keys, one session each, showing its state, title, context and what it's doing; a press jumps, and holding puts the session on screen in the app on that key.
+- The dial under each key belongs to its session. The strip pages through details, and the dial answers the session's questions, plans and approvals.
+- An Others key counts the sessions off the keys that need the user.
+- Verified by: the deck's checks and the new fixtures, then the user on the hardware with a throwaway session that asks a question, a plan and an approval.
 
 ## Human-only steps
 
@@ -878,6 +886,119 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Whether the app's card stayed up is the user's to say.
   - Item 1: the main thread archived Deck test T2, T3 and T4 at the user's word, at 14:35Z. Each get_session then said `isArchived: true`. The next live check needs a new throwaway session from the `deck-sandbox` preset, since the scratchpad's live scripts take T2's host.
 
+- 2026-11-04, **Phase 7 started: session keys and dials, at the user's word.** After a session with the plugin, the user asked for a key per session (working, waiting or done, context, and a way to jump to one that needs them), the 4 bottom keys as sessions, and the dial under each key for that session: details on the strip, and answers to its questions. Their answers to the clarifying round:
+  1. Keys fill, then stay put. A long press puts the session on screen in the app on that key, even over another.
+  2. The dial answers questions, plans and approvals: turn to pick, press or tap to send.
+  3. With nothing to answer, turning pages through details, and a press or tap jumps.
+  4. An Others key for the sessions off the keys that need the user.
+  - They saw a mockup of the layout. The spec is `docs/claude-code/session-keys.md`.
+- 2026-11-04, **spikes T5 and T6, and a read of the engine: the deck can answer questions and plans.**
+  - **Tools:** `spikes/cc-ask/`, a stand-in for `/v1/permission` on 127.0.0.1:47610 and a copy of the plugin whose PermissionRequest hook points at it. `claude-code/sandbox-plugin` pointed at the copy during the spike and points back at `claude-code/plugin` since. Log: `spikes/results/20261104-234605-ask/requests.jsonl`.
+  - **Sessions:** throwaway **Deck test T5** (`local_bd3145de-…`) and **T6** (`local_08819a8d-…`), from the preset, on Haiku at low effort.
+  - **AskUserQuestion:** an Allow whose `updatedInput` is the request's `tool_input` plus `answers` answered it. That covered one question, then two questions, one of them multi-select (`"Apple, Plum"`). Claude read `Your questions have been answered: …`, and the registry left `waiting`.
+  - **ExitPlanMode:**
+    - A plain Allow is ignored: T5 stayed `waiting` on the app's card, and the app won't stop a turn that waits on the user. T5 still shows that card.
+    - An Allow with `updatedInput` (the `tool_input` unchanged) and a session `setMode` approved T6's plans into Accept edits and into Auto. With no `setMode`, the session went back to its mode from before Plan.
+    - A Deny without `interrupt`, with feedback, kept T6 planning.
+    - `tool_input` is `{}` until Claude writes a plan file, then `{plan, planFilePath}`.
+  - **The engine** (2.1.309, an agent's read of the binary and the app's JS):
+    - For tools that need the person, it ignores a hook's plain Allow, takes one with `updatedInput`, and always takes a Deny.
+    - When the hook wins, it cancels the app's request, and the app removes its card.
+    - An `updatedInput` that fails the schema becomes a deny.
+    - A multi-select answer joins the labels with `", "`, quoting a label that holds `", "` or `"` as JSON.
+  - `lsappinfo front` and `info -only bundleid` name the app in front with no permission prompt, in under 1 ms. That's for "seen".
+- 2026-11-04, **the protocol round for Phase 7** (PROTOCOL.md's amendment "2026-11-04, session keys"; nothing changes for the plugin, so `v` stays 1):
+  - A Session Slot dial answers its own session's requests with Allow or Deny, the new **Answer** (questions) or **Approve plan** (plans), or Deny.
+  - A held `ask` request keeps its `tool_input`, up to 64 KiB.
+  - Fixtures: dial `press` lines and 6 new fixtures, 25 in all.
+  - **Before the build:** the deck fails 7 of 308 tests and the tools 2 of 158, all of them the new fixtures or the fixture count. The plugin passes 158 of 158 with its copy of the fixtures regenerated.
+  - **Building:** workflow `wf_60dcceca-4ab`. The deck's core, then its surfaces, beside the tools, each reviewed adversarially and then fixed.
+- 2026-11-04, **the Phase 7 build** (workflow `wf_60dcceca-4ab`, 6 agents, about 2 h 40 min; nothing committed, and the live deck not restarted):
+  - **The deck, 0.4.0** (`claude-code/deck/`):
+    - Session Slot (`com.karimdhanji.claude.slot`), one action for keys and dials, and Other Sessions (`com.karimdhanji.claude.others`).
+    - Six strip layouts, and the dial's answer screens.
+    - Slots saved in `run/slots.json`, and the `lsappinfo` front check for "seen".
+  - **The tools** (`claude-code/tools/`): the fake deck answers from a dial, and the player reads dial lines.
+  - **The deck's review** ran 55 mutations, and 7 survived. It found 2 majors:
+    - A tick just before a push sent a choice the strip never showed. The chips also wrapped, from Deny to Allow and from Reject to Approve · Auto.
+    - No test pinned the start-over when a slot's session changes. A probe sent a pick made for A's approval to B's.
+  - **The fixer:**
+    - A press sends only the choice the strip painted, once shown 300 ms, and the chips stop at either end. It added tests for the start-over.
+    - Of the 10 minors and nits, it fixed 9:
+      - key presses check what the key showed;
+      - only the desktop app's `attach` counts;
+      - `lsappinfo` runs only while a slot or Others key is on the deck;
+      - tick errors are caught;
+      - a stuck check is killed and dropped;
+      - `slots.json` is flushed before its rename;
+      - a hold refuses an archived session;
+      - tests for the rest.
+    - It left one, a moved or deleted slot key keeping its session. The README now tells the user how to recover.
+    - 488 tests pass, and its 41 mutations were all caught.
+  - **The tools' review:** no blockers or majors. 36 of 39 mutations were caught, 1 was equivalent and 2 found test gaps, among 5 minors and 3 nits. Three minors were contract gaps between the deck and the fake (the next entry).
+  - **The main thread's checks:**
+    - The deck: typecheck, and 488 of 488 tests, also with the clock two days ahead and a week back. The build passes, and so does `streamdeck validate`.
+    - The tools: 248 of 248 tests, three ways, and each CLI's `--help`.
+    - The plugin: `tsc`, sync `--check` and its 21 tests. `validate` and 158 of 158 on 2.1.309 and on 2.1.317.
+    - The install tests: 10 of 10.
+  - **The app bundles Claude Code 2.1.317,** since 2026-11-03 13:22, and every running session runs it, T5 and T6 included. So the spikes' results hold on 2.1.317.
+    - The engine read was of 2.1.309. The hook-answer code it relied on is in both binaries: `control_cancel_request`, the `updatedInput` checks and the hook's deny.
+    - `recheck.mjs`: 34 ok, 0 fail, and 1 warn: the vendored mods API and CLAUDE.md are for 2.1.309.
+- 2026-11-04, **the contract round after the reviews** (PROTOCOL.md amendments 5–8 of "2026-11-04, session keys"; `v` stays 1):
+  - **Fixtures, 26 in all:**
+    - New: `dial-next`. A question is answered in the app, then the session's next request takes the strip, and the dial allows it.
+    - `answer-questions` now picks out of option order, and one label holds a double quote. Each runner had passed cases the other would fail.
+  - **PROTOCOL.md:**
+    - The pick rule: a dial sends only the choice its strip showed, once shown 300 ms.
+    - A request answered elsewhere blocks its dial only while nothing newer shows.
+    - The AskUserQuestion forms the deck can't read are listed.
+    - The token scrub is in Transport. An `ask` whose `tool_input` it changed is display-only, so an echo is always exact.
+    - Only the desktop app's `attach` and `detach` count.
+  - **The deck** (an agent):
+    - A newer request painted on the strip clears the gone mark.
+    - `scrubJson` flags a change inside `tool_input`, names included, and the model makes that ask display-only ("Holds the deck's token").
+    - 495 tests pass, and its 16 mutations were all caught.
+  - **The tools** (an agent):
+    - The fake reads forms and plan lines by the deck's rules, and covers its test gaps.
+    - 252 tests pass, all 26 fixtures play through the CLI, and its 15 mutations were all caught.
+    - Two gaps went back to the same agent, and both are fixed:
+      - The fake now parses a body first, then scrubs every string and name, as the deck does. Before, a number holding a run of the token got 400, and a `\u`-escaped token got through.
+      - Only a desktop `attach` or `detach` counts.
+    - Then 255 tests passed, and its 14 mutations were all caught.
+    - Left, all small:
+      - the fake doesn't scrub a poll's query for its own logic;
+      - it refuses a hook body that isn't an object;
+      - the runners treat malformed dial lines differently, and no fixture has one.
+  - **The main thread's checks:**
+    - The deck: typecheck; 495 of 495, also with the clock two days ahead and a week back; build and `streamdeck validate`.
+    - The plugin: 159 of 159 on 2.1.309 and on 2.1.317, and sync `--check`.
+    - 5 mutations of its own on what the dial sends:
+      - Caught: Approve · Manual into bypassPermissions (by the type check), a press with nothing picked sending Allow, Other… sending, and Next with nothing ticked.
+      - One, picks kept in pick order, changes nothing sent: the answer is put in option order before it goes.
+  - **T5's leftover plan card** was answered in the app: the plan was approved and T5 replied "done".
+- 2026-11-04, **Phase 7 live, with the user** (from 04:08Z on 11-05; nothing committed before it):
+  - **Deck 0.4.0:** the main thread restarted only the Claude deck plugin, at the user's word. The bridge listened at once, and all four running sessions said hello on Claude Code 2.1.317.
+  - **Slots:**
+    - The user placed Session Slot on the 4 bottom keys and the 4 dials, and a fifth on the top row.
+    - The slots filled one by one as they appeared:
+      - this session first, since it needed the user;
+      - then T7, T6 and T5, newest first;
+      - then the Lightroom session, on the top-row slot.
+    - `run/slots.json` is `0600` in a `0700` folder.
+  - **Throwaway session Deck test T7** (`local_f47631fd-…`), from the preset, on Haiku at low effort, in Manual:
+    - **Question,** "Red or blue?": the 2nd dial sent one Answer, `{"Red or blue?":"Blue"}`, from its own session's dial, and T7 read "Blue".
+    - **Plan:** the 2nd dial approved it into Manual. get_session then said `default`, and T7 wrote `s11.txt`.
+    - **Approvals:**
+      - The Approve key allowed the Write of `s11.txt` and `echo twelve > s12.txt`: the user reached for it both times.
+      - The 2nd dial allowed `echo thirteen > s13.txt` ("allow, from its session's dial").
+      - Each file holds its word.
+    - No press alerted in any of these.
+  - **Seen:** each turn of T7's that ended with T7 on screen and Claude in front counted as seen within a second.
+  - **Jumps:** slot keys and strip taps jumped in about 60 ms, and set the target.
+  - **Long press:** with a session of the user's newly opened, holding the 4th key put it there in place of T5. Holding it again with T5 on screen put T5 back. A swap between two slots wasn't tried live; unit tests cover it.
+  - **One brief state:** after a hook answer, the deck shows needs-you for about 0.2 s, until the registry leaves `waiting`. It was there before Phase 7, and nobody noticed it.
+  - The user: "All worked".
+
 ## Progress
 
 - [x] Phase 0: kickoff (open questions answered), 2026-11-01
@@ -908,3 +1029,10 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Round 4 committed (86054e1) and live: deck 0.3.2; the plugin is unchanged, so 0.2.1 stays released.
   - The overnight scope is done. The user's checklist is in the Log's last entries; item 9 is answered, and deck 0.3.3 does it.
   - Still to come: a reboot (macOS 26's localhost delay), the next Claude app update with recheck, and a day of real use.
+- [ ] Phase 7: session keys and dials. Started 2026-11-04; the spec is `docs/claude-code/session-keys.md`, and the Log's last entries say where it stands.
+  - Spikes T5 and T6: questions and plans can be answered from the deck.
+  - Contract: PROTOCOL.md's amendment "2026-11-04, session keys", 26 fixtures.
+  - Built and reviewed: deck 0.4.0 and the tools, with the main thread's checks passing.
+  - Live with the user, 2026-11-04: a question, a plan and an approval answered on the dial, plus slots, seen, jumps and the long press. The user: "All worked".
+  - Still to come: a commit and the plugin's `release`, archiving T5, T6 and T7, and a swap between two slots, tried live.
+  - Still to come: the build, its checks, and the live run with the user. The plugin's code is unchanged.

@@ -5,6 +5,8 @@
 // - Arrays match when they have the same length and each element matches, in order.
 // - `at` is never compared.
 // - A path with a query matches when the route is equal and each listed parameter is present and equal.
+// - An Answer or an Approve plan, a permission answer with updatedInput, must equal the expected body exactly
+//   (exactMismatch): no field missing or extra at any depth.
 // - Names a fixture gives to values the other side picks bind at their first appearance and hold from then
 //   on: the deck's command ids ("c1", "c2"…), the mod's inst. See Bindings.
 //
@@ -65,6 +67,38 @@ function walk(e, a, at, skip, hook) {
 }
 
 export const matches = (expected, actual, opts) => mismatch(expected, actual, opts) === null
+
+/**
+ * Why `actual` isn't exactly `expected`, or null: as mismatch(), but every field of an object, at any depth, must be on
+ * both sides, and no key is skipped, `at` included. PROTOCOL.md, "Matching": an Answer or an Approve plan must equal
+ * the expected body exactly, updatedInput included, since Claude Code fails an updatedInput that doesn't fit the tool's
+ * schema as a deny. `"*"` matches any value that's there, as a fixture writes it, unless `wildcard` is false: an echo
+ * compared with the request it echoes is compared literally.
+ */
+export function exactMismatch(expected, actual, at = '', { wildcard = true } = {}) {
+  if (wildcard && expected === ANY) return actual === undefined ? `${where(at)}: missing` : null
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual)) return `${where(at)}: expected a list of ${expected.length}, got ${show(actual)}`
+    if (actual.length !== expected.length) return `${where(at)}: expected ${expected.length} item(s), got ${actual.length}: ${show(actual)}`
+    for (let i = 0; i < expected.length; i++) {
+      const r = exactMismatch(expected[i], actual[i], `${at}[${i}]`, { wildcard })
+      if (r) return r
+    }
+    return null
+  }
+  if (isObject(expected)) {
+    if (!isObject(actual)) return `${where(at)}: expected an object, got ${show(actual)}`
+    for (const k of Object.keys(expected)) {
+      const p = at ? `${at}.${k}` : k
+      if (!Object.hasOwn(actual, k)) return `${p}: missing (expected ${show(expected[k])})`
+      const r = exactMismatch(expected[k], actual[k], p, { wildcard })
+      if (r) return r
+    }
+    const extra = Object.keys(actual).find((k) => !Object.hasOwn(expected, k))
+    return extra === undefined ? null : `${at ? `${at}.${extra}` : extra}: not expected, got ${show(actual[extra])}`
+  }
+  return expected === actual ? null : `${where(at)}: expected ${show(expected)}, got ${show(actual)}`
+}
 
 /**
  * Why a request's path doesn't match a fixture's, or null: the route must be equal, and each parameter the

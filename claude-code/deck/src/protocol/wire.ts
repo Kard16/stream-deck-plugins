@@ -17,7 +17,11 @@ export const ROUTES = {
 	result: "/v1/result",
 } as const;
 
-/** The hook's answers (PROTOCOL.md, Permission requests). The deck never sends updatedPermissions or updatedInput. */
+/**
+ * The hook's answers (PROTOCOL.md, Permission requests): Allow, Deny and no decision here, and the Answer and the
+ * Approve plan, which only a Session Slot dial sends, from answerDecision and approvePlanDecision below. Only those
+ * two carry updatedInput, and only an Approve plan carries updatedPermissions.
+ */
 export const ALLOW_DECISION = {
 	hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } },
 } as const;
@@ -43,8 +47,54 @@ export const PRETOOL_ALLOW = {
  */
 export const MODE_TOOL = "mcp__ccd_session_mgmt__set_session_permission_mode";
 
-/** Requests the deck shows but never answers: a press jumps to the session (kickoff answer 3). */
-export const ASK_TOOLS: ReadonlySet<string> = new Set(["AskUserQuestion", "ExitPlanMode"]);
+/** The two tools that need the person: Claude Code ignores a plain Allow for them (the engine check, 2026-11-04). */
+export const ASK_QUESTION = "AskUserQuestion";
+export const EXIT_PLAN = "ExitPlanMode";
+
+/**
+ * Kind `ask`: the Approve and Deny keys never answer these, and a press on them jumps to the session (kickoff answer
+ * 3). Only the session's own Session Slot dial answers one: an Answer for a question, an Approve plan or a Deny for a
+ * plan (PROTOCOL.md, Permission requests).
+ */
+export const ASK_TOOLS: ReadonlySet<string> = new Set([ASK_QUESTION, EXIT_PLAN]);
+
+/** The modes an Approve plan leaves Plan mode into, in the order the dial offers them (session-keys.md, Plans). */
+export const PLAN_MODES = ["auto", "acceptEdits", "default"] as const;
+export type PlanMode = (typeof PLAN_MODES)[number];
+
+export function isPlanMode(v: unknown): v is PlanMode {
+	return typeof v === "string" && (PLAN_MODES as readonly string[]).includes(v);
+}
+
+/** An Allow that carries `updatedInput`, and for a plan `updatedPermissions`: what Claude Code takes for the two tools. */
+export type UpdatedAllow = {
+	hookSpecificOutput: {
+		hookEventName: "PermissionRequest";
+		decision: { behavior: "allow"; updatedInput: unknown; updatedPermissions?: { type: "setMode"; mode: PlanMode; destination: "session" }[] };
+	};
+};
+
+/**
+ * The Answer, for an AskUserQuestion: Allow with `updatedInput`, the request's `tool_input` exactly as it came with one
+ * key added, `answers` (PROTOCOL.md, Permission requests). An `updatedInput` that fails the tool's schema becomes a
+ * deny, so nothing else changes. `input` is never changed: the answered input is a copy.
+ */
+export function answerDecision(input: Obj, answers: Readonly<Record<string, string>>): UpdatedAllow {
+	return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedInput: { ...input, answers: { ...answers } } } } };
+}
+
+/**
+ * The Approve plan, for an ExitPlanMode: Allow with the request's `tool_input` unchanged, and one `setMode` for the
+ * session. `destination` is always `session`: the others write settings files (PROTOCOL.md, Permission requests).
+ */
+export function approvePlanDecision(input: unknown, mode: PlanMode): UpdatedAllow {
+	return {
+		hookSpecificOutput: {
+			hookEventName: "PermissionRequest",
+			decision: { behavior: "allow", updatedInput: input, updatedPermissions: [{ type: "setMode", mode, destination: "session" }] },
+		},
+	};
+}
 
 /** The modes the deck sets, in the order the Mode dial offers them. Never bypassPermissions. */
 export const MODES = ["default", "acceptEdits", "plan", "auto"] as const;
@@ -153,7 +203,8 @@ export type ModEvent =
 	| { t: "failed"; agent: string | null; error: string | null }
 	| { t: "tool.start"; tool: string; use: string | null; agent: string | null; summary: string; fp: string | null }
 	| { t: "tool.end"; tool: string | null; use: string | null; agent: string | null; fp: string | null; ok: boolean | null }
-	| { t: "measure"; percent: number | null }
+	/** `context: {percent?, tokens?, window}` and `cost?: {usd}`; a figure that's missing or not a number is null. */
+	| { t: "measure"; percent: number | null; tokens: number | null; window: number | null; usd: number | null }
 	| { t: "settings"; model: string | null; mode: string | null; effort: string | null }
 	| { t: "attach" | "detach"; surface: string | null }
 	| { t: "end"; reason: string | null };
@@ -177,8 +228,10 @@ export function parseEvent(e: unknown): ModEvent | null {
 		}
 		case "tool.end":
 			return { t: "tool.end", tool: text(e.tool, 200), use: text(e.use), agent, fp: text(e.fp, 16), ok: typeof e.ok === "boolean" ? e.ok : null };
-		case "measure":
-			return { t: "measure", percent: isObj(e.context) ? finite(e.context.percent) : null };
+		case "measure": {
+			const context = isObj(e.context) ? e.context : {};
+			return { t: "measure", percent: finite(context.percent), tokens: finite(context.tokens), window: finite(context.window), usd: isObj(e.cost) ? finite(e.cost.usd) : null };
+		}
 		case "settings":
 			return { t: "settings", model: text(e.model, 80), mode: text(e.mode, 40), effort: text(e.effort, 40) };
 		case "attach":

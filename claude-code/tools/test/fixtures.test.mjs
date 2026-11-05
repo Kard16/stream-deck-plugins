@@ -4,9 +4,9 @@ import test from 'node:test'
 
 import { FIXTURES_DIR, FixtureError, fixtureFiles, parseFixture, readFixture, resolveFixture } from '../lib/fixtures.mjs'
 
-test('fixtures: all 19 parse, each with a setup, and every reply checks an earlier labeled request', () => {
+test('fixtures: all 26 parse, each with a setup, and every reply checks an earlier labeled request', () => {
   const files = fixtureFiles()
-  assert.equal(files.length, 19)
+  assert.equal(files.length, 26)
   for (const file of files) {
     const fx = readFixture(file)
     assert.ok(fx.setup.session?.host, `${fx.name} has a setup session`)
@@ -38,8 +38,28 @@ test('fixtures: a malformed fixture fails with its file and line', () => {
     [`${setup}\n{"shout":{}}`, /x\.jsonl:2: a line has one key/],
     [`${setup}\nnot json`, /x\.jsonl:2: not JSON/],
     ['{"note":"only a note"}', /x\.jsonl: no setup line/],
+    // A Session Slot dial's line (PROTOCOL.md, "Fixtures", as amended on 2026-11-04): its session, and one of picks,
+    // decision and plan.
+    [`${setup}\n{"press":{"dial":{"decision":"allow"}}}`, /x\.jsonl:2: press\.dial\.session must be a host/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x"}}}`, /x\.jsonl:2: press\.dial has one of picks, decision, plan; got none/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x","decision":"allow","plan":"auto"}}}`, /x\.jsonl:2: press\.dial has one of picks, decision, plan; got decision, plan/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x","decision":"approve"}}}`, /x\.jsonl:2: press\.dial\.decision must be allow or deny/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x","plan":"plan"}}}`, /x\.jsonl:2: press\.dial\.plan must be one of auto, acceptEdits, default, reject/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x","picks":{"Q?":"Blue"}}}}`, /x\.jsonl:2: press\.dial\.picks maps each question's text to the labels picked for it/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x","picks":[["Blue"]]}}}`, /x\.jsonl:2: press\.dial\.picks maps/],
+    [`${setup}\n{"press":{"dial":{"session":"local_x","picks":{"Q?":[1]}}}}`, /x\.jsonl:2: press\.dial\.picks maps/],
   ]
   for (const [text, why] of cases) assert.throws(() => parseFixture(text, '/f/x.jsonl'), why)
+})
+
+test("fixtures: every dial line is well formed, and each of the three kinds is in some fixture", () => {
+  const dials = fixtureFiles().flatMap((f) => readFixture(f).lines.filter((l) => l.kind === 'press' && l.value.dial).map((l) => l.value.dial))
+  assert.deepEqual(['picks', 'decision', 'plan'].filter((k) => !dials.some((d) => d[k] !== undefined)), [], 'picks, decision and plan')
+  const setup = '{"setup":{"session":{"host":"local_x"}}}'
+  for (const dial of [{ picks: { 'Q?': ['A', 'B'] } }, { picks: { 'Q?': [] } }, { decision: 'deny' }, ...['auto', 'acceptEdits', 'default', 'reject'].map((plan) => ({ plan }))]) {
+    const fx = parseFixture(`${setup}\n${JSON.stringify({ press: { dial: { session: 'local_x', ...dial } } })}`, '/f/x.jsonl')
+    assert.deepEqual(fx.lines[0].value.dial, { session: 'local_x', ...dial })
+  }
 })
 
 test('fixtures: notes before the setup are kept, and replied labels are known', () => {

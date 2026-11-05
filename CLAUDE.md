@@ -4,6 +4,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 
 - **Done:** the Lightroom Classic side, 2026-11-01, and its Phase 7, dials on Stream Deck pages and big steps, 2026-11-04. Plan, decisions and progress: `docs/lightroom/plan.md`.
 - **Now:** the Claude Code side, in daily use since 2026-11-03 (Phase 5). Plan, decisions and progress: `docs/claude-code/plan.md`. Design notes: `docs/research/claude-code-extensibility.md`. The user's guide: `claude-code/README.md`.
+  - **Phase 7, session keys and dials,** started 2026-11-04: a key and a dial per session, answering questions, plans and approvals on the dial. Its spec: `docs/claude-code/session-keys.md`.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
 ## Rules

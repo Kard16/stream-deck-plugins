@@ -1,13 +1,15 @@
 import path from "node:path";
 
 import { type Command, CommandQueue, type CommandSpec, IN_FLIGHT_MS, type PollReply } from "../bridge/commands.js";
-import { HeldRequests } from "../bridge/held.js";
+import { type Held, HeldRequests } from "../bridge/held.js";
 import type { BridgeRoutes, BridgeState, RouteAnswer } from "../bridge/server.js";
+import { heldAsk } from "../protocol/ask.js";
 import { fingerprint, summary } from "../protocol/fingerprint.js";
 import {
 	ALLOW_DECISION,
 	ASK_TOOLS,
 	asHost,
+	EXIT_PLAN,
 	type Hello,
 	type HookRequest,
 	isObj,
@@ -33,7 +35,17 @@ import { compareSessions, type RegistrySession } from "../registry/registry.js";
 import { type Clock, realClock } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import { QuietLog } from "../util/quiet-log.js";
-import { type SessionStatus, sessionStatus } from "./status.js";
+import { projectName } from "./format.js";
+import { type FrontCheck, FrontWatcher } from "./front.js";
+import { type SessionState, type SessionStatus, sessionState } from "./status.js";
+
+/**
+ * What a session waits on (session-keys.md, What each session shows): `approval`, a held `tool` request; `question`,
+ * a held AskUserQuestion; `plan`, a held ExitPlanMode; `input`, the registry's `waiting` with nothing held, or the
+ * app's own needs-input sign. It follows the session's oldest held request, which its Session Slot dial shows and
+ * answers, so with several held it can differ from the status, which puts a `tool` request first.
+ */
+export type Need = "approval" | "question" | "plan" | "input";
 
 /** One session as the deck shows it. */
 export type SessionView = {
@@ -54,17 +66,52 @@ export type SessionView = {
 	mode: string | null;
 	/** The session has a current mod instance, which only a hello makes so, to take prompts and mode changes. */
 	plugin: boolean;
-	/** False only for a picked target whose registry file has gone: it has ended. */
+	/** False for a picked target whose registry file has gone, which has ended, and for a slotted session that isn't running. */
 	listed: boolean;
+	/**
+	 * In the registry: its process runs. The same as `listed`. A slotted session that isn't running comes from its app
+	 * record alone (slotView): title, model, effort, mode, summary, project, archived; the rest is null or idle.
+	 */
+	running: boolean;
+	/** What it waits on, or null. */
+	need: Need | null;
+	/**
+	 * Wall-clock ms when the current status began: the held request's arrival (the oldest one), the registry's
+	 * `statusUpdatedAt` (or the deck's first reading of that status without it), the `turn.start` the deck got before
+	 * the registry said busy, or the turn's end, whichever the status came from. For a session that isn't running, its
+	 * record's `lastActivityAt`. Null when unknown. Shown as `30s`, `4m`… (format.ts's sinceText).
+	 */
+	since: number | null;
+	/**
+	 * For a session whose last turn ended (done, failed, interrupted), and for an idle one: whether the user has looked
+	 * at it since. Null for any other status, and for a session that isn't running. See SessionModel's `seen`.
+	 */
+	seen: boolean | null;
+	/** Context tokens and the context window, from the mod's latest `measure`; null until it has them. */
+	tokens: number | null;
+	window: number | null;
+	/** The session's cost so far in USD, from the latest `measure` that had one. */
+	cost: number | null;
+	/** What the last turn did, from the app's record (AppRecord's `summary`). */
+	summary: string | null;
+	/** What the app says it needs from the user, from its record (AppRecord's `needs`). */
+	needs: string | null;
+	/** The last segment of its `cwd`: the registry's, else the mod's hello's, else the record's. */
+	project: string | null;
+	/** The registry's `startedAt`: the slots fill with the newest first. */
+	startedAt: number | null;
+	/** Its app record says `isArchived`. */
+	archived: boolean;
 };
 
 export type QueueResult = { ok: true; cmd: Command } | { ok: false; why: string };
 
 /**
  * A turn of the main loop. `startedAt` is when the deck got its `turn.start`, and `endedAt` its `turn.end`, by the
- * wall clock: `endedAt` null until then, and `startedAt` null for a turn whose start the deck didn't get.
+ * wall clock: `endedAt` null until then, and `startedAt` null for a turn whose start the deck didn't get. `failedAt`
+ * is when it got the turn's `failed`, null without one.
  */
-type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean; startedAt: number | null; endedAt: number | null };
+type Turn = { id: string | null; ended: boolean; reason: string | null; failed: boolean; startedAt: number | null; endedAt: number | null; failedAt: number | null };
 type RunningTool = { use: string | null; tool: string; summary: string; fp: string | null };
 
 /** Where the deck took a session's mode or effort from (PROTOCOL.md, The deck's session model). */
@@ -130,9 +177,19 @@ type BridgeSession = {
 	pollsAtOnceUntil: number | null;
 	/** The main loop's unfinished tool calls, oldest first. */
 	tools: RunningTool[];
+	/** The latest `measure`'s percent and tokens, null while the engine has none; its window; the latest cost it had. */
 	context: number | null;
-	/** Wall-clock ms of the latest `attach`: the session came on screen in the app. */
+	tokens: number | null;
+	window: number | null;
+	cost: number | null;
+	/** Wall-clock ms of the desktop app's latest `attach` (DESKTOP_SURFACE): the session came on screen in the app. */
 	onScreenAt: number | null;
+	/** Wall-clock ms of the desktop app's latest `detach`: it left the screen. */
+	offScreenAt: number | null;
+	/** The later of the two, as they came: the session is on screen while it's `attach`. */
+	screen: "attach" | "detach" | null;
+	/** Wall-clock ms when the deck last found the session on screen with Claude the app in front (`seen`). */
+	frontSeenAt: number | null;
 };
 
 const NO_HOST: RouteAnswer = { status: 400, body: { error: "unknown session: no host, and the registry doesn't know the sid" } };
@@ -142,6 +199,13 @@ const NOT_THIS_SESSION = { error: "not this session" };
 
 /** A poll for a session no instance has said hello for: the deck asks for one (PROTOCOL.md, Identity). */
 const HELLO_FIRST = { error: "hello first" };
+
+/**
+ * The surface the desktop app's own client attaches from (the mods API's RenderSurface). Only its `attach` and `detach`
+ * put a session on screen in the app or take it off: a phone's, or VS Code's, are other clients on the same session,
+ * and the engine sends each client's on its own.
+ */
+export const DESKTOP_SURFACE = "desktop";
 
 /** How many of a session's instances that said hello the deck remembers. The protocol asks for at least 8. */
 export const HELLOS_KEPT = 64;
@@ -181,6 +245,15 @@ export type SessionModelOptions = {
 	 * reading (PROTOCOL.md, Desktop sessions only). Without it, the latest reading is all there is.
 	 */
 	rescan?: () => Promise<void>;
+	/**
+	 * Whether Claude is the app in front (front.ts's lsappinfoCheck in the plugin), for `seen`. It's asked once a
+	 * second, only while some session whose last turn ended unseen is on screen in the app, and something on the deck
+	 * shows `seen` (showsSeen). Without it, nothing asks, and a turn's end is seen only by an attach, the record's
+	 * `lastFocusedAt` or a press.
+	 */
+	front?: FrontCheck;
+	/** How often `front` is asked while needed; FRONT_CHECK_MS, 1 s. */
+	frontIntervalMs?: number;
 };
 
 /**
@@ -221,10 +294,21 @@ export class SessionModel implements BridgeRoutes {
 	/** Each listed session's status when the model last changed, by key, for the log. */
 	#statuses = new Map<string, SessionStatus>();
 	#records = new Map<string, AppRecord>();
+	/** The hosts the latest records scan looked for and found no file for (RecordsReader's `missing`). */
+	#missing: ReadonlySet<string> = new Set();
+	/** Hosts whose records are read, and whose view is kept, even while the registry doesn't list them: the slotted ones. */
+	#kept: ReadonlySet<string> = new Set();
+	/** Whether setRegistry has had a reading yet: until then, no session counts as not listed. */
+	#registryRead = false;
+	/** By host, the wall-clock ms the user last pressed its slot key or jumped from its dial (`seen`). */
+	readonly #pressedAt = new Map<string, number>();
 	#picked: string | null = null;
 	/** The picked session's title as last listed, for when it has ended. */
 	#pickedTitle: string | null = null;
 	#bridgeState: BridgeState = "stopped";
+	readonly #front: FrontWatcher | null;
+	/** What on the deck shows `seen` now (the slot keys, the Others keys): the front-app check runs only while one does. */
+	readonly #seenShown = new Set<object>();
 
 	constructor(opts: SessionModelOptions = {}) {
 		this.#log = opts.log ?? nullLog;
@@ -236,6 +320,7 @@ export class SessionModel implements BridgeRoutes {
 		this.held = new HeldRequests({ log: this.#log });
 		this.commands = new CommandQueue({ clock: this.#clock, log: this.#log, inFlightMs: opts.inFlightMs });
 		this.#inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
+		this.#front = opts.front ? new FrontWatcher(opts.front, () => this.#claudeInFront(), { clock: this.#clock, intervalMs: opts.frontIntervalMs, log: this.#log }) : null;
 		this.held.onChange(() => this.#emit());
 		this.commands.onChange(() => this.#emit());
 		this.commands.onUnpolled((host) => this.#unpolled(host));
@@ -246,9 +331,10 @@ export class SessionModel implements BridgeRoutes {
 		return () => this.#listeners.delete(listener);
 	}
 
-	/** Stops the command queue's timers. */
+	/** Stops the command queue's timers, and the front-app check's. */
 	dispose(): void {
 		this.commands.dispose();
+		this.#front?.dispose();
 	}
 
 	// ---- sources ----
@@ -274,6 +360,7 @@ export class SessionModel implements BridgeRoutes {
 	 */
 	setRegistry(sessions: readonly RegistrySession[]): void {
 		const now = this.#wallNow();
+		this.#registryRead = true;
 		const next = new Map<string, RegistrySession>();
 		for (const s of sessions) {
 			const key = keyOf(s);
@@ -330,15 +417,59 @@ export class SessionModel implements BridgeRoutes {
 		this.#emit();
 	}
 
-	/** The app's records of the listed sessions, by host. */
-	setRecords(records: ReadonlyMap<string, AppRecord>): void {
+	/**
+	 * The app's records of the listed sessions and the kept ones, by host, and the hosts the scan looked for and found
+	 * no file for (RecordsWatcher's listener).
+	 */
+	setRecords(records: ReadonlyMap<string, AppRecord>, missing: ReadonlySet<string> = new Set()): void {
 		this.#records = new Map(records);
+		this.#missing = new Set(missing);
 		this.#emit();
 	}
 
-	/** The hosts the registry lists, whose app records the deck reads. */
+	/**
+	 * The hosts whose app records the deck reads: the ones the registry lists, in its order, then the kept ones it
+	 * doesn't list (keepHosts), sorted.
+	 */
 	hosts(): string[] {
-		return this.#ordered.map((s) => asHost(s.hostSessionId)).filter((h): h is string => h !== null);
+		const listed = this.#ordered.map((s) => asHost(s.hostSessionId)).filter((h): h is string => h !== null);
+		const seen = new Set(listed);
+		return [...listed, ...[...this.#kept].filter((h) => !seen.has(h)).sort()];
+	}
+
+	/**
+	 * Hosts whose records the deck reads, and whose view slotView keeps, while the registry doesn't list them: the
+	 * slotted sessions (src/slots/slots.ts). Hosts that don't match the app's id pattern are left out.
+	 */
+	keepHosts(hosts: Iterable<string>): void {
+		const next = new Set([...hosts].filter((h) => asHost(h) !== null));
+		if (next.size === this.#kept.size && [...next].every((h) => this.#kept.has(h))) return;
+		this.#kept = next;
+		this.#emit();
+	}
+
+	/** Whether the registry has been read at least once: until then, no session counts as gone from it. */
+	get registryRead(): boolean {
+		return this.#registryRead;
+	}
+
+	/** Whether the registry's latest reading lists the host. */
+	isListed(host: string): boolean {
+		return this.#registry.has(host);
+	}
+
+	/** The host's app record, if the deck has one. */
+	record(host: string): AppRecord | null {
+		return this.#records.get(host) ?? null;
+	}
+
+	/**
+	 * Whether the latest records scan looked for the host's file and found none: with the registry not listing it
+	 * either, a slot lets the session go (session-keys.md, Stay put). False while the deck can't tell, as before the
+	 * first scan that looked for it, or while a folder can't be listed.
+	 */
+	recordMissing(host: string): boolean {
+		return this.#missing.has(host);
 	}
 
 	// ---- the bridge's routes ----
@@ -346,8 +477,9 @@ export class SessionModel implements BridgeRoutes {
 	/**
 	 * `POST /v1/permission`, from a confirmed session only: the deck's own mode change in flight is allowed at once
 	 * (kind mode), and anything else is held. A request from any other process gets no decision at once.
+	 * `inputScrubbed`: the bridge's token scrub changed something inside the body's `tool_input` (BridgeRoutes).
 	 */
-	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void> {
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply, inputScrubbed = false): void | Promise<void> {
 		// When it arrived, for release rules 2 and 3, before any second reading of the registry.
 		const at = this.#wallNow();
 		const p = parsePermission(body);
@@ -356,7 +488,7 @@ export class SessionModel implements BridgeRoutes {
 			reply.send(400, JSON.stringify({ error: "not a PermissionRequest" }));
 			return;
 		}
-		return this.#fromConfirmed(ROUTES.permission, deckHost, p.sid, reply, (host) => this.#takePermission(p, host, at, reply));
+		return this.#fromConfirmed(ROUTES.permission, deckHost, p.sid, reply, (host) => this.#takePermission(p, host, at, reply, inputScrubbed));
 	}
 
 	/**
@@ -495,33 +627,73 @@ export class SessionModel implements BridgeRoutes {
 		if (this.#picked !== null) {
 			const listed = this.session(this.#picked);
 			if (listed) return listed;
-			return {
-				key: this.#picked,
-				host: asHost(this.#picked),
-				pid: null,
-				title: this.#pickedTitle ?? this.#picked,
-				status: "idle",
-				doing: null,
-				context: null,
-				model: null,
-				effort: null,
-				mode: null,
-				plugin: false,
-				listed: false,
-			};
+			return { ...notRunning(this.#picked, this.#pickedTitle ?? this.#picked), host: asHost(this.#picked), since: null };
 		}
-		let best: RegistrySession | null = null;
-		let bestAt = -Infinity;
-		for (const s of this.#ordered) {
-			const host = asHost(s.hostSessionId);
-			if (host === null) continue;
-			const at = Math.max(this.#bridge.get(host)?.onScreenAt ?? -Infinity, this.#records.get(host)?.lastFocusedAt ?? -Infinity);
-			if (at > bestAt) {
-				bestAt = at;
-				best = s;
-			}
-		}
+		const best = this.#onScreenSession();
 		return best ? this.#view(best) : null;
+	}
+
+	/**
+	 * The session on screen in the app: of the running sessions, the one with the latest of its last `attach` (when the
+	 * deck got it) and its record's `lastFocusedAt`; null when none has either. A long press on a slot key takes it
+	 * (session-keys.md, Slots), and until a session is picked it's the target.
+	 */
+	onScreen(): SessionView | null {
+		const best = this.#onScreenSession();
+		return best ? this.#view(best) : null;
+	}
+
+	/**
+	 * A slotted session's view: the registry's, as `session` gives it, while the registry lists it; else one from its
+	 * app record alone, `running` false (session-keys.md, What each session shows): its title, model, effort, mode,
+	 * summary, needs, project and archived, with `since` the record's `lastActivityAt`. A host without a record yet reads
+	 * as "Unknown session". Null for a host that isn't an app id.
+	 */
+	slotView(host: string): SessionView | null {
+		const h = asHost(host);
+		if (h === null) return null;
+		const listed = this.#registry.get(h);
+		if (listed) return this.#view(listed);
+		const rec = this.#records.get(h);
+		return {
+			...notRunning(h, rec?.title ?? projectName(rec?.cwd) ?? "Unknown session"),
+			model: rec?.model ?? null,
+			effort: rec?.effort ?? null,
+			mode: rec?.permissionMode ?? null,
+			since: rec?.lastActivityAt ?? null,
+			summary: rec?.summary ?? null,
+			needs: rec?.needs ?? null,
+			project: projectName(rec?.cwd),
+			archived: rec?.isArchived ?? false,
+		};
+	}
+
+	/**
+	 * Whether `who` (the slot keys, the Others keys) shows `seen` on the deck now. The front-app check runs only while
+	 * something does, so a deck with none of those keys never asks lsappinfo.
+	 */
+	showsSeen(who: object, shows: boolean): void {
+		const before = this.#seenShown.size > 0;
+		if (shows) this.#seenShown.add(who);
+		else this.#seenShown.delete(who);
+		const now = this.#seenShown.size > 0;
+		if (now === before) return;
+		this.#log.debug(`SEEN ${now ? "shown on the deck: the front-app check may run" : "shown nowhere on the deck: the front-app check stops"}`);
+		try {
+			this.#front?.want(this.#wantsFront(this.sessions()));
+		} catch (err) {
+			this.#log.error(`starting or stopping the front-app check threw: ${describeError(err)}`);
+		}
+	}
+
+	/**
+	 * The user pressed the session's slot key, or jumped to it from its dial: a turn's end before now counts as seen
+	 * (session-keys.md, `seen`). Only for a session the registry lists.
+	 */
+	markSeen(host: string): void {
+		if (!this.#registry.has(host)) return;
+		this.#pressedAt.set(host, this.#wallNow());
+		this.#emit();
 	}
 
 	/** Whether a session was picked on the Sessions dial (rather than the target following the app). */
@@ -529,13 +701,17 @@ export class SessionModel implements BridgeRoutes {
 		return this.#picked;
 	}
 
-	/** The Sessions dial picked a session: it's the target from now on. */
-	pick(key: string): void {
+	/**
+	 * A session was picked: on the Sessions dial, or by a press on its slot key or a jump from its dial. It's the target
+	 * from now on. `via` names where, for the log.
+	 */
+	pick(key: string, via = "the Sessions dial"): void {
 		const s = this.#registry.get(key);
 		if (s) this.#pickedTitle = this.#title(s);
+		else if (this.#picked !== key) this.#pickedTitle = this.slotView(key)?.title ?? null;
 		if (this.#picked === key) return;
 		this.#picked = key;
-		this.#log.info(`TARGET ${key}: picked on the Sessions dial`);
+		this.#log.info(`TARGET ${key}: picked on ${via}`);
 		this.#emit();
 	}
 
@@ -566,7 +742,7 @@ export class SessionModel implements BridgeRoutes {
 			case "turn.start":
 				if (e.agent !== null) return;
 				// When the deck got it, on its wall clock: status rule 3 compares it with when the registry's idle began.
-				b.turn = { id: e.turn, ended: false, reason: null, failed: false, startedAt: this.#wallNow(), endedAt: null };
+				b.turn = { id: e.turn, ended: false, reason: null, failed: false, startedAt: this.#wallNow(), endedAt: null, failedAt: null };
 				b.tools = [];
 				b.pollsAtOnceUntil = null;
 				return;
@@ -574,7 +750,15 @@ export class SessionModel implements BridgeRoutes {
 				if (e.agent !== null) return;
 				// A `failed` for this same turn stays: the status says failed, whatever the reason.
 				const same = b.turn !== null && (e.turn === null || b.turn.id === null || b.turn.id === e.turn);
-				b.turn = { id: e.turn ?? b.turn?.id ?? null, ended: true, reason: e.reason, failed: same && (b.turn?.failed ?? false), startedAt: same ? (b.turn?.startedAt ?? null) : null, endedAt: this.#wallNow() };
+				b.turn = {
+					id: e.turn ?? b.turn?.id ?? null,
+					ended: true,
+					reason: e.reason,
+					failed: same && (b.turn?.failed ?? false),
+					startedAt: same ? (b.turn?.startedAt ?? null) : null,
+					endedAt: this.#wallNow(),
+					failedAt: same ? (b.turn?.failedAt ?? null) : null,
+				};
 				b.tools = [];
 				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
 				this.#answerPoll(b, "the turn ended");
@@ -582,7 +766,7 @@ export class SessionModel implements BridgeRoutes {
 			}
 			case "failed":
 				if (e.agent !== null) return;
-				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, startedAt: b.turn?.startedAt ?? null, endedAt: b.turn?.endedAt ?? null };
+				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, startedAt: b.turn?.startedAt ?? null, endedAt: b.turn?.endedAt ?? null, failedAt: this.#wallNow() };
 				b.tools = [];
 				this.#log.info(`FAILED turn in ${b.host}${e.error ? `: ${quote(e.error, 120)}` : ""}`);
 				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
@@ -607,8 +791,12 @@ export class SessionModel implements BridgeRoutes {
 			}
 			case "measure":
 				// The latest measure's, which has none until the engine has a response to count: a fresh session,
-				// or one just compacted, whose old figure no longer holds.
+				// or one just compacted, whose old figure no longer holds. The same for its tokens. The window is
+				// always sent, and the cost only once the engine has one, which then only grows: the last stays.
 				b.context = e.percent;
+				b.tokens = e.tokens;
+				if (e.window !== null) b.window = e.window;
+				if (e.usd !== null) b.cost = e.usd;
 				return;
 			case "settings":
 				if (e.model) b.settings.model = e.model;
@@ -616,9 +804,15 @@ export class SessionModel implements BridgeRoutes {
 				take(b, "effort", e.effort, "settings");
 				return;
 			case "attach":
-				b.onScreenAt = this.#wallNow();
-				return;
 			case "detach":
+				// Each client on the session sends its own: only the desktop app's says it's on screen in the app.
+				if (e.surface !== DESKTOP_SURFACE) {
+					this.#log.debug(`SCREEN ${b.host}: ${e.t} from ${e.surface === null ? "no surface" : `the ${quote(e.surface, 40)} surface`} ignored: only the desktop app's counts`);
+					return;
+				}
+				if (e.t === "attach") b.onScreenAt = this.#wallNow();
+				else b.offScreenAt = this.#wallNow();
+				b.screen = e.t;
 				return;
 			case "end":
 				this.#log.info(`END ${b.host}: ${quote(e.reason, 60)}`);
@@ -860,9 +1054,9 @@ export class SessionModel implements BridgeRoutes {
 	/**
 	 * A PermissionRequest from a confirmed session. Its mode and effort are the session's, the engine's own at that
 	 * moment, which no hello replaces (`take`). Kind mode, the deck's own mode change in flight, is allowed at once,
-	 * once per command; anything else is held (PROTOCOL.md, Permission requests).
+	 * once per command; anything else is held (PROTOCOL.md, Permission requests). `inputScrubbed`: as for `permission`.
 	 */
-	#takePermission(p: PermissionRequest, host: string, at: number, reply: PollReply): void {
+	#takePermission(p: PermissionRequest, host: string, at: number, reply: PollReply, inputScrubbed: boolean): void {
 		const b = this.#bridgeFor(host);
 		take(b, "mode", p.mode, "permission");
 		take(b, "effort", p.effort, "permission");
@@ -878,10 +1072,17 @@ export class SessionModel implements BridgeRoutes {
 				return;
 			}
 		}
-		const held = this.held.hold(
-			{ at, host, tool: p.tool, kind: ASK_TOOLS.has(p.tool) ? "ask" : "tool", summary: summary(p.tool, p.input), fp: fingerprintOrNull(p.tool, p.input) },
-			reply,
-		);
+		// An ask keeps its tool_input, while it's at most 64 KiB of JSON, so its session's dial can show the form or the
+		// plan and echo it back; over that, a form the deck can't read, or an input the token scrub changed, which can't
+		// go back as it came, it's display-only (PROTOCOL.md, Held requests). A tool's request keeps nothing: Allow and
+		// Deny echo no input, so the scrub changes nothing for it.
+		const kind = ASK_TOOLS.has(p.tool) ? "ask" : "tool";
+		const ask = kind === "ask" ? heldAsk(p.tool, p.input, { scrubbed: inputScrubbed }) : null;
+		if (ask?.t === "inApp") {
+			const why = ask.why === "scrubbed" ? "scrubbed: the bridge took a run of its token out of the tool_input, so an answer couldn't echo it as it came" : ask.why;
+			this.#log.info(`ASK ${quote(p.tool, 40)} from ${host} is display-only (${why}): its dial reads "Answer in app"`);
+		}
+		const held = this.held.hold({ at, host, tool: p.tool, kind, summary: summary(p.tool, p.input), fp: fingerprintOrNull(p.tool, p.input), ask }, reply);
 		reply.onClose(() => this.held.close(held.id));
 	}
 
@@ -923,7 +1124,13 @@ export class SessionModel implements BridgeRoutes {
 				pollsAtOnceUntil: null,
 				tools: [],
 				context: null,
+				tokens: null,
+				window: null,
+				cost: null,
 				onScreenAt: null,
+				offScreenAt: null,
+				screen: null,
+				frontSeenAt: null,
 			};
 			this.#bridge.set(host, b);
 		}
@@ -947,6 +1154,7 @@ export class SessionModel implements BridgeRoutes {
 		for (const h of this.held.forHost(host)) this.held.release(h.id, "no registry file lists the session any more (rule 4)");
 		this.commands.failHost(host, "the session ended");
 		this.#bridge.delete(host);
+		this.#pressedAt.delete(host);
 		this.#noHellos.forget(host);
 		this.#log.info(`ENDED ${host}: no registry file lists it any more`);
 	}
@@ -956,20 +1164,23 @@ export class SessionModel implements BridgeRoutes {
 		const b = host === null ? undefined : this.#bridge.get(host);
 		const rec = host === null ? undefined : this.#records.get(host);
 		const held = host === null ? [] : this.held.forHost(host);
+		const firstReadingAt = this.#firstReadings.get(keyOf(s)) ?? null;
+		const state = sessionState({
+			heldTool: held.filter((h) => h.kind === "tool").length,
+			heldAsk: held.filter((h) => h.kind === "ask").length,
+			registry: s.status,
+			statusUpdatedAt: s.statusUpdatedAt,
+			firstReadingAt,
+			turn: b?.turn ?? null,
+			recordCategory: rec?.turnCategory ?? null,
+		});
+		const oldest = held[0] ?? null;
 		return {
 			key: keyOf(s),
 			host,
 			pid: s.key,
 			title: this.#title(s),
-			status: sessionStatus({
-				heldTool: held.filter((h) => h.kind === "tool").length,
-				heldAsk: held.filter((h) => h.kind === "ask").length,
-				registry: s.status,
-				statusUpdatedAt: s.statusUpdatedAt,
-				firstReadingAt: this.#firstReadings.get(keyOf(s)) ?? null,
-				turn: b?.turn ?? null,
-				recordCategory: rec?.turnCategory ?? null,
-			}),
+			status: state.status,
 			doing: b?.tools.at(-1)?.summary ?? null,
 			context: b?.context ?? null,
 			model: b?.settings.model ?? rec?.model ?? null,
@@ -977,7 +1188,89 @@ export class SessionModel implements BridgeRoutes {
 			mode: b?.settings.mode ?? rec?.permissionMode ?? null,
 			plugin: (b?.inst ?? null) !== null,
 			listed: true,
+			running: true,
+			need: needOf(state, oldest),
+			since: since(state, s.statusUpdatedAt ?? firstReadingAt, b?.turn ?? null, oldest),
+			seen: this.#seen(state, host, b, rec),
+			tokens: b?.tokens ?? null,
+			window: b?.window ?? null,
+			cost: b?.cost ?? null,
+			summary: rec?.summary ?? null,
+			needs: rec?.needs ?? null,
+			project: projectName(s.cwd ?? b?.cwd ?? rec?.cwd),
+			startedAt: s.startedAt,
+			archived: rec?.isArchived ?? false,
 		};
+	}
+
+	/**
+	 * Whether the user has looked at the session since its last turn ended (session-keys.md, `seen`), for a done,
+	 * failed or interrupted session, and for an idle one; null for any other status. A turn's end is seen once, at or
+	 * after it, by any of:
+	 * - an `attach` the deck got, or the record's `lastFocusedAt`: the session came on screen;
+	 * - the front-app check finding the session on screen (its last `attach` after its last `detach`) with Claude in
+	 *   front (#claudeInFront);
+	 * - a press on its slot key, or a jump from its dial (markSeen).
+	 * An idle session, whose turn end the deck didn't see (after a deck restart, say), is unseen when its record's
+	 * `lastActivityAt` is later than its `lastFocusedAt`, until one of those comes after that activity.
+	 */
+	#seen(state: SessionState, host: string | null, b: BridgeSession | undefined, rec: AppRecord | undefined): boolean | null {
+		let unseenSince: number | null;
+		if (state.status === "done" || state.status === "failed" || state.status === "interrupted") unseenSince = b?.turn ? endedAt(b.turn) : null;
+		else if (state.status === "idle") {
+			const activity = rec?.lastActivityAt ?? null;
+			unseenSince = activity !== null && activity > (rec?.lastFocusedAt ?? -Infinity) ? activity : null;
+		} else return null;
+		if (unseenSince === null) return true;
+		const looked = Math.max(b?.onScreenAt ?? -Infinity, rec?.lastFocusedAt ?? -Infinity, b?.frontSeenAt ?? -Infinity, (host === null ? undefined : this.#pressedAt.get(host)) ?? -Infinity);
+		return looked >= unseenSince;
+	}
+
+	/** The listed session with the latest of its last `attach` and its record's `lastFocusedAt`; null when none has either. */
+	#onScreenSession(): RegistrySession | null {
+		let best: RegistrySession | null = null;
+		let bestAt = -Infinity;
+		for (const s of this.#ordered) {
+			const host = asHost(s.hostSessionId);
+			if (host === null) continue;
+			const at = Math.max(this.#bridge.get(host)?.onScreenAt ?? -Infinity, this.#records.get(host)?.lastFocusedAt ?? -Infinity);
+			if (at > bestAt) {
+				bestAt = at;
+				best = s;
+			}
+		}
+		return best;
+	}
+
+	/** Whether the mod last said its session came on screen (`attach`), not that it left it. */
+	#onScreenNow(host: string | null): boolean {
+		return host !== null && this.#bridge.get(host)?.screen === "attach";
+	}
+
+	/**
+	 * Whether the front-app check is needed: some session whose last turn ended unseen is on screen in the app, and
+	 * something on the deck shows `seen`.
+	 */
+	#wantsFront(views: readonly SessionView[]): boolean {
+		return this.#seenShown.size > 0 && views.some((v) => v.seen === false && this.#onScreenNow(v.host));
+	}
+
+	/**
+	 * The front-app check found Claude in front: each session on screen whose last turn ended unseen is seen now. One
+	 * debug line each, so a hardware test can time it from the log.
+	 */
+	#claudeInFront(): void {
+		const now = this.#wallNow();
+		let any = false;
+		for (const v of this.sessions()) {
+			if (v.seen !== false || !this.#onScreenNow(v.host) || v.host === null) continue;
+			const b = this.#bridge.get(v.host);
+			if (!b) continue;
+			b.frontSeenAt = now;
+			any = true;
+			this.#log.debug(`SEEN ${v.host}: on screen with Claude in front`);
+		}
+		if (any) this.#emit();
 	}
 
 	/** The sidebar title; else the app's record's; else the folder's name; else the pid. */
@@ -993,9 +1286,9 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/** Each listed session's status when it changes, at debug, so a hardware test can time it from the log. */
-	#logStatuses(): void {
+	#logStatuses(views: readonly SessionView[]): void {
 		const statuses = new Map<string, SessionStatus>();
-		for (const { key, status } of this.sessions()) {
+		for (const { key, status } of views) {
 			const was = this.#statuses.get(key);
 			if (status !== was) this.#log.debug(`STATUS ${key} ${was === undefined ? "" : `${was} `}→ ${status}`);
 			statuses.set(key, status);
@@ -1004,9 +1297,11 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	#emit(): void {
-		// Only a log line: a throw here mustn't escape into a hold, a release or a route.
+		// Only a log line and a timer: a throw here mustn't escape into a hold, a release or a route.
 		try {
-			this.#logStatuses();
+			const views = this.sessions();
+			this.#logStatuses(views);
+			this.#front?.want(this.#wantsFront(views));
 		} catch (err) {
 			this.#log.error(`logging statuses threw: ${describeError(err)}`);
 		}
@@ -1023,6 +1318,74 @@ export class SessionModel implements BridgeRoutes {
 /** The deck keys sessions by host; a registry file without one by its pid. */
 export function keyOf(s: RegistrySession): string {
 	return asHost(s.hostSessionId) ?? `pid:${s.key}`;
+}
+
+/** A view of a session the registry doesn't list, with nothing known but its key and title. */
+function notRunning(key: string, title: string): SessionView {
+	return {
+		key,
+		host: key,
+		pid: null,
+		title,
+		status: "idle",
+		doing: null,
+		context: null,
+		model: null,
+		effort: null,
+		mode: null,
+		plugin: false,
+		listed: false,
+		running: false,
+		need: null,
+		since: null,
+		seen: null,
+		tokens: null,
+		window: null,
+		cost: null,
+		summary: null,
+		needs: null,
+		project: null,
+		startedAt: null,
+		archived: false,
+	};
+}
+
+/** When the main loop's last turn ended, by the deck's wall clock: the later of its `turn.end` and its `failed`. */
+function endedAt(turn: Turn): number | null {
+	const times = [turn.endedAt, turn.failedAt].filter((t): t is number => t !== null);
+	return times.length === 0 ? null : Math.max(...times);
+}
+
+/**
+ * When the status began, by the rule it came from (SessionView's `since`): the oldest held request's arrival; the
+ * registry's `registryAt` (its `statusUpdatedAt`, else the deck's first reading of that status); the `turn.start`
+ * the deck got; or the turn's end. For the app's needs-input sign, the turn's end when the deck saw one, else the
+ * registry's idle.
+ */
+function since(state: SessionState, registryAt: number | null, turn: Turn | null, oldest: Held | null): number | null {
+	switch (state.from) {
+		case "held-tool":
+		case "held-ask":
+			return oldest?.at ?? null;
+		case "waiting":
+		case "busy":
+		case "idle":
+			return registryAt;
+		case "started":
+			return turn?.startedAt ?? null;
+		case "failed":
+		case "interrupted":
+		case "done":
+			return turn ? endedAt(turn) : null;
+		case "record":
+			return (turn?.ended ? endedAt(turn) : null) ?? registryAt;
+	}
+}
+
+/** What the session waits on: its oldest held request's kind, else `input` while its status says it needs you. */
+function needOf(state: SessionState, oldest: Held | null): Need | null {
+	if (oldest) return oldest.kind === "tool" ? "approval" : oldest.tool === EXIT_PLAN ? "plan" : "question";
+	return state.status === "needs-you" ? "input" : null;
 }
 
 /**

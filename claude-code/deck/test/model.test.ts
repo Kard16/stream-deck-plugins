@@ -39,7 +39,7 @@ function reg(pid: number, host: string | null, fields: Partial<RegistrySession> 
 }
 
 function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
-	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, ...fields };
+	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, ...fields };
 }
 
 /** The session id the registry lists each test host with, as `reg` makes them: A is pid 1, B pid 2. */

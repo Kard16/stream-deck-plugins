@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { DIAL_PLANS } from './protocol.mjs'
+
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 /** The repository root: claude-code/tools/lib is three levels down. */
@@ -15,7 +17,10 @@ export const REPO = path.resolve(HERE, '..', '..', '..')
 export const FIXTURES_DIR = path.join(REPO, 'claude-code', 'protocol', 'fixtures')
 
 export const KINDS = Object.freeze(['note', 'setup', 'mod', 'engine', 'plugin', 'reply', 'press', 'registry', 'expect'])
-export const PRESSES = Object.freeze(['approve', 'deny', 'prompt', 'mode'])
+/** The keys a press line can name: the Approve and Deny keys, Saved Prompt, Mode, and a Session Slot dial (2026-11-04). */
+export const PRESSES = Object.freeze(['approve', 'deny', 'prompt', 'mode', 'dial'])
+/** What a dial line does, one of them: picks for a question, a decision for an approval, or a plan's choice. */
+export const DIAL_ACTIONS = Object.freeze(['picks', 'decision', 'plan'])
 
 export class FixtureError extends Error {}
 
@@ -100,9 +105,19 @@ export function parseFixture(text, file = '<fixture>') {
         if (k.length !== 1 || !PRESSES.includes(k[0])) fail(n, `press has one key, one of ${PRESSES.join(', ')}`)
         const p = value[k[0]]
         if (!isObject(p)) fail(n, `press.${k[0]} must be an object`)
-        if ((k[0] === 'prompt' || k[0] === 'mode') && typeof p.session !== 'string') fail(n, `press.${k[0]}.session must be a host`)
+        if ((k[0] === 'prompt' || k[0] === 'mode' || k[0] === 'dial') && typeof p.session !== 'string') fail(n, `press.${k[0]}.session must be a host`)
         if (k[0] === 'prompt' && typeof p.text !== 'string') fail(n, 'press.prompt.text must be a string')
         if (k[0] === 'mode' && typeof p.mode !== 'string') fail(n, 'press.mode.mode must be a string')
+        if (k[0] === 'dial') {
+          // PROTOCOL.md, "Fixtures": a Session Slot dial's line picks, decides or chooses for its session's request.
+          const what = DIAL_ACTIONS.filter((a) => p[a] !== undefined)
+          if (what.length !== 1) fail(n, `press.dial has one of ${DIAL_ACTIONS.join(', ')}; got ${what.join(', ') || 'none'}`)
+          if (p.decision !== undefined && p.decision !== 'allow' && p.decision !== 'deny') fail(n, 'press.dial.decision must be allow or deny')
+          if (p.plan !== undefined && !DIAL_PLANS.includes(p.plan)) fail(n, `press.dial.plan must be one of ${DIAL_PLANS.join(', ')}`)
+          if (p.picks !== undefined && (!isObject(p.picks) || !Object.values(p.picks).every((v) => Array.isArray(v) && v.every((l) => typeof l === 'string')))) {
+            fail(n, "press.dial.picks maps each question's text to the labels picked for it")
+          }
+        }
         break
       }
       case 'registry':

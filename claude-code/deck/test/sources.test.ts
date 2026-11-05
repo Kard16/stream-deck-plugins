@@ -7,6 +7,8 @@ import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
 import { connectSources } from "../src/model/sources.js";
+import { Slots } from "../src/slots/slots.js";
+import { MemorySlotStore } from "../src/slots/store.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 /** An HTTP answer the test can read. */
@@ -171,6 +173,37 @@ describe("the model's sources, wired as the plugin wires them (connectSources)",
 				chmodSync(registryDir, 0o755);
 			}
 		} finally {
+			registry.stop();
+			records.stop();
+			model.dispose();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("the slotted sessions' records are read too, while the registry doesn't list them, and a slot lets go of one whose record file is gone", async () => {
+		const root = mkdtempSync(path.join(os.tmpdir(), "claude-deck-sources-"));
+		const registryDir = path.join(root, "sessions");
+		const orgDir = path.join(root, "records", "account", "org");
+		mkdirSync(registryDir);
+		mkdirSync(orgDir, { recursive: true });
+		writeFileSync(path.join(orgDir, "local_asleep.json"), JSON.stringify({ title: "Asleep", model: "claude-opus-5-5", isArchived: false }));
+		const { registry, records, model } = connectSources({ registryDir, recordsDir: path.join(root, "records") });
+		const slots = new Slots(model, { store: new MemorySlotStore(new Map([["dev:1:0", "local_asleep"], ["dev:1:1", "local_gone"]])), fillDelayMs: 0 });
+		try {
+			assert.deepEqual(model.hosts(), ["local_asleep", "local_gone"], "the saved slots' hosts, before any reading");
+			await registry.scanNow();
+			await records.scanNow();
+			assert.deepEqual(model.hosts(), ["local_asleep"]);
+			const asleep = model.slotView("local_asleep");
+			assert.deepEqual([asleep?.title, asleep?.running, asleep?.model], ["Asleep", false, "claude-opus-5-5"]);
+			assert.deepEqual(slots.entries(), [["dev:1:0", "local_asleep"]], "no file and not listed: let go");
+			assert.equal(model.recordMissing("local_gone"), false, "and its record is no longer looked for");
+			// Archived in the app: the slot lets it go at the next scan that sees the change.
+			writeFileSync(path.join(orgDir, "local_asleep.json"), JSON.stringify({ title: "Asleep", isArchived: true }));
+			await records.scanNow();
+			assert.deepEqual(slots.entries(), []);
+		} finally {
+			slots.dispose();
 			registry.stop();
 			records.stop();
 			model.dispose();

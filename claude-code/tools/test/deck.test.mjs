@@ -2356,6 +2356,30 @@ test('deck: with no dial, the target is the session on screen latest: its attach
   assert.equal(view().target, B.host, 'focused in the app since')
 })
 
+test("deck: only the desktop app's own attach and detach count, for the target and for being on screen: another surface's, or one with none, changes nothing", () => {
+  // PROTOCOL.md, "Events", as amended on 2026-11-04 for session keys: the mods API sends them per client, so a phone
+  // leaving a session would otherwise take it off a desktop that still shows it.
+  const { deck, clock, reg, hello, ev, view } = setup()
+  reg([A, 'idle'], [B, 'idle'])
+  deck.applyRecord(A.host, { lastFocusedAt: 10 })
+  deck.applyRecord(B.host, { lastFocusedAt: 20 })
+  hello(A)
+  clock.advance(1000)
+  const seen = () => [view().target, deck.state().sessions[A.host].onScreen, deck.state().sessions[A.host].attachAt]
+  for (const surface of ['mobile', 'vscode', 'terminal', 'Desktop', '', null, undefined]) {
+    ev(A, { t: 'attach', ...(surface === undefined ? {} : { surface }) })
+    assert.deepEqual(seen(), [B.host, false, null], `an attach from ${JSON.stringify(surface) ?? 'no surface'}`)
+  }
+  ev(A, { t: 'attach', surface: 'desktop' })
+  assert.deepEqual(seen(), [A.host, true, clock.wall()], "the desktop's attach")
+  for (const surface of ['mobile', 'vscode', undefined]) {
+    ev(A, { t: 'detach', ...(surface === undefined ? {} : { surface }) })
+    assert.deepEqual(seen(), [A.host, true, clock.wall()], `a detach from ${surface ?? 'no surface'}: still on the desktop`)
+  }
+  ev(A, { t: 'detach', surface: 'desktop' })
+  assert.deepEqual(seen().slice(1, 2), [false], "the desktop's detach")
+})
+
 const DOCS = { url: 'https://docs.example.com/a', prompt: 'Summarise' }
 const NEWS = { url: 'https://news.example.com/b', prompt: 'Summarise' }
 const fetchStart = (use, input, fp = fingerprint('WebFetch', input)) => ({ t: 'tool.start', tool: 'WebFetch', use, summary: new URL(input.url).host, fp })
@@ -2589,13 +2613,13 @@ test('deck: answer by id, and an ended request says how it ended', () => {
   assert.throws(() => deck.answer({ id: p1.id, decision: 'yes' }), BadRequest)
 })
 
-test('deck: answer refuses an ask request, which the deck never answers: a press jumps instead', () => {
+test('deck: answer refuses an ask request, which only its session\'s dial answers: a key press jumps instead', () => {
   const { deck, reg, perm, view } = setup()
   reg([A, 'busy'])
   for (const [tool, input] of [['AskUserQuestion', ASK], ['ExitPlanMode', { plan: 'x' }]]) {
     const ask = perm(A, tool, input)
     for (const decision of ['allow', 'deny', 'none']) {
-      assert.throws(() => deck.answer({ id: ask.id, decision }), (err) => err instanceof BadRequest && /never answers: a press on it jumps to local_a instead/.test(err.message))
+      assert.throws(() => deck.answer({ id: ask.id, decision }), (err) => err instanceof BadRequest && /which only local_a's Session Slot dial answers: use dial \(POST \/control\/dial\); a key press on it jumps to local_a/.test(err.message))
     }
     assert.equal(ask.r.sent.length, 0, `${tool}: nothing sent`)
   }

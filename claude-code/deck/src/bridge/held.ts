@@ -1,4 +1,5 @@
-import { ALLOW_DECISION, DENY_DECISION, NO_DECISION } from "../protocol/wire.js";
+import { type AskPicks, askAnswers, type HeldAsk } from "../protocol/ask.js";
+import { ALLOW_DECISION, answerDecision, approvePlanDecision, DENY_DECISION, NO_DECISION, type PlanMode } from "../protocol/wire.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 
 /** How the bridge answers one held HTTP request. The server makes one per request it holds. */
@@ -9,9 +10,9 @@ export interface Responder {
 }
 
 /**
- * `tool`: Approve and Deny answer it. `ask` (AskUserQuestion, ExitPlanMode): shown, never answered; a press
- * jumps to its session. The third kind, `mode`, is allowed at once and never held (PROTOCOL.md, Permission
- * requests).
+ * `tool`: Approve and Deny answer it, and so does its session's Session Slot dial. `ask` (AskUserQuestion,
+ * ExitPlanMode): the keys show it and a press on them jumps to its session; only its session's dial answers it. The
+ * third kind, `mode`, is allowed at once and never held (PROTOCOL.md, Permission requests).
  */
 export type HeldKind = "tool" | "ask";
 
@@ -31,9 +32,31 @@ export type Held = {
 	readonly summary: string;
 	/** Null for a `tool_input` nested too deeply to fingerprint: rule 1 can't release it, but rules 2–5 still do. */
 	readonly fp: string | null;
+	/**
+	 * For an `ask` request, what a dial can do with it (src/protocol/ask.ts): its form or its plan, with its `tool_input`
+	 * kept as it came while that's at most 64 KiB of JSON and the token scrub left it alone, or display-only. Null for a
+	 * `tool` request.
+	 */
+	readonly ask: HeldAsk | null;
 };
 
 export type Decision = "allow" | "deny";
+
+/**
+ * What a Session Slot dial sends for its session's oldest held request (PROTOCOL.md, Held requests): Allow or Deny for
+ * a `tool` request; the picks for an AskUserQuestion, which become an Answer; for an ExitPlanMode, the mode an Approve
+ * plan leaves Plan mode into, or Deny.
+ */
+export type DialAnswer = { t: "allow" } | { t: "deny" } | { t: "answers"; picks: AskPicks } | { t: "plan"; mode: PlanMode };
+
+export type DialAnswerResult =
+	| { ok: true; held: Held; remaining: number }
+	/**
+	 * empty: the session has nothing held. changed: its oldest isn't the request the strip showed. gone: the oldest's
+	 * client had already gone; it's removed. invalid: the answer doesn't fit the request (a plain Allow for a question, a
+	 * plan's mode for a tool, picks that don't check out, a display-only request). Nothing is sent in any of these.
+	 */
+	| { ok: false; why: "empty" | "changed" | "gone" | "invalid"; held: Held | null; detail: string };
 
 export type PressResult =
 	| { ok: true; did: "answered"; held: Held; decision: Decision; remaining: number }
@@ -76,6 +99,11 @@ export class HeldRequests {
 
 	forHost(host: string): Held[] {
 		return this.#entries.filter((e) => e.held.host === host).map((e) => e.held);
+	}
+
+	/** The session's oldest held request, which its Session Slot dial shows and answers; null when it has none. */
+	oldestFor(host: string): Held | null {
+		return this.#entries.find((e) => e.held.host === host)?.held ?? null;
 	}
 
 	onChange(listener: () => void): () => void {
@@ -133,6 +161,37 @@ export class HeldRequests {
 		return { ok: true, did: "answered", held: entry.held, decision, remaining: this.size };
 	}
 
+	/**
+	 * A press on a Session Slot dial (PROTOCOL.md, Held requests). `shownId` is the request the dial's strip showed when
+	 * pressed (null: none). The press acts only on the session's oldest held request, of any kind, and only when that's
+	 * the one shown: newer requests are always younger, so a shown request still held is still the session's oldest.
+	 * The answer must fit the request, and is checked before anything is sent:
+	 * - a `tool` request takes Allow or Deny, the keys' bodies;
+	 * - a question takes picks, which must answer its form (askAnswers), and becomes an Answer: its `tool_input` as it
+	 *   came, plus `answers`;
+	 * - a plan takes a mode, an Approve plan with its `tool_input` unchanged and that `setMode`, or Deny;
+	 * - a display-only request takes nothing.
+	 * The keys and the dials answer the same requests, and the first answer wins: the others find it gone.
+	 */
+	answer(host: string, shownId: number | null, answer: DialAnswer): DialAnswerResult {
+		const i = this.#entries.findIndex((e) => e.held.host === host);
+		const entry = i < 0 ? undefined : this.#entries[i];
+		if (!entry) return { ok: false, why: "empty", held: null, detail: "nothing is held for the session" };
+		if (entry.held.id !== shownId) return { ok: false, why: "changed", held: entry.held, detail: `the strip showed ${shownId === null ? "no request" : `#${shownId}`}, but the session's oldest is #${entry.held.id}` };
+		if (!entry.responder.open) {
+			this.#entries.splice(i, 1);
+			this.#emit();
+			return { ok: false, why: "gone", held: entry.held, detail: `#${entry.held.id} had already closed; removed` };
+		}
+		const built = dialBody(entry.held, answer);
+		if (!built.ok) return { ok: false, why: "invalid", held: entry.held, detail: built.why };
+		this.#entries.splice(i, 1);
+		this.#send(entry, built.body);
+		this.#log.info(`ANSWER #${entry.held.id} ${quote(entry.held.tool, 60)}: ${built.what}, from its session's dial; ${this.size} held`);
+		this.#emit();
+		return { ok: true, held: entry.held, remaining: this.size };
+	}
+
 	#take(id: number): Entry | null {
 		const i = this.#entries.findIndex((e) => e.held.id === id);
 		if (i < 0) return null;
@@ -152,4 +211,24 @@ export class HeldRequests {
 	#emit(): void {
 		for (const listener of [...this.#listeners]) listener();
 	}
+}
+
+/** The body a dial's answer sends for `held`, with what it is for the log; or why it doesn't fit the request. */
+function dialBody(held: Held, answer: DialAnswer): { ok: true; body: unknown; what: string } | { ok: false; why: string } {
+	if (held.kind === "tool") {
+		if (answer.t === "allow") return { ok: true, body: ALLOW_DECISION, what: "allow" };
+		if (answer.t === "deny") return { ok: true, body: DENY_DECISION, what: "deny" };
+		return { ok: false, why: `a ${answer.t === "plan" ? "plan's mode" : "set of answers"} for a tool's request, which takes Allow or Deny` };
+	}
+	const ask = held.ask;
+	if (ask === null || ask.t === "inApp") return { ok: false, why: `the request is display-only (${ask?.why ?? "nothing kept"}), so it's answered in the app` };
+	if (ask.t === "question") {
+		if (answer.t !== "answers") return { ok: false, why: `${answer.t === "plan" ? "a plan's mode" : `a plain ${answer.t === "allow" ? "Allow" : "Deny"}`} for a question, which takes its answers` };
+		const checked = askAnswers(ask.form, answer.picks);
+		if (!checked.ok) return { ok: false, why: checked.why };
+		return { ok: true, body: answerDecision(ask.input, checked.answers), what: `answered ${quote(JSON.stringify(checked.answers), 200)}` };
+	}
+	if (answer.t === "plan") return { ok: true, body: approvePlanDecision(ask.input, answer.mode), what: `plan approved into ${answer.mode}` };
+	if (answer.t === "deny") return { ok: true, body: DENY_DECISION, what: "plan rejected (deny)" };
+	return { ok: false, why: `${answer.t === "allow" ? "a plain Allow" : "answers"} for a plan, which takes a mode or Deny` };
 }

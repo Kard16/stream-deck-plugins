@@ -81,9 +81,17 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 			permissionMode: "acceptEdits",
 			lastFocusedAt: 1_793_573_111_660,
 			turnCategory: "completed",
+			// Phase 7's: not archived, no lastActivityAt in this record, its folder, the summary's status_detail (it's
+			// for the last assistant message), and no needs (needs_action is empty).
+			isArchived: false,
+			lastActivityAt: null,
+			cwd: "/Users/me/sandbox",
+			summary: "replied ok",
+			needs: null,
 		});
 		assert.equal(records.get(B)?.turnCategory, "review_ready");
 		assert.equal(records.get(C)?.turnCategory, "blocked");
+		assert.equal(records.get(C)?.needs, "Merge PR #12?");
 	});
 
 	test("only the listed hosts are read, each once until its file changes", async () => {
@@ -139,6 +147,96 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 		write(org, A, record(A, { permissionMode: "auto" }));
 		await watcher.scanNow();
 		assert.deepEqual(seen, [[`${A}:acceptEdits`], [`${A}:auto`]]);
+	});
+
+	test("the hosts it looked for and found no file for are missing; one that's there but doesn't parse isn't", async () => {
+		write(org, A, record(A));
+		write(org, B, "{half");
+		const reader = new RecordsReader(root);
+		await reader.scan([A, B, C]);
+		assert.deepEqual([...reader.missing].sort(), [C]);
+		// A file that goes is missing at the next scan; one that comes back isn't.
+		rmSync(path.join(org, `${A}.json`));
+		await reader.scan([A, B, C]);
+		assert.deepEqual([...reader.missing].sort(), [A, C]);
+		write(org, C, record(C));
+		await reader.scan([A, B, C]);
+		assert.deepEqual([...reader.missing], [A]);
+		// A host it wasn't asked about isn't missing.
+		await reader.scan([B]);
+		assert.deepEqual([...reader.missing], []);
+	});
+
+	test("a scan that can't list every folder can't tell what's missing, so nothing is", async () => {
+		write(org, A, record(A));
+		const failing: RecordsFs = {
+			readdir: (dir) => (dir.endsWith("account-2") ? Promise.reject(Object.assign(new Error("denied"), { code: "EACCES" })) : nodeRecordsFs.readdir(dir)),
+			stat: (file) => nodeRecordsFs.stat(file),
+			readFile: (file) => nodeRecordsFs.readFile(file),
+		};
+		mkdirSync(path.join(root, "account-2"));
+		const reader = new RecordsReader(root, { fs: failing });
+		assert.equal((await reader.scan([A, C])).size, 1);
+		assert.deepEqual([...reader.missing], [], "C may be in the folder it couldn't list");
+		const gone = new RecordsReader(path.join(root, "nope"));
+		await gone.scan([A]);
+		assert.deepEqual([...gone.missing], [], "no folder at all: can't tell either");
+	});
+
+	test("the watcher tells listeners which hosts are missing, and when that changes", async () => {
+		write(org, A, record(A));
+		const watcher = new RecordsWatcher(new RecordsReader(root));
+		const seen: string[][] = [];
+		watcher.onChange((_records, missing) => seen.push([...missing].sort()));
+		watcher.setHosts([A, B]);
+		await watcher.scanNow();
+		await watcher.scanNow();
+		write(org, B, record(B));
+		await watcher.scanNow();
+		assert.deepEqual(seen, [[B], []]);
+		assert.deepEqual([...watcher.missing], []);
+	});
+
+	test("an archived session, its last activity, its folder, and what its last turn did and needs", async () => {
+		write(org, A, record(A, { isArchived: true, lastActivityAt: 1_793_573_200_000 }));
+		write(org, B, record(B, { isArchived: "yes", lastActivityAt: "soon", cwd: 7 }));
+		const records = await new RecordsReader(root).scan([A, B]);
+		assert.deepEqual([records.get(A)?.isArchived, records.get(A)?.lastActivityAt, records.get(A)?.cwd], [true, 1_793_573_200_000, "/Users/me/sandbox"]);
+		assert.deepEqual([records.get(B)?.isArchived, records.get(B)?.lastActivityAt, records.get(B)?.cwd], [false, null, null], "only true archives");
+	});
+});
+
+describe("the last turn's summary and needs, read the way status rule 6 reads the record", () => {
+	const LAST_ID = "9b1f0000-0000-4000-8000-0000000000aa";
+	const forLast = { lastAssistantUuid: LAST_ID, postTurnSummaryFor: LAST_ID };
+	const read = (fields: Record<string, unknown>) => {
+		const r = parseRecord(A, JSON.stringify(fields));
+		return { summary: r?.summary ?? null, needs: r?.needs ?? null };
+	};
+
+	test("the summary's status_detail and needs_action, when it's for the last assistant message", () => {
+		assert.deepEqual(read({ ...forLast, postTurnSummary: { status_detail: "Ran the tests", needs_action: "Merge?" } }), { summary: "Ran the tests", needs: "Merge?" });
+	});
+
+	test("a summary that doesn't count, or isn't valid, says nothing; a valid wrap-up makes it count", () => {
+		const summary = { status_detail: "Ran the tests", needs_action: "Merge?" };
+		assert.deepEqual(read({ postTurnSummary: summary }), { summary: null, needs: null }, "not for the last message, no wrap-up");
+		assert.deepEqual(read({ ...forLast, postTurnSummary: { ...summary, is_noteworthy: "yes" } }), { summary: null, needs: null }, "dropped by the loader");
+		assert.deepEqual(read({ postTurnSummary: summary, turnWrapUp: { description: "" } }), { summary: "Ran the tests", needs: "Merge?" }, "a valid wrap-up, empty description included");
+	});
+
+	test("else the wrap-up's description; its needsUser comes before the summary's needs_action", () => {
+		assert.deepEqual(read({ turnWrapUp: { description: "Opened PR #12.", needsUser: "Merge PR #12?" } }), { summary: "Opened PR #12.", needs: "Merge PR #12?" });
+		assert.deepEqual(read({ ...forLast, postTurnSummary: { status_detail: "Opened a PR", needs_action: "old ask" }, turnWrapUp: { description: "x", needsUser: "Merge PR #12?" } }), { summary: "Opened a PR", needs: "Merge PR #12?" });
+		assert.deepEqual(read({ ...forLast, postTurnSummary: { needs_action: "Merge?" }, turnWrapUp: { description: "Opened PR #12.", needsUser: "" } }), { summary: "Opened PR #12.", needs: "Merge?" }, "an empty needsUser says nothing");
+		assert.deepEqual(read({ turnWrapUp: { description: "x", needsUser: 3 } }), { summary: null, needs: null }, "an invalid wrap-up is ignored");
+	});
+
+	test("text that's empty or only spaces is none; text is trimmed and cut", () => {
+		assert.deepEqual(read({ ...forLast, postTurnSummary: { status_detail: "   ", needs_action: "" }, turnWrapUp: { description: "  Done it  " } }), { summary: "Done it", needs: null });
+		const long = read({ turnWrapUp: { description: "y".repeat(500) } }).summary ?? "";
+		assert.equal(long.length, 300);
+		assert.ok(long.endsWith("…"));
 	});
 });
 

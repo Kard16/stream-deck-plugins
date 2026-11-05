@@ -34,6 +34,7 @@ export const CONTROL_ROUTES = Object.freeze({
   '/control/answer': 'POST',
   '/control/approve': 'POST',
   '/control/deny': 'POST',
+  '/control/dial': 'POST',
   '/control/prompt': 'POST',
   '/control/mode': 'POST',
   '/control/rescan': 'POST',
@@ -52,7 +53,6 @@ const NODE_ERRORS = Object.freeze({ HPE_HEADER_OVERFLOW: 431, HPE_CHUNK_EXTENSIO
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const pad = (n, w = 2) => String(n).padStart(w, '0')
 const round1 = (x) => Math.round(x * 10) / 10
-const escapeRe = (s) => s.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
 
 /**
  * What an exception says, on one short line. Nothing about it can throw again: a getter, a toString, a
@@ -68,29 +68,119 @@ export function errorText(err) {
 }
 
 /**
- * What every body is scrubbed with before it's read, and every log line before it's written: the token and
- * any run of TOKEN_RUN or more of its characters become `<token>`, both as they are and as JSON escapes
- * them. A run is enough to leak it: the mod cuts a summary to 39 characters from an input that holds the
- * token, so its tool.start can carry the token's first few characters without the rest.
+ * The deck's Scrubber for one secret (claude-code/deck/src/util/log.ts): every window of TOKEN_RUN characters of
+ * `text` that's also one of the secret's is covered, and each run of overlapping or touching windows becomes one
+ * `<token>`, so the secret written twice in a row is one. A run is enough to leak it: the mod cuts a summary to 39
+ * characters from an input that holds the token, so its tool.start can carry the token's first few characters without
+ * the rest. A secret shorter than TOKEN_RUN is only taken out whole, and an empty one takes nothing out. One pass, with
+ * no regular expression, so its time grows only with the text's length.
+ */
+export function secretScrubber(secret) {
+  if (secret === '') return (text) => text
+  if (secret.length < TOKEN_RUN) return (text) => text.split(secret).join('<token>')
+  const chars = new Set()
+  for (let i = 0; i < secret.length; i++) chars.add(secret.charCodeAt(i))
+  const windows = new Set()
+  for (let i = 0; i + TOKEN_RUN <= secret.length; i++) windows.add(secret.slice(i, i + TOKEN_RUN))
+  return (text) => {
+    if (text.length < TOKEN_RUN) return text
+    let out = ''
+    let copied = 0
+    // The covered run being built, [start, end).
+    let start = -1
+    let end = -1
+    // How many of the secret's characters in a row end at i: only a window made wholly of them can be one of its.
+    let stretch = 0
+    for (let i = 0; i < text.length; i++) {
+      if (!chars.has(text.charCodeAt(i))) {
+        stretch = 0
+        continue
+      }
+      if (++stretch < TOKEN_RUN) continue
+      const from = i + 1 - TOKEN_RUN
+      if (!windows.has(text.slice(from, i + 1))) continue
+      if (from > end) {
+        if (start >= 0) {
+          out += `${text.slice(copied, start)}<token>`
+          copied = end
+        }
+        start = from
+      }
+      end = i + 1
+    }
+    if (start < 0) return text
+    return `${out}${text.slice(copied, start)}<token>${text.slice(end)}`
+  }
+}
+
+/**
+ * What every line of the log, every control answer and every line on stdout is scrubbed with: the token and any run
+ * of TOKEN_RUN or more of its characters, as secretScrubber takes them out, both as they are and as JSON escapes them,
+ * since a line of the log is JSON. A body is scrubbed once it has parsed, with the token as it is (scrubBody).
  */
 export function scrubber(token) {
-  const alternatives = []
-  for (const t of new Set([token, JSON.stringify(token).slice(1, -1)])) {
-    if (t === '') continue
-    if (t.length < TOKEN_RUN) {
-      alternatives.push(escapeRe(t))
-      continue
-    }
-    // Each place a run can start, then as much more of the token as follows it: abcdefgh(?:i(?:j)?)?
-    for (let j = 0; j + TOKEN_RUN <= t.length; j++) {
-      let more = ''
-      for (let k = t.length - 1; k >= j + TOKEN_RUN; k--) more = `(?:${escapeRe(t[k])}${more})?`
-      alternatives.push(`${escapeRe(t.slice(j, j + TOKEN_RUN))}${more}`)
+  const scrubs = [...new Set([token, JSON.stringify(token).slice(1, -1)])].map(secretScrubber)
+  return (text) => scrubs.reduce((t, scrub) => scrub(t), text)
+}
+
+/**
+ * A parsed body with the token taken out of every string in it, names included, as the deck's bridge takes it out
+ * (scrubJson in claude-code/deck/src/bridge/server.ts; PROTOCOL.md, "Transport"): after parsing, so a number that holds
+ * a run of the token's digits is left alone, and a body that parses is never refused for the scrub. `scrub` is
+ * secretScrubber's, for the token as it is. Also whether that changed anything inside the body's own top-level
+ * `tool_input`, a value or a name at any depth, or the input itself when it's a string (`inputScrubbed`): such an input
+ * can't go back as it came, so an ask request's is display-only. A change anywhere else, a transcript path say, doesn't
+ * count. The body is changed in place, since nothing else holds it, and walked from a list of the objects and arrays
+ * still to visit rather than by recursion, so no depth of nesting can overflow the stack. A renamed key is defined as
+ * JSON.parse defines it, so a "__proto__" stays an ordinary key; of two names that scrub alike, the later value wins,
+ * in the earlier's place.
+ */
+export function scrubBody(body, scrub) {
+  if (typeof body === 'string') return { body: scrub(body), inputScrubbed: false }
+  let inputScrubbed = false
+  // Beside each object or array still to visit, whether it's the body's tool_input or inside it.
+  const todo = [body]
+  const inInput = [false]
+  while (todo.length > 0) {
+    const value = todo.pop()
+    const inside = inInput.pop() === true
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const v = value[i]
+        if (typeof v === 'string') {
+          const s = scrub(v)
+          if (inside && s !== v) inputScrubbed = true
+          value[i] = s
+        } else if (v !== null && typeof v === 'object') {
+          todo.push(v)
+          inInput.push(inside)
+        }
+      }
+    } else if (isObject(value)) {
+      let renamed = false
+      for (const k of Object.keys(value)) {
+        const v = value[k]
+        const input = inside || (value === body && k === 'tool_input')
+        if (typeof v === 'string') {
+          const s = scrub(v)
+          if (input && s !== v) inputScrubbed = true
+          value[k] = s
+        } else if (v !== null && typeof v === 'object') {
+          todo.push(v)
+          inInput.push(input)
+        }
+        if (scrub(k) !== k) {
+          renamed = true
+          if (inside) inputScrubbed = true
+        }
+      }
+      if (!renamed) continue
+      const entries = Object.entries(value)
+      for (const [k] of entries) delete value[k]
+      for (const [k, v] of entries) Object.defineProperty(value, scrub(k), { value: v, writable: true, enumerable: true, configurable: true })
     }
   }
-  if (!alternatives.length) return (text) => text
-  const runs = new RegExp(alternatives.join('|'), 'g')
-  return (text) => text.replace(runs, '<token>')
+  return { body, inputScrubbed }
 }
 
 function clock(d = new Date()) {
@@ -201,8 +291,17 @@ export async function startFakeBridge(options = {}) {
   const logFile = path.join(runDir, 'events.jsonl')
   const print = o.quiet ? () => {} : (o.print ?? ((line) => process.stdout.write(`${line}\n`)))
   // The token never reaches the log: every line is scrubbed of it, and of any run of it, whatever field it
-  // hid in.
+  // hid in. Bodies are scrubbed as the deck scrubs them, once they've parsed, of the token as it is.
   const scrub = scrubber(token)
+  const scrubToken = secretScrubber(token)
+  // A number whose digits hold a run of the token, which a body can carry since the scrub leaves numbers alone, goes
+  // into a line of the log or a control answer as a string, scrubbed, so the line is still JSON once it's scrubbed.
+  const numbers = (k, v) => {
+    if (typeof v !== 'number') return v
+    const text = JSON.stringify(v)
+    const scrubbed = scrub(text)
+    return scrubbed === text ? v : scrubbed
+  }
   // A log that can't be written (its folder gone, the disk full) must not take the bridge down with it, and
   // nor must a line that can't be made: one holding a body nested too deep for JSON.stringify keeps its plain
   // fields, which can't fail, and says why the rest is missing.
@@ -210,10 +309,10 @@ export async function startFakeBridge(options = {}) {
   const write = (obj) => {
     let line
     try {
-      line = JSON.stringify(obj)
+      line = JSON.stringify(obj, numbers)
     } catch (err) {
       const plain = Object.entries(obj).filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v))
-      line = JSON.stringify({ ...Object.fromEntries(plain), unlogged: errorText(err) })
+      line = JSON.stringify({ ...Object.fromEntries(plain), unlogged: errorText(err) }, numbers)
     }
     try {
       fs.appendFileSync(logFile, `${scrub(line)}\n`)
@@ -324,7 +423,7 @@ export async function startFakeBridge(options = {}) {
       if (answered || res.writableEnded || res.destroyed) return false
       let text
       try {
-        text = json === undefined ? '' : JSON.stringify(json)
+        text = json === undefined ? '' : JSON.stringify(json, isControl ? numbers : undefined)
       } catch (err) {
         // Written out before the request counts as answered: a body that can't be, one nested too deep, gets a
         // plain 500 in its place, which can't fail, rather than no answer at all.
@@ -405,17 +504,24 @@ export async function startFakeBridge(options = {}) {
           return
         }
         let body
+        let inputScrubbed = false
         if (method === 'POST' && !(isControl && text === '')) {
+          let parsed
           try {
-            // The token, and any run of it, is taken out before anything reads the body, as the deck takes the
-            // token: a summary cut short, the bridge's or the mod's, could otherwise carry part of it into the
-            // state and the log. A request whose input held the token then gets another fp than the mod's, and
-            // is released by the other rules.
-            body = JSON.parse(scrub(text))
+            parsed = JSON.parse(text)
           } catch {
             reject(400, "the body isn't JSON")
             return
           }
+          // The token, and any run of it, is taken out of every string and name before anything reads the body, as
+          // the deck takes it out (PROTOCOL.md, "Transport"): a summary cut short, the bridge's or the mod's, could
+          // otherwise carry part of it into the state and the log. A request whose input held the token then gets
+          // another fp than the mod's, and is released by the other rules. A permission request whose tool_input the
+          // scrub changed can't be echoed back as it came, as an Answer or an Approve plan must be (PROTOCOL.md,
+          // "Permission requests"): the deck keeps no such input, and its dial shows Answer in app.
+          const scrubbed = scrubBody(parsed, scrubToken)
+          body = scrubbed.body
+          inputScrubbed = route === ROUTES.permission && scrubbed.inputScrubbed
           entry.body = forLog(body, text)
           if (!isObject(body)) {
             reject(400, 'the body must be a JSON object')
@@ -435,7 +541,7 @@ export async function startFakeBridge(options = {}) {
         // Taken once it's answered or held: after the second reading of the registry, for a request that needs one.
         let pending
         try {
-          pending = dispatch(route, url, req, body, responder, watchClose)
+          pending = dispatch(route, url, req, body, responder, watchClose, inputScrubbed)
         } catch (err) {
           routeFailed(err)
         }
@@ -470,13 +576,13 @@ export async function startFakeBridge(options = {}) {
    * Hands a request to the deck. Returns a promise when the deck needs the registry read once more first
    * (PROTOCOL.md, "Desktop sessions only"), which settles once the request is answered or held; else nothing.
    */
-  function dispatch(route, url, req, body, responder, watchClose) {
+  function dispatch(route, url, req, body, responder, watchClose, inputScrubbed) {
     switch (route) {
       case ROUTES.permission:
       case ROUTES.pretool: {
         const hostHeader = req.headers['x-deck-host']
         const take = () => {
-          const r = route === ROUTES.permission ? deck.permission({ body, hostHeader, responder }) : deck.pretool({ body, hostHeader, responder })
+          const r = route === ROUTES.permission ? deck.permission({ body, hostHeader, responder, inputScrubbed }) : deck.pretool({ body, hostHeader, responder })
           if (r.id) watchClose(() => deck.clientClosed(r.id))
         }
         // A hook's request from a session the latest reading doesn't confirm: the registry is read once more, and the
@@ -545,6 +651,10 @@ export async function startFakeBridge(options = {}) {
         case '/control/approve':
         case '/control/deny':
           send(200, deck.press(route.slice('/control/'.length), Object.hasOwn(b, 'shown') ? { shown: b.shown } : {}))
+          return
+        case '/control/dial':
+          // A Session Slot dial's press for its session's request: `shown` as for the keys, the request its strip showed.
+          send(200, deck.dial({ host: b.host, picks: b.picks, decision: b.decision, plan: b.plan, ...(Object.hasOwn(b, 'shown') ? { shown: b.shown } : {}) }))
           return
         case '/control/prompt':
           send(200, deck.prompt({ host: b.host, text: b.text }))

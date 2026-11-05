@@ -138,6 +138,12 @@ const B = { sid: '3fa86955-0000-4000-8000-00000000000b', host: 'local_test-b', i
 
 const ALLOW = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
 const DENY = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Denied from the Stream Deck.', interrupt: true } } }
+/** The Answer for an AskUserQuestion: Allow, with the request's own tool_input plus `answers` (T5, 2026-11-04). */
+const ANSWER = (input, answers) => ({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...input, answers } } } })
+/** The Approve for an ExitPlanMode: Allow, with the request's own tool_input and the mode to leave Plan mode into (T6, 2026-11-04). */
+const APPROVE_PLAN = (input, mode) => ({
+  hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: input, updatedPermissions: [{ type: 'setMode', mode, destination: 'session' }] } },
+})
 const MODE_TOOL = 'mcp__ccd_session_mgmt__set_session_permission_mode'
 const PRE_ALLOW = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'The mode change pressed on the Stream Deck.' } }
 
@@ -389,7 +395,7 @@ const fixtures = {}
   const a = session(A)
   const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
   fixtures['needs-you'] = [
-    note('AskUserQuestion is held for display only. A press jumps to the session and answers nothing. The user answers in the app, and the tool\'s end releases the request.'),
+    note('The Approve and Deny keys never answer an AskUserQuestion. A press on one jumps to the session and answers nothing. The user answers in the app, and the tool\'s end releases the request.'),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Ask me a question'),
@@ -406,6 +412,180 @@ const fixtures = {}
     reply('p1', {}),
     a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
     { expect: { held: [], status: { [A.host]: 'working' } } },
+  ]
+}
+
+/** The turn that asks: the mod sees the call and reports it, then Claude Code sends the PermissionRequest (S2). */
+function asking(a, input) {
+  return [
+    a.turn('t1', 'Ask me a question'),
+    a.ev({ t: 'turn.start', turn: 't1' }),
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
+    a.tool('AskUserQuestion', 'u6', input),
+    a.ev(toolStart('AskUserQuestion', 'u6', input)),
+    a.permission('p1', 'AskUserQuestion', input),
+    a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
+  ]
+}
+
+{
+  const a = session(A)
+  const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
+  const picks = { 'Red or blue?': ['Blue'] }
+  const answers = { 'Red or blue?': 'Blue' }
+  fixtures['answer-question'] = [
+    note("The session's own Session Slot dial answers its question. The answer is Allow with the request's tool_input, unchanged, plus answers: the chosen option's label by the question's text. Claude Code then gives Claude the answers, and the tool runs and ends (T5, 2026-11-04)."),
+    setup(),
+    ...a.hello(),
+    ...asking(a, ask),
+    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')], status: { [A.host]: 'needs-you' } } },
+    { press: { dial: { session: A.host, picks } } },
+    reply('p1', ANSWER(ask, answers)),
+    { expect: { held: [], alert: false } },
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
+    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
+    { expect: { held: [], status: { [A.host]: 'working' } } },
+  ]
+}
+
+{
+  const a = session(A)
+  const ask = {
+    questions: [
+      { question: 'Which fruits?', header: 'Fruit', options: [{ label: 'Apple', description: 'Red or green' }, { label: 'Pear, ripe', description: 'Soft and green' }, { label: 'Plum "Victoria"', description: 'Purple' }], multiSelect: true },
+      { question: 'Which size?', header: 'Size', options: [{ label: 'Small', description: 'A little one' }, { label: 'Large', description: 'A big one' }], multiSelect: false },
+    ],
+  }
+  const picks = { 'Which fruits?': ['Plum "Victoria"', 'Apple', 'Pear, ripe'], 'Which size?': ['Large'] }
+  const answers = { 'Which fruits?': 'Apple, "Pear, ripe", "Plum \\"Victoria\\""', 'Which size?': 'Large' }
+  fixtures['answer-questions'] = [
+    note('Two questions, the first multi-select, answered on the dial. A multi-select answer is the chosen labels in the order of the options, whatever order they were picked in, joined with ", ". A label that holds ", " or a double quote is written as a JSON string, as Claude Code joins its own (the engine check, 2026-11-04). T5 checked the plain join live.'),
+    setup(),
+    ...a.hello(),
+    ...asking(a, ask),
+    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')], status: { [A.host]: 'needs-you' } } },
+    { press: { dial: { session: A.host, picks } } },
+    reply('p1', ANSWER(ask, answers)),
+    { expect: { held: [], alert: false } },
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
+    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
+    { expect: { held: [], status: { [A.host]: 'working' } } },
+  ]
+}
+
+{
+  const a = session(A)
+  const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
+  fixtures['dial-gone'] = [
+    note("The user answers in the app while the dial shows the question. The tool's end releases the request, so the dial's press for it alerts and sends nothing."),
+    setup(),
+    ...a.hello(),
+    ...asking(a, ask),
+    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')] } },
+    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
+    reply('p1', {}),
+    { expect: { held: [] } },
+    { press: { dial: { session: A.host, picks: { 'Red or blue?': ['Red'] } } } },
+    { expect: { held: [], alert: true } },
+  ]
+}
+
+{
+  const a = session(A)
+  const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
+  const bash = { command: 'npm test', description: 'Run the tests' }
+  fixtures['dial-next'] = [
+    note("The user answers the dial's question in the app, and the session's next request, a Bash, takes the strip. Once the strip shows it, the dial's press acts on it: a request answered elsewhere makes a press alert only while nothing newer is on the strip."),
+    setup(),
+    ...a.hello(),
+    ...asking(a, ask),
+    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')] } },
+    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
+    reply('p1', {}),
+    { expect: { held: [] } },
+    a.tool('Bash', 'u8', bash),
+    a.ev(toolStart('Bash', 'u8', bash)),
+    a.permission('p2', 'Bash', bash),
+    { expect: { held: [held(A, 'Bash', bash)] } },
+    { press: { dial: { session: A.host, decision: 'allow' } } },
+    reply('p2', ALLOW),
+    { expect: { held: [], alert: false } },
+    a.ev(toolEnd('Bash', 'u8', bash)),
+    { expect: { held: [] } },
+  ]
+}
+
+/** The turn that plans: the mod sees the call and reports it, then Claude Code sends the PermissionRequest in Plan mode (T6). */
+function planning(a, input, result) {
+  return [
+    a.turn('t1', 'Plan s10.txt'),
+    a.ev({ t: 'turn.start', turn: 't1' }),
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
+    a.tool('ExitPlanMode', 'u7', input, result),
+    a.ev(toolStart('ExitPlanMode', 'u7', input)),
+    a.permission('p1', 'ExitPlanMode', input, { permission_mode: 'plan' }),
+    a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
+  ]
+}
+
+const PLAN = { plan: '# Plan\n\n1. Create s10.txt containing: ten.\n', planFilePath: '/Users/me/.claude/plans/tidy-otter.md' }
+
+{
+  const a = session(A)
+  fixtures['plan-approve'] = [
+    note("The session's dial approves its plan into Accept edits: Allow with the request's tool_input unchanged, and a setMode for the session. ExitPlanMode needs the person, so Claude Code ignores a plain Allow; with updatedInput it takes the answer and closes the app's card (T6, 2026-11-04)."),
+    setup([A], {}, { [A.host]: 'plan' }),
+    ...a.hello(),
+    ...planning(a, PLAN),
+    { expect: { held: [held(A, 'ExitPlanMode', PLAN, 'ask')], status: { [A.host]: 'needs-you' }, settings: { [A.host]: { mode: 'plan' } } } },
+    { press: { dial: { session: A.host, plan: 'acceptEdits' } } },
+    reply('p1', APPROVE_PLAN(PLAN, 'acceptEdits')),
+    { expect: { held: [], alert: false } },
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
+    a.ev(toolEnd('ExitPlanMode', 'u7', PLAN)),
+    { expect: { held: [], status: { [A.host]: 'working' } } },
+  ]
+}
+
+{
+  const a = session(A)
+  fixtures['plan-reject'] = [
+    note("The dial rejects the plan with the keys' Deny, which stops the turn, so the user says in the app what to change. The refusal reaches the mod as an errored result, as for any Deny."),
+    setup([A], {}, { [A.host]: 'plan' }),
+    ...a.hello(),
+    ...planning(a, PLAN, { isError: true, text: "The user doesn't want to proceed with this tool use. The tool use was rejected." }),
+    { expect: { held: [held(A, 'ExitPlanMode', PLAN, 'ask')] } },
+    { press: { dial: { session: A.host, plan: 'reject' } } },
+    reply('p1', DENY),
+    a.ev(toolEnd('ExitPlanMode', 'u7', PLAN, { ok: false })),
+    a.turnEnd('t1'),
+    a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
+    reply('n1', { cmds: [] }),
+    a.next('n2'),
+    a.registry({ status: 'idle', statusUpdatedAt: T0 + 4000 }),
+    { expect: { held: [], status: { [A.host]: 'done' } } },
+  ]
+}
+
+{
+  const a = session(A)
+  const b = session(B)
+  const bash = { command: 'npm test', description: 'Run the tests' }
+  const write = { file_path: `${CWD}/s9.txt`, content: 'nine' }
+  fixtures['dial-approve'] = [
+    note("Each session's dial answers its own session's oldest request. B asked first, so the Approve key shows B's Bash, but A's dial allows A's Write. B's dial then denies B's. There are no mod lines, so the plugin side skips this fixture."),
+    setup([A, B], { [A.host]: 'busy', [B.host]: 'busy' }),
+    b.permission('p1', 'Bash', bash),
+    b.registry({ status: 'waiting', statusUpdatedAt: T0 + 1000 }),
+    a.permission('p2', 'Write', write),
+    a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
+    { expect: { held: [held(B, 'Bash', bash), held(A, 'Write', write)], status: { [A.host]: 'approval', [B.host]: 'approval' } } },
+    { press: { dial: { session: A.host, decision: 'allow' } } },
+    reply('p2', ALLOW),
+    { expect: { held: [held(B, 'Bash', bash)], alert: false } },
+    { press: { dial: { session: B.host, decision: 'deny' } } },
+    reply('p1', DENY),
+    { expect: { held: [] } },
   ]
 }
 

@@ -23,3 +23,6 @@ export const MAX_BODY_BYTES = 8 * 1024 * 1024;
 /** The run folder, inside the .sdPlugin folder, and the token file in it. The root .gitignore's `**\/run/` covers both. */
 export const RUN_DIR = "run";
 export const TOKEN_FILE = "token";
+
+/** Which session each Session Slot holds, in the run folder (src/slots/store.ts). */
+export const SLOTS_FILE = "slots.json";

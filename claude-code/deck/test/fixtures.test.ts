@@ -10,8 +10,13 @@ import { ModeKeys, PromptKeys } from "../src/keys/commands.js";
 import { DecisionKeys } from "../src/keys/decision.js";
 import type { SessionModel } from "../src/model/sessions.js";
 import { connectSources } from "../src/model/sources.js";
-import { ALLOW_DECISION, DENY_DECISION, PRETOOL_ALLOW } from "../src/protocol/wire.js";
-import { type Fixture, loadFixtures, mismatches, type Obj, type PluginLine, repliedLabels, replyMismatches, unrepliedMismatches } from "./helpers/fixtures.js";
+import { ALLOW_DECISION, answerDecision, approvePlanDecision, DENY_DECISION, PRETOOL_ALLOW } from "../src/protocol/wire.js";
+import { APPROVAL_CHOICES, PLAN_CHOICES, SlotDials, type SlotScreen } from "../src/slots/dials.js";
+import { dialSlotId, type SlotId } from "../src/slots/ids.js";
+import { Slots } from "../src/slots/slots.js";
+import { MemorySlotStore } from "../src/slots/store.js";
+import { FakeClock } from "./helpers/fake-clock.js";
+import { type Fixture, loadFixtures, mismatches, type Obj, type PluginLine, repliedLabels, replyMismatches, unrepliedMismatches, updatedAllowKind } from "./helpers/fixtures.js";
 import { type Outcome, request, sleep, waitFor, within } from "./helpers/http.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -29,6 +34,13 @@ import { RecordingLog } from "./helpers/recording-log.js";
  * - `press` lines go through the keys' own logic classes, with no settle time on Approve and Deny, `registry`
  *   lines to the fake folder, after which the watcher scans; a line for a file that's gone writes it anew, with
  *   its pid and the line's fields. `expect` lines are retried for up to 1 s.
+ * - A `dial` press line goes through the Session Slot dials' own logic (src/slots/dials.ts), with no settle time
+ *   either, for the request or for the choice turned to, and each turn painted at once (playDial): four slot dials on
+ *   the fake deck's bottom row, whose slots fill as the deck's do, and a session with no slot is given one first. The
+ *   line acts on the request its dial's strip showed last: while the strip shows it, the runner turns and presses
+ *   until the line's choice is sent; once it has gone, the line is one press, which must alert and send nothing. The
+ *   dials' clock is a fake one that never moves, so no repaint waits on it, and a request gone from a strip keeps its
+ *   press alerting (GONE_MS) until the strip paints a newer one (PROTOCOL.md, Fixtures; dial-next).
  * - The model and the folders are wired as the plugin wires them (connectSources), so the model reads the fake
  *   folder again through the same watcher when a hook's request or a hello isn't confirmed by its latest reading.
  * - Command ids: the deck's real id is bound to the fixture's name at its first appearance in a `reply`.
@@ -104,6 +116,12 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 	deny.add("deny", surface);
 	prompts.add("prompt", surface, {});
 	modes.add("mode", surface, {});
+	// The Session Slot dials, one per column of a Stream Deck +'s bottom row (2 rows of 4), filling as the deck's do.
+	const slots = new Slots(model, { store: new MemorySlotStore(), fillDelayMs: 0 });
+	const dials = new SlotDials(slots, model, { render: (screen: SlotScreen) => ({ layout: screen.kind, feedback: { screen: screen.kind } }), clock: new FakeClock(), paintIntervalMs: 0, settleMs: 0, pickSettleMs: 0, coalesceMs: 0, open });
+	const dialSlots: SlotId[] = [0, 1, 2, 3].map((col) => dialSlotId("fixture-deck", 2, col));
+	const dialIds = dialSlots.map((_, col) => `slot-dial-${col}`);
+	for (const [i, slot] of dialSlots.entries()) dials.add(dialIds[i] ?? "", slot, { setLayout: () => {}, setFeedback: () => {}, showAlert: () => alerts++ });
 	let last: { jumped: string | null; alert: boolean } = { jumped: null, alert: false };
 	const press = (run: () => void): void => {
 		const before = { jumps: jumps.length, alerts };
@@ -197,6 +215,8 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 					const { session, mode } = what.mode as { session: string; mode: string };
 					model.pick(session);
 					press(() => modes.press("mode", { mode }));
+				} else if ("dial" in what) {
+					press(() => playDial(what.dial as Obj, where(n)));
 				} else assert.fail(`${where(n)}: unknown press ${JSON.stringify(what)}`);
 				continue;
 			}
@@ -246,8 +266,78 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 		deny.remove("deny");
 		prompts.remove("prompt");
 		modes.remove("mode");
+		for (const id of dialIds) dials.remove(id);
 		model.dispose();
 		rmSync(root, { recursive: true, force: true });
+	}
+
+	/**
+	 * A `dial` press line (PROTOCOL.md, Fixtures), through the slot dial of the line's session: given a slot first if
+	 * it has none. It acts on the request the dial's strip showed last. While the strip still shows it, the line's
+	 * choice is turned to and pressed: an approval's `decision` or a plan's `plan` chip, or for `picks`, each question's
+	 * labels, then Next or Send, until the answer is sent. Once that request has gone from the strip, the line is one
+	 * press, for a request that has gone.
+	 */
+	function playDial(line: Obj, at: string): void {
+		const session = line.session;
+		assert.ok(typeof session === "string", `${at}: a dial line names its session`);
+		let slot = slots.slotOf(session);
+		if (slot === null || !dialSlots.includes(slot)) {
+			const free = dialSlots.find((s) => slots.host(s) === null) ?? dialSlots[0] ?? "";
+			const placed = slots.place(free, session, "the fixture's dial line");
+			assert.ok(placed.ok, `${at}: can't give ${session} a slot: ${placed.ok ? "" : placed.why}`);
+			slot = free;
+		}
+		const id = dialIds[dialSlots.indexOf(slot)] ?? "";
+		const shown = dials.lastShown(id);
+		assert.notEqual(shown, null, `${at}: ${session}'s dial has shown no request`);
+		const screen = dials.screen(id);
+		const turn = (): SlotScreen => {
+			dials.rotate(id, 1, false);
+			const s = dials.screen(id);
+			assert.ok(s, `${at}: no dial`);
+			return s;
+		};
+		const pressDial = (): void => {
+			dials.down(id);
+			dials.up(id);
+		};
+		if (!screen || !("request" in screen) || screen.request !== shown) {
+			// The request the strip showed last has gone: the line's press is for it.
+			pressDial();
+			return;
+		}
+		if ("decision" in line || "plan" in line) {
+			const kind = "decision" in line ? "approval" : "plan";
+			const index = "decision" in line ? APPROVAL_CHOICES.findIndex((c) => c.t === line.decision) : PLAN_CHOICES.findIndex((c) => (line.plan === "reject" ? c.t === "reject" : c.t === "approve" && c.mode === line.plan));
+			assert.ok(index >= 0, `${at}: no such choice in ${JSON.stringify(line)}`);
+			assert.equal(screen.kind, kind, `${at}: the dial shows a ${screen.kind} screen, not ${kind}`);
+			let s: SlotScreen = screen;
+			for (let i = 0; i < 10 && !("pick" in s && s.pick === index); i++) s = turn();
+			assert.ok("pick" in s && s.pick === index, `${at}: couldn't turn to choice ${index}`);
+			pressDial();
+			return;
+		}
+		assert.ok(typeof line.picks === "object" && line.picks !== null, `${at}: a dial line needs picks, a decision or a plan`);
+		const picks = line.picks as Record<string, string[]>;
+		for (let guard = 0; guard < 100; guard++) {
+			const s = dials.screen(id);
+			// Sent: the screen started over without the request.
+			if (!s || s.kind !== "question" || s.request !== shown) return;
+			const want = Object.hasOwn(picks, s.question) ? picks[s.question] : undefined;
+			assert.ok(Array.isArray(want) && want.length > 0, `${at}: no picks for ${JSON.stringify(s.question)}`);
+			const missing = s.multi ? want.find((label) => !s.picked.includes(label)) : want[0];
+			const target = missing === undefined ? s.items.findIndex((it) => it.t === "next") : s.items.findIndex((it) => it.t === "option" && it.label === missing);
+			assert.ok(target >= 0, `${at}: ${JSON.stringify(missing ?? "Next")} isn't on ${JSON.stringify(s.question)}'s list`);
+			let now: SlotScreen = s;
+			for (let i = 0; i <= s.items.length && !(now.kind === "question" && now.cursor === target); i++) now = turn();
+			assert.ok(now.kind === "question" && now.cursor === target, `${at}: couldn't turn to place ${target}`);
+			const alertsBefore = alerts;
+			pressDial();
+			// An alert ends the line; the fixture's expect says whether it should have.
+			if (alerts > alertsBefore) return;
+		}
+		assert.fail(`${at}: the answers were never sent`);
 	}
 
 	function check(want: Obj): string[] {
@@ -314,8 +404,8 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 describe("fixtures, deck side (claude-code/protocol/fixtures/*.jsonl)", () => {
 	const fixtures = loadFixtures();
 
-	test("all 19 fixtures are here", () => {
-		assert.equal(fixtures.length, 19, fixtures.map((f) => f.name).join(", "));
+	test("all 26 fixtures are here", () => {
+		assert.equal(fixtures.length, 26, fixtures.map((f) => f.name).join(", "));
 	});
 
 	for (const fixture of fixtures) {
@@ -335,7 +425,7 @@ describe("the runner itself", () => {
 	const replacing =
 		(mine: Partial<BridgeRoutes>) =>
 		(model: SessionModel): BridgeRoutes => ({
-			permission: (body, host, reply) => model.permission(body, host, reply),
+			permission: (body, host, reply, inputScrubbed) => model.permission(body, host, reply, inputScrubbed),
 			pretool: (body, host, reply) => model.pretool(body, host, reply),
 			hello: (body) => model.hello(body),
 			events: (body) => model.events(body),
@@ -438,6 +528,44 @@ describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
 		// Any other status carries {"error"}.
 		assert.deepEqual(replyMismatches(PRETOOL, 401, undefined, { error: "Unauthorized" }), []);
 		assert.notDeepEqual(replyMismatches(PRETOOL, 401, undefined, {}), []);
+	});
+
+	test("an Answer and an Approve plan are /v1/permission bodies by their shape, and one the line expects must be equal exactly, updatedInput included", () => {
+		const input = { questions: [{ question: "Red or blue?", header: "Color", options: [{ label: "Red" }, { label: "Blue" }], multiSelect: false }] };
+		const answer = wire(answerDecision(input, { "Red or blue?": "Blue" }));
+		const plan = wire(approvePlanDecision({ plan: "# Plan", planFilePath: "/p.md" }, "acceptEdits"));
+		assert.equal(updatedAllowKind(answer), "answer");
+		assert.equal(updatedAllowKind(plan), "approve plan");
+		for (const body of [answer, plan]) {
+			assert.deepEqual(replyMismatches(PERMISSION, 200, body, body), [], JSON.stringify(body));
+			assert.deepEqual(unrepliedMismatches(PERMISSION, 200, JSON.stringify(body)), [], JSON.stringify(body));
+			// Where the line expects a plain Allow, the general rule would let updatedInput through; the strict one doesn't.
+			assert.deepEqual(mismatches(allow, body), []);
+			assert.notDeepEqual(replyMismatches(PERMISSION, 200, allow, body), [], JSON.stringify(body));
+			// Nor are they a mode check's.
+			assert.notDeepEqual(replyMismatches(PRETOOL, 200, undefined, body), [], JSON.stringify(body));
+		}
+		// Another answer, or another mode, where the line expects these.
+		assert.notDeepEqual(replyMismatches(PERMISSION, 200, answer, wire(answerDecision(input, { "Red or blue?": "Red" }))), []);
+		assert.notDeepEqual(replyMismatches(PERMISSION, 200, plan, wire(approvePlanDecision({ plan: "# Plan", planFilePath: "/p.md" }, "auto"))), []);
+		// The tool_input changed: an Answer must echo it as it came.
+		assert.notDeepEqual(replyMismatches(PERMISSION, 200, answer, wire(answerDecision({ ...input, extra: 1 }, { "Red or blue?": "Blue" }))), []);
+		// Shapes that are neither, wherever they come.
+		const decision = (fields: Obj): Obj => ({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", ...fields } } });
+		const odd = [
+			decision({ updatedInput: { questions: [] } }),
+			decision({ updatedInput: { answers: { q: 1 } } }),
+			decision({ updatedInput: { answers: {} }, message: "x" }),
+			decision({ updatedInput: {}, updatedPermissions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] }),
+			decision({ updatedInput: {}, updatedPermissions: [{ type: "setMode", mode: "auto", destination: "localSettings" }] }),
+			decision({ updatedInput: {}, updatedPermissions: [] }),
+			decision({ updatedInput: [], updatedPermissions: [{ type: "setMode", mode: "auto", destination: "session" }] }),
+			{ ...(answer as Obj), systemMessage: "hi" },
+		];
+		for (const body of odd) {
+			assert.equal(updatedAllowKind(body), null, JSON.stringify(body));
+			assert.notDeepEqual(replyMismatches(PERMISSION, 200, undefined, body), [], JSON.stringify(body));
+		}
 	});
 
 	test("error answers, and other routes, keep the general rule", () => {

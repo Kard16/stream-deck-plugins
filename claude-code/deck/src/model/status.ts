@@ -32,24 +32,41 @@ export type StatusInput = {
 };
 
 export function sessionStatus(i: StatusInput): SessionStatus {
-	if (i.heldTool > 0) return "approval";
-	if (i.heldAsk > 0) return "needs-you";
+	return sessionState(i).status;
+}
+
+/**
+ * Which rule a status came from, so the session view can say when it began (`since`) and what the session waits on:
+ * - `held-tool`, `held-ask`: rules 1 and 2, a held request;
+ * - `waiting`: rule 2, the registry's `waiting` with nothing held;
+ * - `busy`: rule 3, the registry's `busy`; `started`: rule 3, the main loop's `turn.start` before the registry says so;
+ * - `failed`, `interrupted`: rules 4 and 5; `record`: rule 6, the app's own needs-input indicator; `done`: rule 7;
+ * - `idle`: rule 8.
+ */
+export type StatusSource = "held-tool" | "held-ask" | "waiting" | "busy" | "started" | "failed" | "interrupted" | "record" | "done" | "idle";
+
+export type SessionState = { status: SessionStatus; from: StatusSource };
+
+/** The status (PROTOCOL.md's order, the first that applies) and the rule it came from. */
+export function sessionState(i: StatusInput): SessionState {
+	if (i.heldTool > 0) return { status: "approval", from: "held-tool" };
+	if (i.heldAsk > 0) return { status: "needs-you", from: "held-ask" };
 	// Nothing is held here: a session without the plugin, or a request lost when the deck restarted.
-	if (i.registry === "waiting") return "needs-you";
+	if (i.registry === "waiting") return { status: "needs-you", from: "waiting" };
 	// A `busy` from before the main loop's turn ended with `aborted` doesn't count, and the rules below take the
 	// session as idle.
 	const staleBusy = i.registry === "busy" && beganBeforeAbort(i);
-	if (i.registry === "busy" && !staleBusy) return "working";
+	if (i.registry === "busy" && !staleBusy) return { status: "working", from: "busy" };
 	// The main loop's turn has started, and the registry's reading still shows the idle from before it.
-	if (i.registry === "idle" && idleBeforeStart(i)) return "working";
+	if (i.registry === "idle" && idleBeforeStart(i)) return { status: "working", from: "started" };
 	if (i.registry === "idle" || staleBusy) {
-		if (i.turn?.failed) return "failed";
-		if (i.turn?.ended && i.turn.reason === "aborted") return "interrupted";
+		if (i.turn?.failed) return { status: "failed", from: "failed" };
+		if (i.turn?.ended && i.turn.reason === "aborted") return { status: "interrupted", from: "interrupted" };
 		// The app's own needs-input indicator (its `_D`) shows for a turn that's blocked or needs input.
-		if (i.recordCategory === "blocked" || i.recordCategory === "need_input") return "needs-you";
-		if (i.turn?.ended) return "done";
+		if (i.recordCategory === "blocked" || i.recordCategory === "need_input") return { status: "needs-you", from: "record" };
+		if (i.turn?.ended) return { status: "done", from: "done" };
 	}
-	return "idle";
+	return { status: "idle", from: "idle" };
 }
 
 /**

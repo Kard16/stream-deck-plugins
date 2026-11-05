@@ -9,22 +9,56 @@ export type Feedback = Record<string, unknown>;
  * Sends one dial's strip to the app: only the layout keys whose content changed since the last update, and at
  * most one update per interval. Updates that arrive in between are merged; the latest wins.
  * (The same painter as lightroom/deck/src/dial/painter.ts, at 10 a second.)
+ *
+ * Like KeyPainter, it can also remember what the strip last showed (`shown`, given with each update) and since when,
+ * so a press acts on what the strip displayed, once it has been there long enough to be seen (a Session Slot dial's
+ * held request and the choice on it, src/slots/dials.ts).
  */
-export class StripPainter {
+export class StripPainter<T = undefined> {
 	readonly #send: (payload: Feedback) => void;
+	readonly #clock: Clock;
 	readonly #throttle: Throttle;
 	/** Each key's content as last sent, as JSON. */
 	readonly #painted = new Map<string, string>();
 	#desired: Feedback | null = null;
+	#desiredShown: T | undefined = undefined;
+	#shown: { value: T | undefined } | null = null;
+	#shownSince: number | null = null;
+	readonly #onShown: ((shown: T | undefined) => void) | null;
+	readonly #equals: (a: T | undefined, b: T | undefined) => boolean;
 
-	constructor(send: (payload: Feedback) => void, opts: { clock?: Clock; minIntervalMs?: number } = {}) {
+	/**
+	 * `onShown` runs at the paint that changes what the strip shows, with the new value. `equals` says whether two
+	 * shown values are the same thing (Object.is by default, so an object value needs one).
+	 */
+	constructor(
+		send: (payload: Feedback) => void,
+		opts: { clock?: Clock; minIntervalMs?: number; onShown?: (shown: T | undefined) => void; equals?: (a: T | undefined, b: T | undefined) => boolean } = {},
+	) {
 		this.#send = send;
-		this.#throttle = new Throttle(() => this.#flush(), opts);
+		this.#clock = opts.clock ?? realClock;
+		this.#onShown = opts.onShown ?? null;
+		this.#equals = opts.equals ?? Object.is;
+		this.#throttle = new Throttle(() => this.#flush(), { clock: this.#clock, minIntervalMs: opts.minIntervalMs });
 	}
 
-	update(desired: Feedback): void {
+	update(desired: Feedback, shown?: T): void {
 		this.#desired = desired;
+		this.#desiredShown = shown;
 		this.#throttle.request();
+	}
+
+	/** What the strip last sent showed; undefined before the first paint, or when updates give none. */
+	get shown(): T | undefined {
+		return this.#shown?.value;
+	}
+
+	/**
+	 * When `shown` took its current value, on the painter's clock; null before the first paint. A new paint of the same
+	 * thing leaves it; a different thing resets it, even when the strip's keys come out the same.
+	 */
+	get shownSince(): number | null {
+		return this.#shownSince;
 	}
 
 	/** The app forgot the strip (the dial reappeared): the next update sends every key. */
@@ -46,6 +80,10 @@ export class StripPainter {
 	/** Returns whether anything was sent, so the throttle only counts real paints. */
 	#flush(): boolean {
 		if (!this.#desired) return false;
+		const showsNew = this.#shown === null || !this.#equals(this.#shown.value, this.#desiredShown);
+		if (showsNew) this.#shownSince = this.#clock.now();
+		this.#shown = { value: this.#desiredShown };
+		if (showsNew) this.#onShown?.(this.#desiredShown);
 		const changed: Feedback = {};
 		let any = false;
 		for (const [key, content] of Object.entries(this.#desired)) {

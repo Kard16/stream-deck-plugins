@@ -36,8 +36,11 @@ function key(bg: string, body: string, size: number): string {
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144"><rect width="144" height="144" rx="26" fill="${bg}"/>${body}</svg>`;
 }
 
-/** About how many characters of semibold Helvetica fit `width` units at a font size (checked by rendering). */
-function fits(fontSize: number, width = 128): number {
+/**
+ * About how many characters of semibold Helvetica fit `width` units at a font size (checked by rendering). The
+ * Session Slot strips (src/slots/strip.ts) measure their text items with it too, in strip pixels.
+ */
+export function fits(fontSize: number, width = 128): number {
 	return Math.max(1, Math.floor(width / (fontSize * 0.54)));
 }
 
@@ -47,7 +50,7 @@ function raised(glyph: string): string {
 }
 
 /** Cut to `max` characters with an ellipsis. */
-function cut(text: string, max: number): string {
+export function cut(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
 }
 
@@ -132,6 +135,16 @@ function toggle(color: string, accent: string, width = 10): string {
 /** A window with a dot in its bar: one session. */
 function windowGlyph(color: string, accent: string, width = 10): string {
 	return `<rect x="22" y="30" width="100" height="84" rx="12" stroke="${color}" stroke-width="${width}" fill="none"/><path d="M22 54H122" stroke="${color}" stroke-width="${width}"/><circle cx="40" cy="42" r="5" fill="${accent}"/>`;
+}
+
+/** A key with a dot at its top and a bar along its foot: one session's slot. */
+function slotGlyph(color: string, accent: string, width = 10): string {
+	return `<rect x="24" y="24" width="96" height="96" rx="20" stroke="${color}" stroke-width="${width}" fill="none"/><circle cx="52" cy="54" r="9" fill="${accent}"/><path d="M46 94H98" stroke="${accent}" stroke-width="${width}" stroke-linecap="round"/>`;
+}
+
+/** Two keys, one behind the other: the sessions on no slot. */
+function stackGlyph(color: string, width = 10): string {
+	return `<rect x="46" y="22" width="76" height="76" rx="16" stroke="${color}" stroke-width="${width}" fill="none"/><path d="M22 54V106Q22 122 38 122H90" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`;
 }
 
 /** The count of held requests, in a badge at the top right. */
@@ -249,6 +262,186 @@ export function sessionKeySvg(look: SessionKeyLook, size = 144): string {
 	return key(BG, body + line(look.status, 128, look.statusColor, 17, 700), size);
 }
 
+// ---- Session Slot ----
+
+/**
+ * A Session Slot key's tone (session-keys.md, The key face): the state's colour fills the key, and only the states
+ * that need you are amber, with a light outline, so a glance at the row finds them.
+ * - `need`: a question, a plan, an approval, or needs input.
+ * - `working`: blue.
+ * - `done`, `failed`, `stopped`: a turn's end the user hasn't seen: green, red, dark red.
+ * - `quiet`: a turn's end that has been seen, or idle: dark, with the bottom line dimmed.
+ * - `notRunning`: darker, with dim text. `empty`: a slot with no session, darker.
+ */
+export type SlotTone = "need" | "working" | "done" | "failed" | "stopped" | "quiet" | "notRunning" | "empty";
+
+/** A slot key's face, with its text already formatted (src/slots/art.ts makes it from the session). */
+export type SlotFace = {
+	tone: SlotTone;
+	/** The top line's word: `Question`, `Plan`, `Approve?`, `Needs you`, `Working`, `Done`, `No session`… */
+	word: string;
+	/** How long the state has lasted, as `30s`, `4m`, `2h` or `3d`; null when unknown. */
+	since: string | null;
+	/** The session's title, in the middle on up to two lines; null for none. */
+	title: string | null;
+	/** The bottom line's left: the tool it's on (working) or that waits (approval); null for none. */
+	tool: string | null;
+	/** Context use, 0–100, as the bottom line's % over a thin bar; null when unknown. */
+	context: number | null;
+};
+
+/** The light outline round the states that need you. */
+const NEED_LINE = "#F2C94C";
+/** An interrupted turn's dark red, darker than Failed's DENY_BG. */
+const STOPPED_BG = "#5A1F1F";
+/** Context use from which the bar turns orange, as on the Sessions strip (src/sessions/strip.ts). */
+const CONTEXT_HIGH = 80;
+
+type ToneColors = {
+	bg: string;
+	word: string;
+	since: string;
+	title: string;
+	/** The bottom line. */
+	small: string;
+	groove: string;
+	fill: string;
+	/** The bar's fill from CONTEXT_HIGH. */
+	full: string;
+};
+
+const SLOT_TONES: Record<SlotTone, ToneColors> = {
+	need: { bg: ASK_BG, word: "#FFFFFF", since: "#F5E3B5", title: "#FFFFFF", small: "#F5E3B5", groove: "#4D390B", fill: "#FFFFFF", full: "#F2994A" },
+	working: { bg: ACTIVE_BG, word: "#FFFFFF", since: "#C8DBF5", title: "#FFFFFF", small: "#C8DBF5", groove: "#143561", fill: "#FFFFFF", full: "#F2994A" },
+	done: { bg: ALLOW_BG, word: "#FFFFFF", since: "#C6E8D3", title: "#FFFFFF", small: "#C6E8D3", groove: "#12442A", fill: "#FFFFFF", full: "#F2994A" },
+	failed: { bg: DENY_BG, word: "#FFFFFF", since: "#F2CACA", title: "#FFFFFF", small: "#F2CACA", groove: "#5A1B1B", fill: "#FFFFFF", full: "#F2994A" },
+	stopped: { bg: STOPPED_BG, word: "#FFFFFF", since: "#E6C3C3", title: "#FFFFFF", small: "#E6C3C3", groove: "#3A1414", fill: "#FFFFFF", full: "#F2994A" },
+	quiet: { bg: BG, word: CAPTION, since: CAPTION, title: FG, small: "#6A707A", groove: "#2A2F3A", fill: "#6A707A", full: "#9C6A3C" },
+	notRunning: { bg: DIM_BG, word: DIM_FG, since: DIM_FG, title: "#6A707A", small: DIM_FG, groove: "#22262E", fill: DIM_FG, full: DIM_FG },
+	empty: { bg: DIM_BG, word: CAPTION, since: CAPTION, title: CAPTION, small: "#8A8F99", groove: "#22262E", fill: DIM_FG, full: DIM_FG },
+};
+
+/** The background a tone fills the key with, for the tests. */
+export function slotToneBackground(tone: SlotTone): string {
+	return SLOT_TONES[tone].bg;
+}
+
+/** The key's text runs from x 14 to x 130 on its top and bottom lines. */
+const EDGE_L = 14;
+const EDGE_R = 130;
+const ROW = EDGE_R - EDGE_L;
+
+/** Roughly how wide `text` is at a font size, in key units: the measure fits() uses, the other way round. */
+function textWidth(text: string, fontSize: number): number {
+	return Math.ceil(text.length * fontSize * 0.54);
+}
+
+/**
+ * Cut to `max` characters with an ellipsis, as cut() does, but with no space left before the ellipsis, wrap()'s last
+ * line included. The Session Slot keys and strips cut with it.
+ */
+export function clip(text: string, max: number): string {
+	if (text.length > max) return `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
+	return text.replace(/\s+…$/, "…");
+}
+
+/** A line with a word on the left and a short value on the right (`Working … 4m`, `npm test … 62%`), a gap between. */
+function splitLine(left: string | null, right: string | null, y: number, fontSize: number, colors: { left: string; right: string }, weights = { left: 600, right: 700 }): string {
+	const r = right === null || right === "" ? "" : line(right, y, colors.right, fontSize, weights.right, EDGE_R, "end", ROW);
+	const room = Math.max(1, right === null || right === "" ? ROW : ROW - textWidth(right, fontSize) - 14);
+	const l = left === null || left === "" ? "" : line(clip(left, fits(fontSize, room)), y, colors.left, fontSize, weights.left, EDGE_L, "start", room);
+	return l + r;
+}
+
+/** How wide the title may run, clear of the amber outline. */
+const TITLE_WIDTH = 120;
+
+/** A title in the middle of the key, on up to two lines, each cut with an ellipsis. */
+function middleTitle(title: string, color: string): string {
+	const per = fits(18, TITLE_WIDTH);
+	const lines = wrap(title, per, 2).map((l) => clip(l, per));
+	const top = lines.length === 1 ? 78 : 66;
+	return lines.map((l, i) => line(l, top + i * 23, color, 18, 600, 72, "middle", TITLE_WIDTH)).join("");
+}
+
+/** The thin context bar under the bottom line. */
+function contextBar(context: number, c: ToneColors): string {
+	const pct = Math.max(0, Math.min(100, context));
+	const fillWidth = Math.round((ROW * pct) / 100);
+	const fill = pct >= CONTEXT_HIGH ? c.full : c.fill;
+	const groove = `<rect x="${EDGE_L}" y="126" width="${ROW}" height="5" rx="2.5" fill="${c.groove}"/>`;
+	return fillWidth > 0 ? `${groove}<rect x="${EDGE_L}" y="126" width="${fillWidth}" height="5" rx="2.5" fill="${fill}"/>` : groove;
+}
+
+function needOutline(): string {
+	return `<rect x="3" y="3" width="138" height="138" rx="23" fill="none" stroke="${NEED_LINE}" stroke-width="5"/>`;
+}
+
+/** The empty slot's hint, at the bottom in small type. */
+const EMPTY_SLOT_HINT = "Hold to add the one on screen";
+
+/**
+ * A Session Slot key: the state's colour fills it; the top line has the state's word and `since`; the title sits in
+ * the middle on up to two lines; the bottom line has the tool (working or approval) and the context %, over a thin
+ * context bar. A slot that isn't running shows only its title, dimmed; an empty one, how to fill it.
+ */
+export function slotKeySvg(face: SlotFace, size = 144): string {
+	const c = SLOT_TONES[face.tone];
+	let body = face.tone === "need" ? needOutline() : "";
+	body += splitLine(face.word, face.since, 34, 17, { left: c.word, right: c.since }, { left: 700, right: 600 });
+	if (face.tone === "empty") {
+		body += `<path d="M72 54V86M56 70H88" stroke="${DIM_FG}" stroke-width="8" stroke-linecap="round"/>`;
+		const per = fits(13);
+		body += wrap(EMPTY_SLOT_HINT, per, 2)
+			.map((l, i) => line(clip(l, per), 114 + i * 17, c.small, 13, 500))
+			.join("");
+		return key(c.bg, body, size);
+	}
+	if (face.title !== null) body += middleTitle(face.title, c.title);
+	if (face.tone === "notRunning") return key(c.bg, body, size);
+	const pct = face.context === null ? null : Math.max(0, Math.min(100, Math.round(face.context)));
+	body += splitLine(face.tool, pct === null ? null : `${pct}%`, 117, 15, { left: c.small, right: c.small });
+	if (pct !== null) body += contextBar(pct, c);
+	return key(c.bg, body, size);
+}
+
+// ---- Other Sessions ----
+
+/** The Others key's face, with its text already formatted (src/slots/art.ts makes it from OthersLook). */
+export type OthersFace = {
+	/** How many running sessions on no slot need you; with none, the key is dim. */
+	needing: number;
+	/** The one that has waited longest: its title, what it waits on (`Question`…) and `since`. */
+	oldest: { title: string; word: string; since: string | null } | null;
+	/** How many ended a turn you haven't seen, in small type. */
+	unseen: number;
+	/** How many sessions on no slot are running, for the dim key. */
+	running: number;
+};
+
+/**
+ * The Others key, for the running sessions on no slot (session-keys.md, Others). With some needing you, it's amber
+ * with the light outline: how many, the title of the one waiting longest, what it waits on and its `since`. With none,
+ * it's dim and says how many are running. Either way, how many are done and not seen, in small type at the foot.
+ */
+export function othersKeySvg(face: OthersFace, size = 144): string {
+	const unseen = face.unseen > 0 ? `${face.unseen} done, not seen` : null;
+	const oldest = face.oldest;
+	if (face.needing > 0 && oldest !== null) {
+		const c = SLOT_TONES.need;
+		let body = needOutline();
+		body += line(`${face.needing} need${face.needing === 1 ? "s" : ""} you`, 34, c.word, 17, 700, EDGE_L, "start", ROW);
+		body += middleTitle(oldest.title, c.title);
+		body += splitLine(oldest.word, oldest.since, 117, 15, { left: c.small, right: c.small }, { left: 600, right: 600 });
+		if (unseen !== null) body += line(unseen, 135, c.small, 12, 600);
+		return key(c.bg, body, size);
+	}
+	let body = line("Others", 34, CAPTION, 17, 700, EDGE_L, "start", ROW);
+	body += line(face.running > 0 ? `${face.running} running` : "No others", 80, "#6A707A", 19, 600);
+	if (unseen !== null) body += line(unseen, 124, "#8A8F99", 13, 600);
+	return key(DIM_BG, body, size);
+}
+
 // ---- the dials' images ----
 
 /** The Sessions dial's key image (its manifest state image): the rows glyph on the key background. */
@@ -270,9 +463,14 @@ export function modeEncoderSvg(size = 72): string {
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144">${toggle(FG, ACCENT)}</svg>`;
 }
 
+/** The Session Slot dial's encoder icon: the slot glyph without a background. Its key image is the empty slot's face. */
+export function slotEncoderSvg(size = 72): string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144">${slotGlyph(FG, ACCENT)}</svg>`;
+}
+
 // ---- the action list ----
 
-export type IconKind = "sessions" | "approve" | "deny" | "prompt" | "mode" | "mode-key" | "session";
+export type IconKind = "sessions" | "approve" | "deny" | "prompt" | "mode" | "mode-key" | "session" | "slot" | "others";
 
 /** The 20 px action-list icons: monochrome white on transparent, as the manifest asks. */
 export function actionIconSvg(kind: IconKind): string {
@@ -285,6 +483,8 @@ export function actionIconSvg(kind: IconKind): string {
 		mode: toggle(white, white, 13),
 		"mode-key": toggle(white, white, 13),
 		session: windowGlyph(white, white, 13),
+		slot: slotGlyph(white, white, 13),
+		others: stackGlyph(white, 13),
 	};
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 144 144">${bodies[kind]}</svg>`;
 }
