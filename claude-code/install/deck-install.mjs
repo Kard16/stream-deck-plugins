@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // deck-install: loads the Claude Code plugin, claude-code/plugin (streamdeck-bridge), into the user's own Claude
-// desktop sessions, and takes it out again (docs/claude-code/plan.md, Phase 5, the install route of 2026-11-03).
+// desktop sessions, and takes it out again (docs/claude-code/plan.md, Phase 5, the install route of 2026-11-03); and
+// sets a Mac up from a clone of the repository (Phase 8).
 // Sessions load a release copy, claude-code/release/streamdeck-bridge/, made from claude-code/plugin as committed (git
 // HEAD), so dev edits in the working tree never reach them. Two keys in the env block of ~/.claude/settings.json name
-// it: CLAUDE_CODE_PLUGIN_DIRS, the copy's absolute path, and DECK_TOKEN, the deck's token. A desktop session applies
-// them when it starts, and its launch environment wins key by key, so a preset's sandbox session keeps its own dev
-// copy and token. A new plugin folder takes effect only when a session starts, and a session that started with the
-// keys keeps them until it restarts. CLAUDE_CODE_PLUGIN_DIR_WATCH is never set: even at 0 it changes how desktop
-// sessions hot-reload other folders.
+// it: CLAUDE_CODE_PLUGIN_DIRS, a list of absolute paths separated by ':' (claude-code/vendor/mods-api/reference.md,
+// Developing one) that holds the copy's, and DECK_TOKEN, the deck's token. A desktop session applies them when it
+// starts, and its launch environment wins key by key, so a preset's sandbox session keeps its own dev copy and token.
+// A new plugin folder takes effect only when a session starts, and a session that started with the keys keeps them
+// until it restarts. CLAUDE_CODE_PLUGIN_DIR_WATCH is never set: even at 0 it changes how desktop sessions hot-reload
+// other folders.
 //
-// Four commands:
+// Five commands:
 // 1. status, the default, read only: whether the copy equals claude-code/plugin at HEAD (what the engine writes into
 //    a folder it loads left out), whether both keys hold the right values, whether CLAUDE_CODE_PLUGIN_DIR_WATCH is in
 //    env, and whether claude-code/plugin has uncommitted changes. It exits 0 when installed and current.
@@ -18,15 +20,28 @@
 //    sessions run (newestClaudeCode), with only PATH and a fresh HOME,
 //    TMPDIR and CLAUDE_CONFIG_DIR, as recheck.mjs runs it. Only if that passes is the copy swapped in. RELEASE.json
 //    goes beside it, and what changed from the previous copy is printed.
-// 3. install, given a current copy: backs up settings.json (claude-code/release/backups/, 0600), then sets both keys,
-//    keeping every other key and the key order, written atomically with the file's own mode.
-// 4. undo: backs up the same way, then removes both keys, and env when that leaves it empty.
+// 3. install, given a current copy: makes settings.json when there's none ({}, 0600, and its folder 0700 when that's
+//    missing too), or else backs it up (claude-code/release/backups/, 0600). Then it sets DECK_TOKEN and puts the copy
+//    in CLAUDE_CODE_PLUGIN_DIRS once: after the folders already there, or in place of another copy of streamdeck-bridge
+//    (otherCopy), which a session would load beside it. Every other key, folder and the key order are kept, written
+//    atomically with the file's own mode.
+// 4. undo: backs up the same way, then removes DECK_TOKEN, and takes the copy and any other copy of streamdeck-bridge
+//    out of CLAUDE_CODE_PLUGIN_DIRS, leaving the other folders: the key goes when none is left, and env when that
+//    leaves it empty.
+// 5. setup, on a new Mac from a clone: a preflight that writes nothing (macOS, Node 24, the Stream Deck app and its
+//    link, not running on a first setup, the Claude Code the app bundles, claude-code/deck and claude-code/plugin
+//    committed, and release's other refusals that can be known up front); npm ci, unless node_modules carries the
+//    stamp of a good npm ci of this package-lock.json, and npm run build in claude-code/deck; streamdeck dev, link
+//    unless it's in place, and restart; a wait for the deck's token and its "Bridge: listening" log line; then release
+//    unless the copy is current, install and status. It prints each step and its result, and stops at the first that
+//    fails. --dry-run runs only the preflight, and says whether each step would run, and why. Every command setup
+//    starts, the validator's too, goes through one runner (HOST.run), which the tests replace.
 //
 // The token is a secret: it's compared and its length counted, never printed, and a JSON parse error, which quotes the
 // file, is dropped. Node 24, no dependencies.
 
 import { spawn, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -40,8 +55,13 @@ export const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 /** The plugin, from the top of the repository, and the name of its release copy. */
 export const PLUGIN_PATH = 'claude-code/plugin'
 export const PLUGIN_NAME = 'streamdeck-bridge'
+/** The deck, from the top of the repository: its npm project, its plugin folder and UUID, and its newest log, which a start begins anew. */
+export const DECK_PATH = 'claude-code/deck'
+export const DECK_PLUGIN = 'com.karimdhanji.claude.sdPlugin'
+export const DECK_UUID = 'com.karimdhanji.claude'
+export const DECK_LOG_PATH = `${DECK_PATH}/${DECK_PLUGIN}/logs/${DECK_UUID}.0.log`
 /** Where, from the top of the repository, the deck keeps its token (PROTOCOL.md, "The token") and releases go. */
-export const TOKEN_PATH = 'claude-code/deck/com.karimdhanji.claude.sdPlugin/run/token'
+export const TOKEN_PATH = `${DECK_PATH}/${DECK_PLUGIN}/run/token`
 export const RELEASE_PATH = 'claude-code/release'
 /** Beside the copy, never inside it: commit, time and plugin version of the release. */
 export const RELEASE_FILE = 'RELEASE.json'
@@ -169,9 +189,9 @@ function repoHead(repo) {
   return head.stdout.toString('utf8').trim()
 }
 
-/** `git status --porcelain` for claude-code/plugin: one line for each file changed, staged or untracked there. */
-function uncommitted(repo) {
-  const r = git(repo, ['status', '--porcelain', '--', PLUGIN_PATH])
+/** `git status --porcelain` for `rel` (claude-code/plugin unless named): one line for each file changed, staged or untracked there. */
+function uncommitted(repo, rel = PLUGIN_PATH) {
+  const r = git(repo, ['status', '--porcelain', '--', rel])
   if (r.status !== 0) refuse(`git status failed in ${tilde(repo)}: ${gitError(r)}`)
   return r.stdout.toString('utf8').split('\n').filter((l) => l.trim())
 }
@@ -329,6 +349,53 @@ function namesFolder(value, dir) {
   }
 }
 
+/** What separates the folders in a CLAUDE_CODE_PLUGIN_DIRS value: the platform's path-list separator, ':' on macOS. */
+const SEP = path.delimiter
+
+/**
+ * Whether a CLAUDE_CODE_PLUGIN_DIRS entry, not the release copy, names another copy of this plugin, which a session
+ * would load beside the release copy: a folder whose manifest names streamdeck-bridge (the dev copy, the sandbox's
+ * link), or, with no manifest there to read, a path ending in streamdeck-bridge, as a release copy left behind where a
+ * clone used to be.
+ */
+function otherCopy(entry) {
+  const p = entry.replace(/^~(?=$|\/)/, HOME)
+  if (!path.isAbsolute(p)) return false
+  const { name } = readManifest(p)
+  return name !== null ? name === PLUGIN_NAME : path.basename(p) === PLUGIN_NAME
+}
+
+/**
+ * A CLAUDE_CODE_PLUGIN_DIRS value, entry by entry, empty ones left out: `{entry, kind}`, the kind 'ours' for an entry
+ * naming the release copy `copy`, 'copy' for another copy of the plugin (otherCopy), 'other' for any other folder.
+ */
+function dirEntries(value, copy) {
+  return value.split(SEP).filter((e) => e !== '').map((entry) => ({ entry, kind: namesFolder(entry, copy) ? 'ours' : otherCopy(entry) ? 'copy' : 'other' }))
+}
+
+const joinEntries = (entries) => entries.map((e) => e.entry).join(SEP)
+
+/**
+ * The CLAUDE_CODE_PLUGIN_DIRS install writes: the other folders as they were, in their order, and the release copy
+ * once, where it was first named, else where another copy was first named, else last. Other copies are left out.
+ */
+function withCopy(entries, copy) {
+  const named = entries.some((e) => e.kind === 'ours')
+  const out = []
+  let placed = false
+  for (const { entry, kind } of entries) {
+    if (kind === 'other') out.push(entry)
+    else if (!placed && (kind === 'ours' || !named)) {
+      out.push(kind === 'ours' ? entry : copy)
+      placed = true
+    }
+  }
+  if (!placed) out.push(copy)
+  return out.join(SEP)
+}
+
+const typeName = (v) => (v === null ? 'null' : Array.isArray(v) ? 'list' : typeof v)
+
 /** JSON text without the whitespace between tokens, and each string written as JSON.stringify writes it. The text must parse. */
 function compact(text) {
   let out = ''
@@ -368,7 +435,7 @@ function loadSettings(file) {
   try {
     target = fs.realpathSync(file)
   } catch (err) {
-    return { problem: err.code === 'ENOENT' ? `no settings file at ${tilde(file)}` : `can't read ${tilde(file)}: ${errCode(err)}` }
+    return { problem: err.code === 'ENOENT' ? missingSettings(file) : `can't read ${tilde(file)}: ${errCode(err)}` }
   }
   let raw
   let st
@@ -389,6 +456,39 @@ function loadSettings(file) {
   if (Object.hasOwn(data, 'env') && !isObj(data.env)) return { problem: `env in ${tilde(file)} isn't an object` }
   return { file, target, raw, mode: st.mode & 0o7777, data }
 }
+
+/** Why there's no settings file at `file`: nothing there, or a link to a file that doesn't exist, as a dotfiles link before its repository is cloned. */
+function missingSettings(file) {
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) return `no settings file at ${tilde(file)}`
+  return `${tilde(file)} is a link to ${tilde(path.resolve(path.dirname(file), fs.readlinkSync(file)))}, which doesn't exist`
+}
+
+/**
+ * Makes settings.json when nothing is at its path: `{}`, 0600 as the token goes in it, in a folder made 0700 when that's
+ * missing too. Returns null when something was there, a link included, which loadSettings then reads or says why not;
+ * else `{dir}`, whether it made the folder.
+ */
+function ensureSettings(file) {
+  const madeDir = fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }) !== undefined
+  let fd
+  try {
+    fd = fs.openSync(file, 'wx', 0o600)
+  } catch (err) {
+    if (err.code === 'EEXIST') return null
+    throw err
+  }
+  try {
+    fs.writeFileSync(fd, '{}\n')
+    fs.fchmodSync(fd, 0o600)
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
+  return { dir: madeDir }
+}
+
+/** A CLAUDE_CODE_PLUGIN_DIRS value as install and undo print it: what it was, or is now. Paths only, never the token. */
+const shownDirs = (v) => (v === undefined ? 'not set' : typeof v !== 'string' ? `a ${typeName(v)}` : v === '' ? 'empty' : printable(v, 400))
 
 /** loadSettings for a change: refuses a file it can't change. */
 function settingsToChange(o) {
@@ -531,9 +631,9 @@ function run(cmd, args, { env, cwd, timeoutMs }) {
  * `<binary> plugin validate <plugin>` with nothing of this machine's Claude setup, as recheck.mjs runs it: only PATH
  * from this environment, so neither DECK_TOKEN nor a session's own variables reach it, and a fresh HOME, TMPDIR and
  * CLAUDE_CONFIG_DIR in a temp folder that's removed afterwards. `{ok, why, tail}`: why it failed, and its last lines,
- * with the copy's path read as <new copy>.
+ * with the copy's path read as <new copy>. `runner` runs it: run, or setup's stand-in in the tests.
  */
-async function validate(binary, plugin) {
+async function validate(binary, plugin, runner) {
   const tmp = tempDir(os.tmpdir(), 'deck-install-validate-')
   try {
     const env = {
@@ -544,7 +644,7 @@ async function validate(binary, plugin) {
       NO_COLOR: '1',
     }
     for (const d of [env.HOME, env.TMPDIR, env.CLAUDE_CONFIG_DIR]) fs.mkdirSync(d, { recursive: true })
-    const r = await run(binary, ['plugin', 'validate', plugin], { env, cwd: tmp, timeoutMs: VALIDATE_TIMEOUT_MS })
+    const r = await runner(binary, ['plugin', 'validate', plugin], { env, cwd: tmp, timeoutMs: VALIDATE_TIMEOUT_MS })
     // The real paths first: on macOS the temp folder's /var is a link to /private/var, and either can be printed.
     const swaps = [[fs.realpathSync(plugin), '<new copy>'], [plugin, '<new copy>'], [fs.realpathSync(tmp), '<tmp>'], [tmp, '<tmp>']]
     const text = swaps.reduce((s, [from, to]) => s.split(from).join(to), stripAnsi(r.out))
@@ -612,11 +712,24 @@ export function status(o, log) {
     if (dirs === undefined) {
       log(`  ${DIRS_KEY}: not set`)
       problems.push(`${DIRS_KEY} isn't set`)
-    } else if (namesFolder(dirs, o.copy)) {
-      log(`  ${DIRS_KEY}: set, names the release copy`)
-    } else {
-      log(`  ${DIRS_KEY}: set to ${typeof dirs === 'string' ? `something else: ${printable(dirs)}` : `a ${dirs === null ? 'null' : typeof dirs}, not a path`}`)
+    } else if (typeof dirs !== 'string') {
+      log(`  ${DIRS_KEY}: set to a ${typeName(dirs)}, not a list of folders`)
       problems.push(`${DIRS_KEY} doesn't name the release copy`)
+    } else {
+      // Problems exactly where install would change the value (withCopy), so status is clean once install has run.
+      const entries = dirEntries(dirs, o.copy)
+      const ours = entries.filter((e) => e.kind === 'ours').length
+      const copies = entries.filter((e) => e.kind === 'copy')
+      const others = entries.length - ours - copies.length
+      if (ours === 0) {
+        log(`  ${DIRS_KEY}: set, but not to the release copy: ${printable(dirs)}`)
+        problems.push(`${DIRS_KEY} doesn't name the release copy`)
+      } else {
+        log(`  ${DIRS_KEY}: set, names the release copy${ours > 1 ? ` ${ours} times` : ''}${others ? `, beside ${plural(others, 'other folder')}` : ''}`)
+        if (ours > 1) problems.push(`${DIRS_KEY} names the release copy more than once: run install`)
+      }
+      for (const c of copies) log(`    and another copy of ${PLUGIN_NAME}, which a session would load too: ${printable(c.entry)}`)
+      if (copies.length) problems.push(`${DIRS_KEY} names another copy of ${PLUGIN_NAME}: run install`)
     }
     const token = own(env, TOKEN_KEY)
     if (token === undefined) {
@@ -657,8 +770,9 @@ export function status(o, log) {
   return problems.length ? 1 : 0
 }
 
-/** Release: HEAD's plugin into the release folder, validated, then swapped in. Returns 0, or refuses. */
-export async function release(o, log) {
+/** Release: HEAD's plugin into the release folder, validated, then swapped in. Returns 0, or refuses. The validator runs through `host.run` (HOST). */
+export async function release(o, log, host = {}) {
+  const runner = host.run ?? run
   const commit = repoHead(o.repo)
   const dirty = uncommitted(o.repo)
   if (dirty.length) refuse(`${PLUGIN_PATH} has uncommitted changes, and a release takes only what's committed:\n${dirty.map((l) => `    ${printable(l)}`).join('\n')}`)
@@ -685,7 +799,7 @@ export async function release(o, log) {
         refuse(`no Claude Code to validate with: ${cc === null ? `no version folder in ${tilde(o.claudeCodeRoot)}` : `no executable claude in ${tilde(path.join(o.claudeCodeRoot, cc.version))}/*/claude.app/Contents/MacOS/`}. Pass --claude FILE, so the release copy stays as it was`)
       }
       const who = cc.version !== null ? `Claude Code ${cc.version}` : tilde(cc.binary)
-      const v = await validate(cc.binary, fresh)
+      const v = await validate(cc.binary, fresh, runner)
       if (!v.ok) refuse(`plugin validate (${who}) ${v.why}, so the release copy stays as it was${v.tail.length ? `:\n${v.tail.map((l) => `    ${l}`).join('\n')}` : ''}`)
       log(`  plugin validate (${who}): passed`)
     }
@@ -729,8 +843,12 @@ export async function release(o, log) {
   }
 }
 
-/** Install: sets both keys in settings env, given a current release copy and the deck's token. Returns 0, or refuses. */
+/**
+ * Install: sets DECK_TOKEN, and puts the release copy in CLAUDE_CODE_PLUGIN_DIRS (withCopy), given a current release
+ * copy and the deck's token. Makes settings.json when there's none. Returns 0, or refuses.
+ */
 export function install(o, log) {
+  if (o.copy.includes(SEP)) refuse(`the release copy's path, ${tilde(o.copy)}, has a '${SEP}', which separates the folders in ${DIRS_KEY}: clone the repository to a path without one`)
   const commit = repoHead(o.repo)
   const c = checkCopy(o, commit)
   if (c.state === 'missing') refuse(`there's no release copy at ${tilde(o.copy)}: run release first`)
@@ -740,15 +858,18 @@ export function install(o, log) {
   if (t.problem) refuse(t.problem)
 
   log(`install: ${tilde(o.settings)}`)
+  const made = ensureSettings(o.settings)
+  if (made) log(`  made it, as there was none: {}, 0600${made.dir ? ', and its folder, 0700' : ''}`)
   const s = settingsToChange(o)
   if (s.target !== s.file) log(`  a link to ${tilde(s.target)}, which is what's written`)
   const env = own(s.data, 'env')
   const dirs = own(env, DIRS_KEY)
-  const dirsOk = namesFolder(dirs, o.copy)
-  if (dirs !== undefined && !dirsOk) {
-    const was = typeof dirs === 'string' ? printable(dirs) : `a ${dirs === null ? 'null' : typeof dirs}`
-    if (!o.force) refuse(`env in ${tilde(o.settings)} already has ${DIRS_KEY}, set to ${was}, not the release copy. Pass --force to replace it`)
+  if (dirs !== undefined && typeof dirs !== 'string' && !o.force) {
+    refuse(`env in ${tilde(o.settings)} has ${DIRS_KEY} set to a ${typeName(dirs)}, not a list of folders. Pass --force to replace it`)
   }
+  const entries = typeof dirs === 'string' ? dirEntries(dirs, o.copy) : null
+  const dirsNew = entries === null ? o.copy : withCopy(entries, o.copy)
+  const dirsOk = entries !== null && dirsNew === joinEntries(entries)
   const tokenNow = own(env, TOKEN_KEY)
   const tokenOk = tokenNow === t.token
   if (own(env, WATCH_KEY) !== undefined) log(`  note: ${WATCH_KEY} is in env. This leaves it, but the route never sets it, and status counts it against the install`)
@@ -758,62 +879,325 @@ export function install(o, log) {
   }
   checkRewrite(o, s, log)
 
-  const saved = backup(o, s)
+  // A file this run made holds only {}: there's nothing in it to keep.
+  const saved = made ? null : backup(o, s)
   if (env === undefined) s.data.env = {}
-  if (!dirsOk) s.data.env[DIRS_KEY] = o.copy
+  if (!dirsOk) s.data.env[DIRS_KEY] = dirsNew
   if (!tokenOk) s.data.env[TOKEN_KEY] = t.token
   writeSettings(s, s.data)
 
-  log(`  backup: ${tilde(saved)} (0600)`)
-  if (dirsOk) log(`  ${DIRS_KEY}: already named the release copy`)
-  else if (dirs === undefined) log(`  ${DIRS_KEY}: set to ${o.copy}`)
-  else log(`  ${DIRS_KEY}: set to ${o.copy}, replacing another value (--force). The backup keeps the old one; undo removes the key and doesn't restore it`)
+  log(saved ? `  backup: ${tilde(saved)} (0600)` : '  backup: none, as this run made the file')
+  log(dirsOk ? `  ${DIRS_KEY}: unchanged, ${shownDirs(dirs)}` : `  ${DIRS_KEY}: was ${shownDirs(dirs)}, now ${shownDirs(dirsNew)}`)
   if (tokenOk) log(`  ${TOKEN_KEY}: already matched the deck's token`)
   else log(`  ${TOKEN_KEY}: set (${t.token.length} characters)${tokenNow === undefined ? '' : ", replacing a value that didn't match the deck's token"}`)
   log('Desktop sessions load the plugin from the release copy when they next start; running ones only once they restart.')
   return 0
 }
 
-/** Undo: removes both keys from settings env, and env when that empties it. Returns 0, or refuses. */
+/**
+ * Undo: removes DECK_TOKEN, and takes the release copy and any other copy of the plugin out of CLAUDE_CODE_PLUGIN_DIRS,
+ * leaving the other folders as they were; the key goes when none is left, and env when that empties it. Returns 0, or
+ * refuses.
+ */
 export function undo(o, log) {
   log(`undo: ${tilde(o.settings)}`)
   const s = settingsToChange(o)
   if (s.target !== s.file) log(`  a link to ${tilde(s.target)}, which is what's written`)
   const env = own(s.data, 'env')
-  const had = [DIRS_KEY, TOKEN_KEY].filter((k) => own(env, k) !== undefined)
-  if (had.length === 0) {
-    log(`  nothing to undo: neither ${DIRS_KEY} nor ${TOKEN_KEY} is in env, so nothing was written`)
+  const dirs = own(env, DIRS_KEY)
+  const entries = typeof dirs === 'string' ? dirEntries(dirs, o.copy) : []
+  const kept = entries.filter((e) => e.kind === 'other')
+  const gone = entries.filter((e) => e.kind !== 'other')
+  const hadToken = own(env, TOKEN_KEY) !== undefined
+  if (gone.length === 0 && !hadToken) {
+    log(`  nothing to undo: neither the release copy in ${DIRS_KEY} nor ${TOKEN_KEY} is in env, so nothing was written`)
     return 0
   }
   checkRewrite(o, s, log)
-  const dirs = env[DIRS_KEY]
   const saved = backup(o, s)
-  for (const k of had) delete env[k]
+  if (gone.length) {
+    if (kept.length) env[DIRS_KEY] = joinEntries(kept)
+    else delete env[DIRS_KEY]
+  }
+  if (hadToken) delete env[TOKEN_KEY]
   const emptied = Object.keys(env).length === 0
   if (emptied) delete s.data.env
   writeSettings(s, s.data)
 
   log(`  backup: ${tilde(saved)} (0600)`)
-  if (had.includes(DIRS_KEY)) {
-    const which = namesFolder(dirs, o.copy) ? 'which named the release copy' : `which named ${typeof dirs === 'string' ? printable(dirs) : 'no path'}, not the release copy; the backup keeps it`
-    log(`  removed ${DIRS_KEY}, ${which}`)
-  }
-  if (had.includes(TOKEN_KEY)) log(`  removed ${TOKEN_KEY}`)
+  if (gone.length) log(`  ${DIRS_KEY}: was ${shownDirs(dirs)}, now ${kept.length ? shownDirs(joinEntries(kept)) : 'removed'}`)
+  else if (dirs !== undefined) log(`  ${DIRS_KEY}: unchanged, ${shownDirs(dirs)}`)
+  if (hadToken) log(`  removed ${TOKEN_KEY}`)
   if (emptied) log('  removed env, which held nothing else')
   if (own(env, WATCH_KEY) !== undefined) log(`  left ${WATCH_KEY} in env, which this never sets`)
   log('New desktop sessions start without the plugin; running ones keep it until they restart.')
   return 0
 }
 
-export const COMMANDS = Object.freeze({ status, release, install, undo })
+// ---- setup
+
+/** The Node major version the deck is built with: mise.toml's, and the deck manifest's Nodejs.Version. */
+const NODE_MAJOR = 24
+const NPM_CI_TIMEOUT_MS = 600_000
+const BUILD_TIMEOUT_MS = 300_000
+const STREAMDECK_TIMEOUT_MS = 60_000
+/** In the deck's node_modules after a good `npm ci`: the sha256 of the package-lock.json it installed. */
+export const LOCK_STAMP = '.deck-install-lock.sha256'
+/** The deck's line once its bridge listens: deck src/bridge/server.ts's "listening on", under the scope plugin.ts gives the bridge. */
+export const LISTENING = /^\S+ +\w+ +Bridge: listening on (\S+)/
+
+/**
+ * What setup takes from this machine, which the tests replace: the one runner every command it starts goes through
+ * (release's validator and the preflight's pgrep too), the clock, the platform and the Node running this, the Stream
+ * Deck app and the folder it makes for its plugins when it first opens (`streamdeck link` puts its link there), and how
+ * long to wait for the deck.
+ */
+export const HOST = Object.freeze({
+  run,
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  platform: process.platform,
+  nodeVersion: process.versions.node,
+  execPath: process.execPath,
+  streamDeckApp: '/Applications/Elgato Stream Deck.app',
+  streamDeckPlugins: path.join(HOME, 'Library', 'Application Support', 'com.elgato.StreamDeck', 'Plugins'),
+  waitMs: 90_000,
+  pollMs: 500,
+})
+
+const isDir = (p) => fs.statSync(p, { throwIfNoEntry: false })?.isDirectory() === true
+const isExecutable = (p) => {
+  const st = fs.statSync(p, { throwIfNoEntry: false })
+  return st?.isFile() === true && (st.mode & 0o111) !== 0
+}
+const sameFolder = (a, b) => {
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b)
+  } catch {
+    return false
+  }
+}
+const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+const readStamp = (file) => {
+  try {
+    return fs.readFileSync(file, 'utf8').trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * setup's first step, which writes nothing but a temp copy of HEAD's plugin it removes, and runs only git, tar and
+ * pgrep, which read. `{lines, problems, plan, lock}`: what it found; what stops setup, each saying what to do, with
+ * release's refusals that can be known up front; for npm ci, the link and the release, `{skip}` or `{why}` it runs; and
+ * the sha256 of package-lock.json.
+ */
+async function preflight(o, h, deck) {
+  const lines = []
+  const problems = []
+  const plan = {}
+  if (h.platform === 'darwin') lines.push('macOS: yes')
+  else problems.push(`this is ${h.platform}, and the deck and the Claude app's sessions run on macOS only`)
+
+  if (Number(h.nodeVersion.split('.')[0]) === NODE_MAJOR) lines.push(`Node: ${h.nodeVersion}, ${tilde(h.execPath)}`)
+  else problems.push(`this is Node ${h.nodeVersion}, and the deck is built with Node ${NODE_MAJOR}, as mise.toml pins: run \`mise install node\`, then run setup from the top of the clone as \`mise exec node -- node claude-code/install/deck-install.mjs setup\``)
+
+  const link = path.join(h.streamDeckPlugins, DECK_PLUGIN)
+  if (!isDir(h.streamDeckApp)) problems.push(`there's no Stream Deck app at ${tilde(h.streamDeckApp)}: install it, open it once and quit it, then run setup again`)
+  else if (!isDir(h.streamDeckPlugins)) problems.push(`the Stream Deck app hasn't made its plugins folder, ${tilde(h.streamDeckPlugins)}, which it makes when it first opens: open it once and quit it, then run setup again`)
+  else {
+    lines.push(`Stream Deck app: ${tilde(h.streamDeckApp)}`)
+    if (sameFolder(link, path.join(deck, DECK_PLUGIN))) plan.link = { skip: 'the Stream Deck app links the deck plugin from this folder already' }
+    else if (fs.lstatSync(link, { throwIfNoEntry: false })) problems.push(`the Stream Deck app has the deck plugin from another folder, ${tilde(link)}, which streamdeck link won't replace: take it out (claude-code/README.md, When something's off), then run setup again`)
+    else {
+      plan.link = { why: "the Stream Deck app doesn't have the deck plugin yet" }
+      // A first setup. A running app may see developer mode only once it relaunches; setup's restart starts one that isn't.
+      // Its process is "Stream Deck", the app's CFBundleExecutable.
+      if ((await h.run('/usr/bin/pgrep', ['-x', 'Stream Deck'], { cwd: o.repo, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 10_000 })).code === 0) {
+        problems.push("the Stream Deck app is running, and this is the deck's first setup: quit the Stream Deck app, then run setup again. A running app may not see developer mode until it relaunches, and setup's restart starts it with developer mode on and the link in place")
+      }
+    }
+  }
+
+  if (o.claude !== null) {
+    if (isExecutable(o.claude)) lines.push(`Claude Code: ${tilde(o.claude)} (--claude)`)
+    else problems.push(`--claude names ${tilde(o.claude)}, which isn't an executable file`)
+  } else {
+    const cc = newestClaudeCode(o.claudeCodeRoot)
+    if (cc?.binary) lines.push(`Claude Code the app bundles: ${cc.version}`)
+    else problems.push(`the Claude app has no Claude Code in ${tilde(o.claudeCodeRoot)} yet, which its sessions run and release checks the plugin with: install and open the app, start a session in its Code tab once, then run setup again`)
+  }
+
+  try {
+    const commit = repoHead(o.repo)
+    for (const [rel, what] of [[DECK_PATH, 'which setup would build into the deck'], [PLUGIN_PATH, "and a release takes only what's committed"]]) {
+      const dirty = uncommitted(o.repo, rel)
+      if (dirty.length) problems.push(`${rel} has uncommitted changes, ${what}: commit or stash them, then run setup again\n${dirty.slice(0, 10).map((l) => `      ${printable(l)}`).join('\n')}`)
+    }
+    const c = checkCopy(o, commit)
+    if (c.state === 'not a folder') problems.push(`${tilde(o.copy)} isn't a folder, so a release can't replace it: move it away, then run setup again`)
+    else if (c.state === 'current') plan.release = { skip: `the release copy equals ${PLUGIN_PATH} at HEAD, ${short(commit)}` }
+    else plan.release = { why: c.state === 'missing' ? `there's no release copy yet; HEAD is ${short(commit)}` : `the release copy, ${releaseNote(readRelease(o))}, differs from ${PLUGIN_PATH} at HEAD, ${short(commit)} (${diffCounts(c.diff, STATUS_LABELS)})` }
+  } catch (err) {
+    if (!(err instanceof Refusal)) throw err
+    problems.push(err.message)
+  }
+
+  // npm ci only for node_modules missing, or not stamped with this package-lock.json's sha256 by a good npm ci.
+  const lock = sha256(path.join(deck, 'package-lock.json'))
+  if (!isDir(path.join(deck, 'node_modules'))) plan.npmCi = { why: 'there are no node_modules yet' }
+  else if (readStamp(path.join(deck, 'node_modules', LOCK_STAMP)) === lock) plan.npmCi = { skip: `node_modules has package-lock.json's packages: its sha256, ${lock.slice(0, 12)}…, is the last good npm ci's` }
+  else plan.npmCi = { why: "package-lock.json isn't the one the last good npm ci installed" }
+  return { lines, problems, plan, lock }
+}
+
+/** The address in the deck log's newest "Bridge: listening" line stamped at `since` or later; null when there's none. */
+function listeningSince(file, since) {
+  let lines
+  try {
+    lines = fs.readFileSync(file, 'utf8').split('\n')
+  } catch {
+    return null
+  }
+  return lines.filter((l) => Date.parse(l.slice(0, l.indexOf(' '))) >= since).map((l) => LISTENING.exec(l)?.[1]).filter(Boolean).at(-1) ?? null
+}
+
+/**
+ * Setup: from a clone to a working deck, step by step: each step's name, then what it found or did. Skips npm ci, the
+ * link and the release when the preflight found them current, and stops at the first step that fails, saying which and
+ * why. With `o.dryRun`, only the preflight runs, and each other step says whether it would run, and why. Returns 0, 1
+ * for a dry run whose preflight found problems, or refuses.
+ */
+export async function setup(o, log, host = {}) {
+  const h = { ...HOST, ...host }
+  const deck = path.join(o.repo, DECK_PATH)
+  const deckLog = path.join(o.repo, DECK_LOG_PATH)
+  const nodeBin = path.dirname(h.execPath)
+  // npm beside the Node that runs this, and Stream Deck's CLI as npm ci installs it, never one fetched by name.
+  const npm = fs.existsSync(path.join(nodeBin, 'npm')) ? path.join(nodeBin, 'npm') : 'npm'
+  const streamdeck = path.join(deck, 'node_modules', '.bin', 'streamdeck')
+  // That Node first on PATH, for the scripts npm runs, and no DECK_TOKEN, which none of them needs.
+  const env = { ...process.env, PATH: [nodeBin, process.env.PATH].filter(Boolean).join(SEP) }
+  delete env[TOKEN_KEY]
+  const sub = (line) => log(`  ${line}`)
+  // What stopped a step, refusal or not; a run of 64 hex, a token's shape, is cut, as main cuts it.
+  const why = (err) => (err instanceof Refusal ? err.message : `failed: ${errCode(err)}: ${printable(String(err?.message ?? err), 400).replace(/[0-9a-f]{64}/gi, '<64 hex characters>')}`)
+  let restartedAt = null
+
+  const command = (cmd, args, timeoutMs) => async () => {
+    const r = await h.run(cmd, args, { cwd: deck, env, timeoutMs })
+    // A spinner's frames end in \r.
+    const out = stripAnsi(r.out ?? '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).map((l) => printable(l, 300).replace(/[0-9a-f]{64}/gi, '<64 hex characters>'))
+    const tail = out.length ? `:\n${out.slice(-20).map((l) => `    ${l}`).join('\n')}` : ''
+    if (r.error) refuse(`couldn't run ${tilde(cmd)}: ${r.error}`)
+    if (r.timedOut) refuse(`timed out after ${timeoutMs / 1000} s${tail}`)
+    if (r.code !== 0) refuse(`failed (exit ${r.code ?? r.signal})${tail}`)
+    sub(out.length ? `ok: ${out.at(-1)}` : 'ok')
+  }
+
+  const waitForDeck = async () => {
+    const deadline = h.now() + h.waitMs
+    for (;;) {
+      const at = readToken(o.tokenFile).problem ? null : listeningSince(deckLog, restartedAt)
+      if (at !== null) {
+        sub(`ok: the token is there, and the bridge listens on ${printable(at, 60)}`)
+        return
+      }
+      if (h.now() >= deadline) break
+      await h.sleep(h.pollMs)
+    }
+    refuse(`the deck didn't log "Bridge: listening" within ${h.waitMs / 1000} s of the restart: quit and reopen the Stream Deck app, which starts a linked plugin only in developer mode. Its log is ${tilde(deckLog)}`)
+  }
+
+  let pf
+  // `plan` names the preflight's verdict for a step it can skip.
+  const steps = [
+    {
+      name: 'npm ci',
+      what: `the deck's packages, in ${DECK_PATH}`,
+      plan: 'npmCi',
+      run: async () => {
+        await command(npm, ['ci'], NPM_CI_TIMEOUT_MS)()
+        fs.mkdirSync(path.join(deck, 'node_modules'), { recursive: true })
+        fs.writeFileSync(path.join(deck, 'node_modules', LOCK_STAMP), `${pf.lock}\n`)
+      },
+    },
+    { name: 'npm run build', what: `the deck plugin, in ${DECK_PATH}`, run: command(npm, ['run', 'build'], BUILD_TIMEOUT_MS) },
+    { name: 'streamdeck dev', what: "Stream Deck's developer mode, without which a linked plugin doesn't start", run: command(streamdeck, ['dev'], STREAMDECK_TIMEOUT_MS) },
+    { name: `streamdeck link ${DECK_PLUGIN}`, what: 'the deck plugin, linked into the Stream Deck app', plan: 'link', run: command(streamdeck, ['link', DECK_PLUGIN], STREAMDECK_TIMEOUT_MS) },
+    {
+      name: `streamdeck restart ${DECK_UUID}`,
+      what: "starts the deck plugin, and the Stream Deck app if it isn't running; a request held on the deck goes back to the app's dialogs",
+      run: async () => {
+        restartedAt = h.now()
+        await command(streamdeck, ['restart', DECK_UUID], STREAMDECK_TIMEOUT_MS)()
+      },
+    },
+    { name: 'wait for the deck', what: `its token, and "Bridge: listening" in its log since the restart, for up to ${h.waitMs / 1000} s`, run: waitForDeck },
+    { name: 'release', what: `${PLUGIN_PATH} from HEAD as the release copy`, plan: 'release', run: () => release(o, sub, h) },
+    { name: 'install', what: `the release copy and the deck's token in ${tilde(o.settings)}, made when there's none`, run: () => install(o, sub) },
+    {
+      name: 'status',
+      what: 'whether the plugin is installed and current',
+      run: () => {
+        if (status(o, sub) !== 0) refuse('not installed and current, above')
+      },
+    },
+  ]
+
+  const total = steps.length + 1
+  log(o.dryRun ? 'setup, a dry run: the preflight checks, writing nothing; then each step says whether it would run, and why' : `setup: ${tilde(o.repo)}`)
+  log(`[1/${total}] preflight: macOS, Node ${NODE_MAJOR}, the Stream Deck app, the Claude Code the Claude app bundles, and the repository`)
+  try {
+    pf = await preflight(o, h, deck)
+  } catch (err) {
+    refuse(`stopped at step 1, the preflight: ${why(err)}`)
+  }
+  for (const line of pf.lines) sub(line)
+  for (const problem of pf.problems) sub(`problem: ${problem}`)
+  if (pf.problems.length === 0) sub('ok')
+  else if (!o.dryRun) refuse(`stopped at step 1, the preflight: ${plural(pf.problems.length, 'problem')}, above. Fix ${pf.problems.length === 1 ? 'it' : 'them'}, then run setup again`)
+
+  for (const [i, step] of steps.entries()) {
+    log(`[${i + 2}/${total}] ${step.name}: ${step.what}`)
+    const plan = step.plan ? pf.plan[step.plan] : undefined
+    if (plan?.skip) {
+      sub(`skipped: ${plan.skip}`)
+      continue
+    }
+    if (o.dryRun) {
+      sub(plan ? `would run: ${plan.why}` : 'not run: a dry run')
+      continue
+    }
+    if (plan) sub(plan.why)
+    try {
+      await step.run()
+    } catch (err) {
+      refuse(`stopped at step ${i + 2}, ${step.name}: ${why(err)}\nFix that, then run setup again.`)
+    }
+  }
+
+  if (o.dryRun) {
+    log(`A dry run: only the preflight ran, and nothing was written.${pf.problems.length ? ' The preflight found problems, above.' : ''}`)
+    return pf.problems.length ? 1 : 0
+  }
+  log('Setup is done. Then:')
+  log('  1. Quit the Claude app (Cmd-Q) and open it again: a session loads the plugin when it starts.')
+  log(`  2. Start a session in its Code tab, and look for its "Sessions: HELLO ... plugin" line in the deck's log: ${tilde(deckLog)}`)
+  log('  3. In the Stream Deck app, place the actions from the Claude Code category: claude-code/README.md, The layout.')
+  return 0
+}
+
+export const COMMANDS = Object.freeze({ status, release, install, undo, setup })
 
 // ---- the command line
 
-const USAGE = `usage: node claude-code/install/deck-install.mjs [status|release|install|undo] [options]
+const USAGE = `usage: node claude-code/install/deck-install.mjs [status|release|install|undo|setup] [options]
 
 Loads the Claude Code plugin (${PLUGIN_PATH}, ${PLUGIN_NAME}) into the user's own Claude desktop
-sessions, and takes it out again. Sessions load a release copy made from git HEAD, which the env block of
-~/.claude/settings.json names in ${DIRS_KEY}, beside the deck's token in ${TOKEN_KEY}.
+sessions, and takes it out again; setup does all it takes on a new Mac, from a clone. Sessions load a
+release copy made from git HEAD, which the env block of ~/.claude/settings.json names in
+${DIRS_KEY}, a list of folders separated by '${SEP}', beside the deck's token in ${TOKEN_KEY}.
 New sessions pick a change up when they start; running ones only once they restart.
 
   status   the default, read only. Whether the release copy equals ${PLUGIN_PATH} at HEAD, whether
@@ -823,10 +1207,21 @@ New sessions pick a change up when they start; running ones only once they resta
   release  refuses uncommitted changes in ${PLUGIN_PATH}. Copies it from HEAD into the release
            folder, runs \`plugin validate\` on the copy from the newest Claude Code the app bundles, and
            only if that passes swaps it in as ${PLUGIN_NAME}/, with ${RELEASE_FILE} beside it.
-  install  needs a current release copy. Backs up settings.json (backups/ in the release folder,
-           0600), then sets ${DIRS_KEY} and ${TOKEN_KEY} in env.
-  undo     backs up settings.json, then removes both keys, and env when that leaves it empty.
+  install  needs a current release copy. Makes settings.json when there's none ({}, 0600), else
+           backs it up (backups/ in the release folder, 0600). Then sets ${TOKEN_KEY}, and puts the
+           release copy in ${DIRS_KEY} once: after the folders already there, or in
+           place of another copy of ${PLUGIN_NAME}, which a session would load too.
+  undo     backs up settings.json, then removes ${TOKEN_KEY}, and takes the release copy and any other
+           copy of ${PLUGIN_NAME} out of ${DIRS_KEY}, leaving the other folders: the key
+           goes when none is left, and env when that leaves it empty.
+  setup    on a new Mac, from a clone: a preflight (macOS, Node ${NODE_MAJOR}, the Stream Deck app, the Claude
+           Code the Claude app bundles, ${DECK_PATH} and ${PLUGIN_PATH} committed), npm ci
+           and npm run build in ${DECK_PATH}, streamdeck dev, link and restart, a wait for the
+           deck's token and its bridge, then release, install and status. It skips npm ci, the link and
+           the release when they're current, and stops at the first step that fails. Run it with mise's
+           Node ${NODE_MAJOR} alone: mise exec node -- node claude-code/install/deck-install.mjs setup
 
+  --dry-run           setup: only the preflight, then whether each step would run, and why
   --settings FILE     settings.json (default ${tilde(DEFAULTS.settings)})
   --token-file FILE   the deck's token (default <repo>/${TOKEN_PATH})
   --release-dir DIR   the release folder (default <repo>/${RELEASE_PATH})
@@ -835,9 +1230,9 @@ New sessions pick a change up when they start; running ones only once they resta
                       bundles, found in --claude-code-root)
   --claude-code-root DIR
                       the app's bundled Claude Code versions (default ${tilde(DEFAULTS.claudeCodeRoot)})
-  --skip-validate     release without \`plugin validate\`
-  --force             install over another ${DIRS_KEY}; install or undo on a settings.json
-                      a rewrite changes elsewhere (the backup keeps the original)
+  --skip-validate     release, and setup's release, without \`plugin validate\`
+  --force             install over a ${DIRS_KEY} that isn't text; install or undo on a
+                      settings.json a rewrite changes elsewhere (the backup keeps the original)
   -h, --help          this text
 
 Exit status: 0 when done (status: installed and current), 1 when refused or failed (status: not
@@ -853,6 +1248,7 @@ const OPTIONS = {
   'claude-code-root': { type: 'string' },
   'skip-validate': { type: 'boolean' },
   force: { type: 'boolean' },
+  'dry-run': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 }
 
@@ -870,6 +1266,7 @@ export function resolveOptions(values) {
     claudeCodeRoot: path.resolve(values['claude-code-root'] ?? DEFAULTS.claudeCodeRoot),
     skipValidate: Boolean(values['skip-validate']),
     force: Boolean(values.force),
+    dryRun: Boolean(values['dry-run']),
   }
 }
 
@@ -879,7 +1276,8 @@ function stopAll() {
   for (const dir of temps) fs.rmSync(dir, { recursive: true, force: true })
 }
 
-export async function main(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
+/** The command line: `host` is what setup and release take from this machine (HOST), which the tests replace. */
+export async function main(argv, { stdout = process.stdout, stderr = process.stderr } = {}, host = {}) {
   let values
   let positionals
   try {
@@ -903,10 +1301,14 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
       return 2
     }
   }
+  if (values['dry-run'] && command !== 'setup') {
+    stderr.write(`deck-install: --dry-run goes with setup only\n\n${USAGE}`)
+    return 2
+  }
   const o = resolveOptions(values)
   const log = (line) => stdout.write(`${line}\n`)
   try {
-    return await COMMANDS[command](o, log)
+    return await COMMANDS[command](o, log, host)
   } catch (err) {
     if (err instanceof Refusal) stderr.write(`deck-install ${command}: ${err.message}\n`)
     // Anything else is a bug or the file system. Its message has paths, not file contents, but a run of 64 hex is cut anyway.

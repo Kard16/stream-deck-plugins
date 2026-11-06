@@ -1,6 +1,6 @@
 # Stream Deck + plugins
 
-Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Code. One user, one Mac (macOS 26). No Marketplace, Windows support or distribution polish. Keystroke automation and undocumented APIs are fine when they're the only route.
+Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Code. One user, on macOS 26. The repo is developed on this Mac. Since 2026-11-06 the Claude Code side also goes onto the user's other Macs, from a clone, with `deck-install.mjs setup` (`claude-code/README.md`, Setup). No Marketplace, Windows support or distribution polish. Keystroke automation and undocumented APIs are fine when they're the only route.
 
 - **Done:** the Lightroom Classic side, 2026-11-01, and its Phase 7, dials on Stream Deck pages and big steps, 2026-11-04. Plan, decisions and progress: `docs/lightroom/plan.md`.
 - **Now:** the Claude Code side, in daily use since 2026-11-03 (Phase 5). Plan, decisions and progress: `docs/claude-code/plan.md`. Design notes: `docs/research/claude-code-extensibility.md`. The user's guide: `claude-code/README.md`.
@@ -14,7 +14,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 - Lightroom, the Claude app, the Stream Deck app and the physical deck are shared. One agent drives them at a time, and the main thread decides which.
 - The Claude Code plugin loads in two places, and nowhere else:
   - **Throwaway sessions** the main thread starts from the app's `deck-sandbox` preset in `claude-code/sandbox/`. They load the dev copy, `claude-code/plugin`, through the `claude-code/sandbox-plugin` link, and hot-reload every save.
-  - **The user's own sessions,** since 2026-11-03 at the user's word. They load the release copy, `claude-code/release/streamdeck-bridge`, which `CLAUDE_CODE_PLUGIN_DIRS` names beside `DECK_TOKEN` in the `env` block of `~/.claude/settings.json`. Only `claude-code/install/deck-install.mjs` (`release`, `install`, `undo`) touches those keys, and it backs the file up first. A dev change reaches the user's sessions only once it's committed and released, and each session picks it up when it next starts.
+  - **The user's own sessions,** since 2026-11-03 at the user's word. They load the release copy, `claude-code/release/streamdeck-bridge`, which `CLAUDE_CODE_PLUGIN_DIRS` names beside `DECK_TOKEN` in the `env` block of `~/.claude/settings.json`. Only `claude-code/install/deck-install.mjs` (`setup`, `release`, `install`, `undo`) touches those keys, and it backs the file up first. A dev change reaches the user's sessions only once it's committed and released, and each session picks it up when it next starts.
   - Not through hooks or `enabledPlugins` in `~/.claude/settings.json`, not `~/.claude/skills/`, not a user-scope install. Never set `CLAUDE_CODE_PLUGIN_DIR_WATCH`: it would turn off the dev-mods hot reload.
   - Never write under `~/.claude/dev-mods/`. The main session's mods folder there is watched, and anything in it loads into that session.
   - Only the main thread starts, messages or archives sessions in the Claude app.
@@ -160,6 +160,7 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 **Install** (from the repo root)
 - `node claude-code/install/deck-install.mjs status`: whether the user's sessions get the plugin at HEAD. Exits 0 when installed and current.
 - After a commit to `claude-code/plugin`: `deck-install.mjs release`. Sessions pick it up when they next start. `undo` takes the plugin out of `settings.json`.
+- `deck-install.mjs setup` is for another Mac, from a fresh clone. It refuses here while the deck or the plugin has uncommitted changes, and the commands above are the ones for this Mac. `setup --dry-run` runs only its preflight.
 - `node --test claude-code/install/test/`
 
 **After a Claude app update:** `node claude-code/tools/recheck.mjs` re-checks the app internals the deck and the plugin rely on.

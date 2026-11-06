@@ -122,38 +122,67 @@ In Auto, Claude Code's auto-mode classifier would refuse the plugin's own call t
 
 ## Setup
 
-This is done on this Mac. The steps are here for a rebuild or an update.
+`setup` is for a new Mac, from a clone of this repository. On the Mac where the repository is developed, use the dev commands in [`CLAUDE.md`](../CLAUDE.md) instead.
 
-1. **The Stream Deck plugin** is linked from `claude-code/deck/com.karimdhanji.claude.sdPlugin` and needs Stream Deck's developer mode. From `claude-code/deck`:
-   ```bash
-   mise exec -- npm install
-   mise exec -- npm run build
-   mise exec -- npx streamdeck link com.karimdhanji.claude.sdPlugin
-   mise exec -- npx streamdeck restart com.karimdhanji.claude
-   ```
-2. **The Claude Code plugin** loads in your sessions from a release copy, through two keys in `~/.claude/settings.json`. From the repo root:
-   ```bash
-   mise exec -- node claude-code/install/deck-install.mjs status
-   ```
-   ```bash
-   mise exec -- node claude-code/install/deck-install.mjs release
-   ```
-   ```bash
-   mise exec -- node claude-code/install/deck-install.mjs install
-   ```
-   - `release` copies `claude-code/plugin` as committed at HEAD into `claude-code/release/streamdeck-bridge`, which git ignores, and checks it with the app's Claude Code first.
-   - `install` adds `CLAUDE_CODE_PLUGIN_DIRS` and `DECK_TOKEN` to the `env` block. It backs up the file to `claude-code/release/backups/` first.
-   - **To update:** commit, then run `release` again. New sessions load the new copy; running ones load it when they next start.
-   - **To undo:** `deck-install.mjs undo` removes the two keys. New sessions start without the plugin; running ones keep it until they restart.
-3. **In the Stream Deck app,** place the actions from the **Claude Code** category.
+**First:**
+- **The Stream Deck app,** 7.1 or later. Install it, open it once, so it makes its plugins folder, then quit it. setup's restart starts it again, with developer mode on and the link in place: an app already running may not see developer mode until it relaunches.
+- **The Claude app,** signed in, with one session started in its Code tab, so it has a Claude Code of its own.
+- **git and [mise](https://mise.jdx.dev).** mise brings the Node 24 the deck is built with.
 
-**About the token:** `DECK_TOKEN` keeps web pages and other accounts off the bridge. After `install` it's in the environment of every Claude Code process you run, and in `settings.json`. Any process of yours can read the deck's token file anyway. To keep other accounts on this Mac from reading `settings.json`:
+**Then, from the top of the clone:**
+```bash
+mise install node
+mise exec node -- node claude-code/install/deck-install.mjs setup
+```
+Name `node` in both: the Claude Code side needs nothing else, and a bare `mise exec --` would install every tool in `mise.toml`, Lua 5.1.5 built from source included.
+
+`setup` prints each step and its result, and stops at the first that fails:
+1. **A preflight** of the list above, and of the clone: `claude-code/deck` and `claude-code/plugin` must be committed, so the build never ships unfinished code. It writes nothing.
+2. **`npm ci` and `npm run build`** in `claude-code/deck`.
+3. **`streamdeck dev`, `link` and `restart`:** Stream Deck's developer mode, which a linked plugin needs, then the deck plugin. A restart drops a request held on the deck back to the app's dialogs.
+4. **A wait for the deck to start:** its first start makes its token, then its log says "Bridge: listening".
+5. **`release`, `install` and `status`,** below. `install` makes `~/.claude/settings.json` when there's none.
+
+Run it again after fixing what stopped it. It skips `npm ci` while `node_modules` has what `package-lock.json` names, the link while it points at this clone, and the release while the copy is current.
+
+`setup --dry-run` runs only the preflight, then says whether each step would run, and why.
+
+**If the wait times out,** quit and reopen the Stream Deck app, then run `setup` again.
+
+**Then:**
+1. **Quit the Claude app** (⌘Q) and open it again. A session loads the plugin when it starts.
+2. **Start a session in the Code tab, then check that it worked:**
+   ```bash
+   mise exec node -- node claude-code/install/deck-install.mjs status
+   grep -E "Bridge: listening|Sessions: HELLO .* plugin" claude-code/deck/com.karimdhanji.claude.sdPlugin/logs/com.karimdhanji.claude.0.log
+   ```
+   `status` ends with "installed and current" and exits 0. The log has "Bridge: listening on 127.0.0.1:47600", then a "Sessions: HELLO … plugin" line for each session.
+3. **In the Stream Deck app,** place the actions from the **Claude Code** category, as in [The layout](#the-layout).
+   - **No Claude Code category:** quit and reopen the Stream Deck app.
+
+### The release copy
+
+The Claude Code plugin loads in your sessions from a release copy, through two keys in `~/.claude/settings.json`. `setup` runs these, and each also runs alone, from the repo root:
+```bash
+mise exec node -- node claude-code/install/deck-install.mjs status
+```
+- `release` copies `claude-code/plugin` as committed at HEAD into `claude-code/release/streamdeck-bridge`, which git ignores, and checks it with the app's Claude Code first.
+- `install` sets `DECK_TOKEN` in the `env` block, and adds the release copy to `CLAUDE_CODE_PLUGIN_DIRS`, after any folders already there. It backs up the file to `claude-code/release/backups/` first, or makes it, `{}` at 0600, when there's none.
+  - **Another copy of `streamdeck-bridge` there,** such as an old clone's release copy, gives its place to this one, since a session would load both. The backup keeps it.
+- **To update:** commit, then run `release` again. New sessions load the new copy; running ones load it when they next start.
+- **To undo:** `deck-install.mjs undo` removes `DECK_TOKEN`, and takes the release copy and any other copy of `streamdeck-bridge` out of `CLAUDE_CODE_PLUGIN_DIRS`, leaving other folders. New sessions start without the plugin; running ones keep it until they restart.
+
+**About the token:** `DECK_TOKEN` keeps web pages and other accounts off the bridge. After `install` it's in the environment of every Claude Code process you run, and in `settings.json`. Any process of yours can read the deck's token file anyway. A `settings.json` that `install` makes is 0600. To keep other accounts on this Mac from reading one that was there before:
 ```bash
 chmod 600 ~/.claude/settings.json
 ```
 
 ## When something's off
 
+- **setup's preflight says the Stream Deck app has the deck plugin from another folder,** such as an older clone: `streamdeck link` won't replace it. Take that link out, then run `setup` again. From `claude-code/deck`:
+  ```bash
+  mise exec node -- npx streamdeck unlink com.karimdhanji.claude
+  ```
 - **A session shows no details,** only working or idle: it started before the install or the last update. Restart it.
 - **The app asks for permission and the Approve key shows nothing:** the deck couldn't confirm which session asked, or the deck restarted while the request was held. Answer in the app; it always works.
 - **After a Stream Deck or Claude app restart, or after sleep,** the deck and the sessions find each other again within seconds. A held request is lost on a deck restart, and its session shows needs you until you answer it in the app.
@@ -179,5 +208,13 @@ It checks the app internals this relies on: the registry and record fields, the 
 ## Development
 
 - **Throwaway sessions** start from the app's `deck-sandbox` preset, in `claude-code/sandbox/`. They load the dev copy through the `claude-code/sandbox-plugin` link, with hot reload, and the preset's token. In a desktop session the launch environment beats `settings.json`, so these never load the release copy.
+  - **To make the preset** on a new Mac, after `setup`: in the Claude app's New session picker, save a preset named `deck-sandbox`, with the folder `claude-code/sandbox` in this clone, no worktree, and three environment variables:
+    - `CLAUDE_CODE_PLUGIN_DIRS`: the absolute path of `claude-code/sandbox-plugin`, a link to `claude-code/plugin`.
+    - `CLAUDE_CODE_PLUGIN_DIR_WATCH=1`: a desktop session hot-reloads the plugin only with it. It goes in the preset, never in `settings.json`.
+    - `DECK_TOKEN`: this Mac's deck token. The first line copies it without printing it; once it's pasted, the second clears the clipboard:
+      ```bash
+      tr -d '\n' < claude-code/deck/com.karimdhanji.claude.sdPlugin/run/token | pbcopy
+      pbcopy < /dev/null
+      ```
 - **Checks** are in [`CLAUDE.md`](../CLAUDE.md), under Commands. Once the plugin is installed, run `claude` commands with `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`, so they don't load the release copy too.
 - **The fake Claude, fake deck, fixture player and recheck** are in [`tools/`](tools/README.md).

@@ -1134,6 +1134,32 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Left as they are:**
     - **B1:** no stray copy polled in daily use.
     - **B3:** its window must outlast Claude Code's own `busy` after an Esc, 8.2 s in Phase 4. It costs at most about 60 polls per main-loop turn end, and B2 makes each cheap.
+- 2026-11-06, **setup on the user's other Macs** (Wave 1's deploy work: a build, a review, a fix round):
+  - **`deck-install.mjs setup`** goes from a fresh clone to a working deck in 10 steps:
+    1. a preflight;
+    2. `npm ci`, only when `node_modules` is missing or the lockfile's sha256 has changed;
+    3. the build;
+    4. developer mode;
+    5. the link, skipped when it's already this clone's;
+    6. the deck plugin's restart;
+    7. a wait of up to 90 s for the deck's token and its "Bridge: listening" line;
+    8. `release`, when the copy is stale;
+    9. `install`;
+    10. `status`.
+    `--dry-run` runs the preflight, and says what each step would do and why.
+  - **The preflight refuses** uncommitted changes in `claude-code/deck` or `claude-code/plugin`, a first setup while the Stream Deck app runs, and anything `release` would refuse. On this Mac it refuses now, as meant: setup is for a new Mac.
+  - **`install`:**
+    - it makes `~/.claude/settings.json` when there's none (0600, in a 0700 folder);
+    - it adds the release copy to another `CLAUDE_CODE_PLUGIN_DIRS` value instead of replacing it, and puts it in place of another copy of this plugin.
+    - `undo` takes out only copies of this plugin.
+  - **The README's Setup** is for a new Mac: open the Stream Deck app once and quit it, `mise install node`, setup, then start a Code-tab session and check the log. It also says how to make the `deck-sandbox` preset.
+  - **The review** found nothing that could harm `settings.json` or the token. It found:
+    - re-runs that would wipe `node_modules` and build uncommitted deck code;
+    - Lua built for nothing by a bare `mise install`;
+    - developer mode taking effect only after the Stream Deck app relaunches;
+    - about 170 lines to cut.
+    All fixed.
+  - **Checks:** install tests 20/20 (11 before), 44 mutations caught. `status` and `setup --dry-run` ran for real. A real setup waits for another Mac.
 
 ## Progress
 
