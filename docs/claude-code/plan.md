@@ -11,7 +11,7 @@ Work with Claude Code sessions in the Claude desktop app's Code tab from the Str
 1. **Live status for each session:** working (and on what), waiting for approval, waiting for an answer, finished, failed, plus how full its context is.
 2. **Approve and deny from the deck.** The keys show which session is asking, and for what.
 3. **Saved prompts** on keys, sent to a chosen session.
-4. **Mode** buttons for a chosen session, with its **model and effort** shown. Changing model and effort from the deck was dropped after S4.
+4. **Mode** buttons for a chosen session, with its **model and effort** shown. Changing model and effort from the deck was dropped after S4, and changing the mode in Phase 8 (2026-11-06), at the user's word. The mode is still shown.
 5. **An overview of all sessions,** with a way to jump to any of them in the app.
 
 Done means:
@@ -76,7 +76,7 @@ Facts from this Mac that the research didn't have. They're undocumented unless m
 | Toolchain | Node 24, `@elgato/streamdeck` 3.0.4, `@elgato/cli` 1.10.4 and SDK 3, as for Lightroom. The mod is TypeScript, checked with `tsc` and with the app's own `claude` 2.1.309 (`plugin validate`, `plugin test`), not the 2.1.312 CLI. | CLAUDE.md; kickoff checks |
 | Development safety | The Claude Code plugin loads only in throwaway sessions the main thread starts (open question 1). Never user-wide, never through `~/.claude/settings.json`, never in this session's mods folder. Agents never approve, deny, send a prompt or change a setting in a session the main thread didn't start. | The user, at kickoff |
 | Names | `claude-code/deck/` (`com.karimdhanji.claude.sdPlugin`), `claude-code/plugin/` (`streamdeck-bridge`), `claude-code/protocol/`, `claude-code/tools/`, `claude-code/sandbox/`. | This plan |
-| Mode dial press | A press or tap applies only a mode the dial was turned to. Without a turn it does nothing, so it can't re-apply a mode the deck shows a moment late. | The user, 2026-11-03 |
+| Mode dial press | A press or tap applies only a mode the dial was turned to. Without a turn it does nothing, so it can't re-apply a mode the deck shows a moment late. Gone with mode changes, Phase 8 (2026-11-06). | The user, 2026-11-03 |
 
 ## Open questions for the user
 
@@ -1205,6 +1205,27 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Seen** wasn't wanted in the window, so no lsappinfo ran. At its slowest step it's one check a minute, about 110 syscalls, timed apart.
   - **Checks:** deck typecheck; 522/522, also with the clock two days ahead and a week back; build and validate; tools 280/280 with PROTOCOL.md as committed. The fix round caught 51 mutations.
   - **For the smoke test:** the deck now sees registry flips of 50 ms to 1 s. So release rule 2 may release a held approval on a short `waiting → busy → waiting`. Watch for `RELEASED … (rule 2)` while the app's dialog is still up.
+- 2026-11-06, **Wave 2: mode changes removed** (at the user's word: a build, a review, a fix round):
+  - **The review** found no inconsistency between PROTOCOL.md, the deck, the plugin and the tools. It confirmed in the binaries that the 404 is no decision, and that plugin 0.2.1 against deck 0.5.0, and 0.3.0 against 0.4.0, both still work. It found:
+    - **a restart hazard,** already live: the deck's folder had the 0.5.0 manifest but the 0.4.0 build, which registers the two removed actions. Any restart before a rebuild would have left the deck dark, failing open to the app's dialogs. The main thread rebuilt and restarted deck 0.5.0 at 05:06:58Z. Both sessions said hello at once, on plugin 0.2.1.
+    - **leftovers,** all fixed: a result's `detail` in the tools and the plugin; the README's claim that the deck shows every session's mode (only a Session Slot's Setup page does now); the hook-error line a 404 leaves in an old session; mode lines in the spec and in this plan's Goal.
+  - **The contract,** in this thread: PROTOCOL.md's amendment "2026-11-06, Phase 8".
+    - It removes the Mode key and dial, the `mode` command, the mode hook and `/v1/pretool`, and kind `mode`.
+    - It writes down B4's watch, C5's hung deck and C6's port risk.
+    - `make-fixtures.mjs` drops `mode-raise`, `mode-not-ours` and `mode-from-auto`, and `not-desktop`'s mode check, which leaves 23.
+    - `v` stays 1. A session started before plugin 0.3.0 keeps its mode hook until it restarts, and its request gets 404, which is no decision.
+  - **Three agents, one per side:**
+    - **the deck, 0.5.0:** 12 files deleted, sources +42/−821, tests +71/−500; 503/503; a new test that `/v1/pretool` gets 404;
+    - **the tools:** the fakes, the runner and recheck's two mode-only rows; 273/273; recheck 39 ok;
+    - **the plugin, 0.3.0:** the mode hook, the mode command and `$.mcp.call`; `plugin test` 155/155.
+    - The deck still shows each session's mode, and the plan dial still approves into a mode.
+  - **Docs:** the README drops the Mode dial, the Mode key and "Mode changes from Auto", and says to remove a placed one. CLAUDE.md now says one hook.
+  - **D1, in this thread:** CLAUDE.md's routine after an app update is now one ordered list of five steps, ending in the smoke test, and it finds `CC` with `sort -V` instead of a hard-coded build folder.
+  - **Checks:**
+    - deck typecheck, 503/503, validate;
+    - tools 273/273; recheck 39 ok, 0 warn, 0 fail;
+    - install 20/20;
+    - the plugin's tsc, sync `--check` and its 15 tests, `plugin validate`, `plugin test` 155/155.
 
 ## Progress
 

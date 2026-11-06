@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // fake-claude: plays the plugin side of the bridge protocol's fixtures (claude-code/protocol/fixtures/)
-// against a bridge, standing in for Claude Code and the mod at once: Claude Code's hooks send the permission
-// requests and mode checks, the mod the rest. It sends the fixtures' plugin lines and checks the replies; press,
-// registry and expect lines go one of two ways:
+// against a bridge, standing in for Claude Code and the mod at once: Claude Code's hook sends the permission
+// requests, the mod the rest. It sends the fixtures' plugin lines and checks the replies; press, registry and expect
+// lines go one of two ways:
 // - --against-fake: through the fake bridge's control routes and folders, and checked against its state.
 // - --interactive: against the real deck plugin, with a person to press on it (ladder step 5 in
 //   docs/claude-code/plan.md). Registry lines are skipped there, and so are the replies and presses that hang on
-//   them: no registry the real deck reads lists the fixtures' sessions. So is every Saved Prompt and Mode press,
-//   which would go to one of the user's own sessions, and the replies that wait on its command, and every expect
-//   line, since nothing of a fixture's session shows on a real deck.
+//   them: no registry the real deck reads lists the fixtures' sessions. So is every Saved Prompt press, which would
+//   go to one of the user's own sessions, and the replies that wait on its command, and every expect line, since
+//   nothing of a fixture's session shows on a real deck.
 // README.md has the walkthrough. Node 24, no dependencies.
 
 import path from 'node:path'
@@ -39,8 +39,8 @@ Code and the mod would, and checks the bridge's replies. Fixtures are names in c
   --interactive        against the real deck plugin (ladder step 5): it says what to press on the deck and
                        waits for the answer, skips registry lines (the deck reads the real registry, which
                        this never writes) and the replies and presses that hang on them, and skips every
-                       Saved Prompt and Mode press and every expect line: nothing of a fixture's session
-                       shows on a real deck.
+                       Saved Prompt press and every expect line: nothing of a fixture's session shows on
+                       a real deck.
   --url URL            the bridge (default http://127.0.0.1:47600)
   --token-file PATH    the bridge's token (default: --against-fake, ${path.relative(REPO, TOKEN_FILES['against-fake'])};
                        --interactive, ${path.relative(REPO, TOKEN_FILES.interactive)})
@@ -95,7 +95,7 @@ async function main(argv) {
     const say = mode === 'interactive' ? (t) => ui.show(`  ${t}`) : values.verbose ? (t) => process.stdout.write(`  ${t}\n`) : () => {}
     if (mode === 'interactive') {
       ui.show(`fake-claude, interactive, against ${url}.`)
-      ui.show('Before going on: no real session should be waiting for approval (Approve acts on the oldest held request, whosever it is). Saved Prompt and Mode presses are skipped: no real deck lists a fixture\'s session, so they would go to one of yours. Expect lines are skipped too: nothing of a fixture\'s session shows on the deck.')
+      ui.show('Before going on: no real session should be waiting for approval (Approve acts on the oldest held request, whosever it is). Saved Prompt presses are skipped: no real deck lists a fixture\'s session, so they would go to one of yours. Expect lines are skipped too: nothing of a fixture\'s session shows on the deck.')
     }
 
     const results = []

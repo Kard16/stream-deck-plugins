@@ -1,6 +1,6 @@
 {
   "name": "streamdeck-bridge",
-  "version": "0.2.1",
-  "description": "Reports this session's status to the Stream Deck bridge on 127.0.0.1:47600 and runs the prompts and mode changes pressed on the deck.",
+  "version": "0.3.0",
+  "description": "Reports this session's status to the Stream Deck bridge on 127.0.0.1:47600 and runs the prompts pressed on the deck.",
   "author": { "name": "Karim Dhanji" }
 }

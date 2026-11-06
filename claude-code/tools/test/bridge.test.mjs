@@ -10,7 +10,7 @@ import test from 'node:test'
 
 import { parseWait, readToken, scrubBody, scrubber, secretScrubber, startFakeBridge } from '../lib/bridge.mjs'
 import { hostHeader, send, within } from '../lib/client.mjs'
-import { ALLOW, DENY, MAX_BODY, MODE_TOOL, PRE_ALLOW, fingerprint, summary } from '../lib/protocol.mjs'
+import { ALLOW, DENY, MAX_BODY, fingerprint, summary } from '../lib/protocol.mjs'
 import { MOD, TOOLS, modLoop, request, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const A = { sid: 'sid-a', host: 'local_a', inst: 'ia', pid: 11 }
@@ -102,11 +102,9 @@ test('bridge: a mod request naming no session it can place gets 400; a hook\'s r
   // A terminal session's hook, with no host and a sid the deck doesn't know; and one whose sid the registry knows,
   // with no host: neither is placed by its sid any more.
   for (const [header, sid] of [['not-local', 'sid-unknown'], [undefined, A.sid]]) {
-    for (const p of ['/v1/permission', '/v1/pretool']) {
-      const headers = header === undefined ? {} : { 'x-deck-host': header }
-      const r = await within(request(bridge, env.token, { method: 'POST', path: p, headers, json: { session_id: sid, tool_name: 'Bash', tool_input: { command: 'ls' } } }).answer, 1000, `${p}: no answer within 1 s`)
-      assert.deepEqual([p, r.status, r.json], [p, 200, {}])
-    }
+    const headers = header === undefined ? {} : { 'x-deck-host': header }
+    const r = await within(request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers, json: { session_id: sid, tool_name: 'Bash', tool_input: { command: 'ls' } } }).answer, 1000, `${header}: no answer within 1 s`)
+    assert.deepEqual([header, r.status, r.json], [header, 200, {}])
   }
   assert.deepEqual(bridge.deck.view().held, [])
 })
@@ -123,19 +121,18 @@ test('bridge: a hook\'s request the latest reading doesn\'t confirm waits for th
   assert.deepEqual([held.settled, bridge.deck.view().held.map((h) => h.host)], [false, [A.host]], 'held, once the second reading confirmed it')
   assert.equal((await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken, 1, 'taken once held')
 
-  // Its sid changes (a /clear), and the file says so before the bridge has read it: a hello, and then a mode check,
-  // each read it once more, rather than being refused on the reading before.
+  // Its sid changes (a /clear), and the file says so before the bridge has read it: a hello, and then a permission
+  // request, each read it once more, rather than being refused on the reading before.
   await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, ...mod, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
-  const press = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: A.host, mode: 'default' } }).answer
-  await request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=0` }).answer
-  assert.equal(bridge.deck.view().cmds[press.json.cmd], 'delivered')
   writeRegistry(env, A.pid, { sessionId: 'sid-a2', hostSessionId: A.host, status: 'busy', statusUpdatedAt: 2 })
-  let r = await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: 'sid-a2', host: A.host, inst: A.inst, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
+  const r = await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: 'sid-a2', host: A.host, inst: A.inst, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
   assert.deepEqual([r.status, r.json], [200, { v: 1, ok: true }])
   writeRegistry(env, A.pid, { sessionId: 'sid-a3', hostSessionId: A.host, status: 'busy', statusUpdatedAt: 3 })
-  r = await request(bridge, env.token, { method: 'POST', path: '/v1/pretool', headers: { 'x-deck-host': A.host }, json: { session_id: 'sid-a3', tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'default' } } }).answer
-  assert.deepEqual([r.status, r.json], [200, PRE_ALLOW])
+  const again = request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: 'sid-a3', tool_name: 'Write', tool_input: { file_path: '/s/b.txt', content: 'b' } } })
+  await sleep(100)
+  assert.deepEqual([again.settled, bridge.deck.view().held.map((h) => h.summary)], [false, ['a.txt', 'b.txt']], 'held, once the second reading confirmed it')
   held.abort()
+  again.abort()
 })
 
 test('bridge: a hook\'s request whose X-Deck-Host and session_id the registry lists apart, each with another session, gets {} at once after the second reading, and nothing is held', async (t) => {
@@ -144,29 +141,20 @@ test('bridge: a hook\'s request whose X-Deck-Host and session_id the registry li
   const B = { sid: 'sid-b', host: 'local_b', inst: 'ib', pid: 12 }
   for (const S of [A, B]) writeRegistry(env, S.pid, { sessionId: S.sid, hostSessionId: S.host, status: 'busy', statusUpdatedAt: 1 })
   const bridge = await startBridge(t, env)
-  // B has a mode command in flight for default, so a request taken as B's would be allowed at once.
-  await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: B.sid, host: B.host, inst: B.inst, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
-  const press = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: B.host, mode: 'default' } }).answer
-  await request(bridge, env.token, { path: `/v1/next?sid=${B.sid}&host=${B.host}&inst=${B.inst}&wait=0` }).answer
-  assert.equal(bridge.deck.view().cmds[press.json.cmd], 'delivered')
-  const hook = (p, host, sid) => within(
-    request(bridge, env.token, { method: 'POST', path: p, headers: { 'x-deck-host': host }, json: { session_id: sid, tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'default' } } }).answer,
-    1000, `${p} from ${host} with ${sid}: no answer within 1 s`,
-  )
+  // A request taken as B's would be held, and not answered at once.
+  const hook = (host, sid) => request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': host }, json: { session_id: sid, tool_name: 'Write', tool_input: { file_path: '/s/b.txt', content: 'b' } } })
   // B's host with A's session id, and a host the registry doesn't list, as a pre-warmed spare's, with A's.
-  const asked = []
   for (const host of [B.host, 'local_spare']) {
-    for (const p of ['/v1/permission', '/v1/pretool']) {
-      const r = await hook(p, host, A.sid)
-      assert.deepEqual([p, host, r.status, r.json], [p, host, 200, {}])
-      asked.push([p.slice('/v1/'.length), host, A.sid])
-    }
+    const r = await within(hook(host, A.sid).answer, 1000, `from ${host} with ${A.sid}: no answer within 1 s`)
+    assert.deepEqual([host, r.status, r.json], [host, 200, {}])
   }
   assert.deepEqual(bridge.deck.view().held, [])
-  assert.deepEqual(runLog(env).filter((e) => e.kind === 'unconfirmed').map((e) => [e.route, e.host, e.sid]), asked)
-  // B's own check and raise are allowed: neither allowance went to a request from another session.
-  assert.deepEqual((await hook('/v1/pretool', B.host, B.sid)).json, PRE_ALLOW)
-  assert.deepEqual((await hook('/v1/permission', B.host, B.sid)).json, ALLOW)
+  assert.deepEqual(runLog(env).filter((e) => e.kind === 'unconfirmed').map((e) => [e.route, e.host, e.sid]), [['permission', B.host, A.sid], ['permission', 'local_spare', A.sid]])
+  // B's own is held: only the pair the registry lists confirms a request.
+  const own = hook(B.host, B.sid)
+  await sleep(100)
+  assert.deepEqual([own.settled, bridge.deck.view().held.map((h) => h.host)], [false, [B.host]])
+  own.abort()
 })
 
 test('bridge: a hello from a host the registry lists under another sessionId gets 409 {"error": "not this session"}; one from a host it doesn\'t list is taken', async (t) => {
@@ -186,16 +174,16 @@ test('bridge: a hello from a host the registry lists under another sessionId get
   assert.equal(log.filter((e) => e.kind === 'route-error').length, 0)
 })
 
-test('bridge: POST /v1/pretool is answered at once, never held, and takes POST only', async (t) => {
+test('bridge: the mode hook of a session started before plugin 0.3.0 gets 404, an unknown route, at once, and nothing is held', async (t) => {
+  // PROTOCOL.md, as amended on 2026-11-06 for Phase 8: such a session keeps the mode hook until it restarts, and
+  // Claude Code takes the 404 as no decision, as with a deck that's down.
   const env = tempEnv(t)
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
   const bridge = await startBridge(t, env)
-  const check = (input) => request(bridge, env.token, { method: 'POST', path: '/v1/pretool', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, tool_name: MODE_TOOL, tool_input: input } }).answer
-  const r = await within(check({ session_id: 'self', mode: 'plan' }), 1000, 'no answer within 1 s')
-  assert.deepEqual([r.status, r.json], [200, {}], 'no command in flight: no decision, at once')
+  const body = { session_id: A.sid, hook_event_name: 'PreToolUse', tool_name: 'mcp__ccd_session_mgmt__set_session_permission_mode', tool_input: { session_id: 'self', mode: 'plan' } }
+  const r = await within(request(bridge, env.token, { method: 'POST', path: '/v1/pretool', headers: { 'x-deck-host': A.host }, json: body }).answer, 1000, 'no answer within 1 s')
+  assert.deepEqual([r.status, Object.keys(r.json), typeof r.json.error], [404, ['error'], 'string'])
   assert.deepEqual(bridge.deck.view().held, [])
-  const get = await request(bridge, env.token, { path: '/v1/pretool' }).answer
-  assert.deepEqual([get.status, get.headers.allow, typeof get.json.error], [405, 'POST', 'string'])
 })
 
 test('bridge: a request a route throws on gets 500, which the hook takes as no decision, and the bridge carries on', async (t) => {
@@ -253,7 +241,7 @@ test('bridge: values nested too deep in a mod\'s fields that PROTOCOL.md gives a
   assert.equal(r.status, 204)
   const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'x' } }).answer
   await request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=0` }).answer
-  r = await post('/v1/result', `{${mod},"id":"${press.json.cmd}","state":"failed","error":${deep},"detail":${deep}}`)
+  r = await post('/v1/result', `{${mod},"id":"${press.json.cmd}","state":"failed","error":${deep}}`)
   assert.equal(r.status, 204)
 
   const state = await within(request(bridge, env.token, { path: '/control/state' }).answer, 3000, 'the state: no answer within 3 s')
@@ -263,7 +251,7 @@ test('bridge: values nested too deep in a mod\'s fields that PROTOCOL.md gives a
   assert.deepEqual(s.tools.map((x) => [x.use, x.agent]), [['u1', null]], 'an agent that isn\'t a string counts as missing')
   assert.deepEqual(state.json.deck.doing[A.host], 'a.md')
   assert.deepEqual(Object.keys(s.lastSeq).sort(), [A.inst, 'null'])
-  assert.deepEqual(state.json.commands.map((c) => [c.state, c.error, c.detail]), [['failed', null, null]])
+  assert.deepEqual(state.json.commands.map((c) => [c.state, c.error]), [['failed', null]])
 })
 
 test('bridge: a mod value nested too deep in a refused hello\'s v, an event\'s t or a result\'s id or state fails nothing: its line names it instead', async (t) => {
@@ -766,15 +754,12 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   await sleep(50)
   await events({ t: 'tool.end', tool: 'AskUserQuestion', use: 'u3', fp: fingerprint('AskUserQuestion', UNREAD), ok: true })
   await answered(q2, 'q2')
-  // A mode command: delivered to the open poll, its check and its raise allowed; a check from a `claude` started
-  // inside the session; a result from an inst that never said hello.
-  const press = await call({ method: 'POST', path: '/control/mode', json: { host: A.host, mode: 'plan' } })
+  // A prompt: delivered to the open poll; a request from a `claude` started inside the session; a result from an inst
+  // that never said hello.
+  const press = await call({ method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'List the files.' } })
   await answered(n2, 'n2')
-  const input = { session_id: 'self', mode: 'plan' }
-  await answered(hook('/v1/pretool', { tool_name: MODE_TOOL, tool_input: input }), 'the mode check')
-  await answered(hook('/v1/permission', { tool_name: MODE_TOOL, tool_input: input }), "the raise's PermissionRequest")
-  await call({ method: 'POST', path: '/v1/pretool', headers: { 'x-deck-host': A.host }, json: { session_id: 'sid-child', tool_name: MODE_TOOL, tool_input: input } })
-  await call({ method: 'POST', path: '/v1/result', json: { ...mod('istray'), id: press.json.cmd, state: 'done', detail: '' } })
+  await call({ method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: 'sid-child', tool_name: 'Write', tool_input: W } })
+  await call({ method: 'POST', path: '/v1/result', json: { ...mod('istray'), id: press.json.cmd, state: 'done' } })
   // A restart; the main loop's turn end with a poll open, the poll after it answered at once, and a stray poll.
   await call({ method: 'POST', path: '/v1/hello', json: { v: 1, ...mod('ia2'), cwd: '/s', model: 'm', plugin: '0.2.0', cc: '2.1.309' } })
   const n3 = next('ia2')
@@ -795,14 +780,14 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
     socket.on('close', resolve)
     socket.on('error', resolve)
   }), 3000, 'no close within 3 s')
-  // A mode check whose client goes away while the registry is read once more, slowly.
+  // A request whose client goes away while the registry is read once more, slowly.
   const readdir = fsp.readdir
   fsp.readdir = async (...args) => {
     await sleep(150)
     return readdir(...args)
   }
   try {
-    const gone = hook('/v1/pretool', { session_id: 'sid-gone', tool_name: MODE_TOOL, tool_input: input })
+    const gone = hook('/v1/permission', { session_id: 'sid-gone', tool_name: 'Write', tool_input: W })
     await sleep(30)
     gone.abort()
     await sleep(250)
@@ -834,7 +819,7 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   await quiet.close()
 
   const log = [...runLog(env), ...runLog(quietEnv)]
-  const kinds = ['fp-check', 'held', 'release', 'answered', 'command', 'result-ignored', 'mode-check', 'mode-allowed', 'unconfirmed', 'client-gone', 'poll-turn-end', 'poll-at-once', 'poll-superseded', 'poll-stale', 'poll-cut', 'poll-hello-first', 'hello', 'mod-restart', 'inst-quiet', 'request', 'registry', 'route-error', 'control-error', 'client-error']
+  const kinds = ['fp-check', 'held', 'release', 'answered', 'command', 'result-ignored', 'unconfirmed', 'client-gone', 'poll-turn-end', 'poll-at-once', 'poll-superseded', 'poll-stale', 'poll-cut', 'poll-hello-first', 'hello', 'mod-restart', 'inst-quiet', 'request', 'registry', 'route-error', 'control-error', 'client-error']
   assert.deepEqual(kinds.filter((k) => !log.some((e) => e.kind === k)), [], 'every kind the jq lines select')
   assert.ok(log.some((e) => e.unlogged), 'and a line that says why its body is missing')
   // The fields the jq lines pick out.
@@ -845,9 +830,8 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   const heldLines = log.filter((e) => e.kind === 'held')
   assert.deepEqual(heldLines.map((e) => [e.tool, e.dial]), [['Write', 'approval'], ['Bash', 'approval'], ['AskUserQuestion', 'question'], ['AskUserQuestion', 'answer-in-app']])
   assert.ok(log.some((e) => e.kind === 'answered' && e.by === 'dial' && e.decision === 'answer' && e.id === heldLines[2].id && e.answers?.['Red or blue?'] === 'Blue'))
-  assert.ok(log.some((e) => e.kind === 'mode-check' && e.allowed === true && e.cmd === press.json.cmd && e.mode === 'plan'))
-  assert.ok(log.some((e) => e.kind === 'unconfirmed' && e.route === 'pretool' && e.sid === 'sid-child' && e.host === A.host))
-  assert.ok(log.some((e) => e.kind === 'client-gone' && e.route === 'pretool' && e.sid === 'sid-gone' && e.host === A.host && typeof e.why === 'string'))
+  assert.ok(log.some((e) => e.kind === 'unconfirmed' && e.route === 'permission' && e.sid === 'sid-child' && e.host === A.host))
+  assert.ok(log.some((e) => e.kind === 'client-gone' && e.route === 'permission' && e.sid === 'sid-gone' && e.host === A.host && typeof e.why === 'string'))
   assert.ok(log.some((e) => e.kind === 'poll-hello-first' && e.host === A.host && e.inst === 'ia2' && Number.isInteger(e.poll)))
   assert.ok(log.some((e) => e.kind === 'inst-quiet' && e.host === A.host && e.inst === 'ia2' && e.quietMs >= QUIET_MS / 2))
   assert.ok(log.some((e) => e.kind === 'hello' && e.again === false && e.madeCurrent === true && Array.isArray(e.took) && Array.isArray(e.kept) && typeof e.saidBefore === 'boolean'))
@@ -861,7 +845,7 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
     [/ p1 HELD tool local_a Write: a\.txt fp [0-9a-f]{8}/, 'a held request'],
     [/ p2 released with \{\}: tool\.end with the same fp \(rule 1\)/, 'a release'],
     [/ press approve: allow p1/, 'a press'],
-    [new RegExp(` ${press.json.cmd} queued for local_a: mode plan`), 'a command'],
+    [new RegExp(` ${press.json.cmd} queued for local_a: prompt "List the files\\."`), 'a command'],
     [new RegExp(` ${press.json.cmd} delivered to local_a \\(inst ia\\)`), 'its delivery'],
     [/ registry ~ local_a busy → idle/, 'a registry change'],
     [/ local_a: poll from inst ia2 answered 409 hello first: no instance has said hello for the session/, 'a hello first'],
@@ -1057,8 +1041,12 @@ test('bridge: two registry files for one host, read from the folder: the one tha
   writeRegistry(env, 100, { sessionId: 'sid-new', hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1, startedAt: 2000 })
   const bridge = await startBridge(t, env)
   assert.deepEqual([bridge.deck.view().sessions, bridge.deck.view().status[A.host], bridge.deck.state().registry[A.host].startedAt], [[A.host], 'working', 2000])
-  const hook = (sid) => request(bridge, env.token, { method: 'POST', path: '/v1/pretool', headers: { 'x-deck-host': A.host }, json: { session_id: sid, tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'plan' } } }).answer
-  for (const sid of ['sid-old', 'sid-new', 'sid-other']) assert.deepEqual((await hook(sid)).json, {}, sid)
+  const hook = (sid) => request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: sid, tool_name: 'Bash', tool_input: { command: `echo ${sid}` } } })
+  const own = [hook('sid-old'), hook('sid-new')]
+  assert.deepEqual((await within(hook('sid-other').answer, 1000, 'sid-other: no answer within 1 s')).json, {})
+  await sleep(50)
+  assert.deepEqual([own.map((h) => h.settled), bridge.deck.view().held.map((h) => h.summary).toSorted()], [[false, false], ['echo sid-new', 'echo sid-old']], "either file's session id confirms a request, which is held")
+  for (const h of own) h.abort()
   assert.deepEqual(runLog(env).filter((e) => e.kind === 'unconfirmed').map((e) => e.sid), ['sid-other'], 'only the session id no file lists is unconfirmed')
   const hello = (sid, inst) => request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid, host: A.host, inst, cwd: '/s', model: 'm', plugin: '0.3.0', cc: '2.1.309' } }).answer
   assert.deepEqual([(await hello('sid-old', 'i1')).status, (await hello('sid-new', 'i2')).status, (await hello('sid-other', 'i3')).status], [200, 200, 409])
@@ -1118,7 +1106,7 @@ test('bridge: a registry reading that misses the session answers its poll and fo
   await bridge.rescan()
   await mod.until((tr) => helloAfter409(tr, goneAt) >= 0, 3000, 'a hello after the 409')
   await mod.until(() => open(), 2000, 'its poll held after the hello')
-  const press = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: A.host, mode: 'plan' } }).answer
+  const press = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: A.host, text: 'Hi.' } }).answer
   assert.equal(press.json.ok, true, JSON.stringify(press.json))
   await mod.until(() => mod.cmds.some((c) => c.id === press.json.cmd), 2000, 'the command delivered')
   assert.deepEqual(mod.trace.filter((x) => x.what === 'outage'), [], 'and no outage')
@@ -1211,14 +1199,14 @@ test('bridge: 30 sessions at once: each says hello and keeps a poll open, their 
     assert.equal(view().held.length, 29 - k)
     assert.ok(held.slice(k + 1).every((x) => !x.h.settled), `after ${k + 1} presses, the rest still held`)
   }
-  // A prompt for one session, and a mode change for another, reach only their own polls.
+  // A prompt for one session, and another for a second, reach only their own polls.
   const prompt = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: S[17].host, text: 'Only you.' } }).answer
-  const mode = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: S[3].host, mode: 'plan' } }).answer
+  const other = await request(bridge, env.token, { method: 'POST', path: '/control/prompt', json: { host: S[3].host, text: 'And you.' } }).answer
   assert.deepEqual((await within(polls[17].answer, 2000, 'S17\'s poll')).json, { cmds: [{ id: prompt.json.cmd, t: 'prompt', text: 'Only you.' }] })
-  assert.deepEqual((await within(polls[3].answer, 2000, 'S3\'s poll')).json, { cmds: [{ id: mode.json.cmd, t: 'mode', mode: 'plan' }] })
+  assert.deepEqual((await within(polls[3].answer, 2000, 'S3\'s poll')).json, { cmds: [{ id: other.json.cmd, t: 'prompt', text: 'And you.' }] })
   await sleep(100)
   assert.deepEqual(polls.map((p, i) => [i, p.settled]).filter(([i, settled]) => settled !== (i === 3 || i === 17)), [], 'every other poll still open')
-  assert.deepEqual([view().cmds[prompt.json.cmd], view().cmds[mode.json.cmd]], ['delivered', 'delivered'])
+  assert.deepEqual([view().cmds[prompt.json.cmd], view().cmds[other.json.cmd]], ['delivered', 'delivered'])
 })
 
 test('bridge: a reset with the mod\'s poll open cuts it off: the mod\'s fetch fails, it says hello 100 ms later, and takes the next command', async (t) => {
@@ -1298,17 +1286,12 @@ test('bridge: the mod as bridge.ts plays it: a poll held, then abandoned more th
   assert.deepEqual(mod.trace.filter((x) => x.what === 'quick-window-closed').length, 1, 'the first quick hello\'s window closed; the second\'s was still open')
 })
 
-test('bridge: a hook\'s request whose client goes away while the registry is read once more isn\'t taken: nothing held, and no allowance spent on it', async (t) => {
+test('bridge: a hook\'s request whose client goes away while the registry is read once more isn\'t taken: nothing held', async (t) => {
   // As the real deck: after the second reading, the request is taken only if its client is still there.
   const env = tempEnv(t)
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'busy', statusUpdatedAt: 1 })
   const bridge = await startBridge(t, env)
-  await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: '/s', model: 'm', plugin: '0.3.0', cc: '2.1.309' } }).answer
-  const press = await request(bridge, env.token, { method: 'POST', path: '/control/mode', json: { host: A.host, mode: 'plan' } }).answer
-  await request(bridge, env.token, { path: `/v1/next?sid=${A.sid}&host=${A.host}&inst=${A.inst}&wait=0` }).answer
-  assert.equal(bridge.deck.view().cmds[press.json.cmd], 'delivered')
-  const hook = (p, json) => request(bridge, env.token, { method: 'POST', path: p, headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, ...json } })
-  const mode = { tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'plan' } }
+  const hook = (json) => request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, ...json } })
   // Each time, the session's id changes (a /clear) before the bridge has read it: the request waits for one more
   // reading, made slow here, which confirms it, and its client goes away meanwhile.
   const readdir = fsp.readdir
@@ -1316,14 +1299,15 @@ test('bridge: a hook\'s request whose client goes away while the registry is rea
     await sleep(200)
     return readdir(...args)
   }
-  const sids = ['sid-a2', 'sid-a3', 'sid-a4']
+  const sids = ['sid-a2', 'sid-a3']
   const taken = async () => (await request(bridge, env.token, { path: '/control/taken' }).answer).json.taken
   try {
-    const requests = [['/v1/pretool', mode], ['/v1/permission', mode], ['/v1/permission', { tool_name: 'Write', tool_input: { file_path: '/s/a.txt', content: 'a' } }]]
-    for (const [i, [p, json]] of requests.entries()) {
+    // A tool request and an ask.
+    const requests = [{ tool_name: 'Write', tool_input: { file_path: '/s/a.txt', content: 'a' } }, { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Red or blue?', options: [{ label: 'Red' }, { label: 'Blue' }] }] } }]
+    for (const [i, json] of requests.entries()) {
       writeRegistry(env, A.pid, { sessionId: sids[i], hostSessionId: A.host, status: 'busy', statusUpdatedAt: 2 + i })
       const before = await taken()
-      const h = hook(p, { ...json, session_id: sids[i] })
+      const h = hook({ ...json, session_id: sids[i] })
       await sleep(50)
       h.abort()
       // /control/taken counts it once that reading is done, though it's neither held nor answered (README.md): what
@@ -1333,18 +1317,20 @@ test('bridge: a hook\'s request whose client goes away while the registry is rea
         await sleep(10)
         after = await taken()
       }
-      assert.equal(after, before + 1, `${p} from ${sids[i]}: counted as taken`)
+      assert.equal(after, before + 1, `${json.tool_name} from ${sids[i]}: counted as taken`)
     }
   } finally {
     fsp.readdir = readdir
   }
   assert.deepEqual(bridge.deck.view().held, [], 'nothing held')
   const log = runLog(env)
-  assert.deepEqual(log.filter((e) => e.kind === 'client-gone').map((e) => [e.route, e.host, e.sid]), [['pretool', A.host, 'sid-a2'], ['permission', A.host, 'sid-a3'], ['permission', A.host, 'sid-a4']])
-  assert.deepEqual(log.filter((e) => ['held', 'mode-check', 'mode-allowed', 'unconfirmed'].includes(e.kind)), [], 'none of them taken')
-  // The command's allowances are still there, for the session's own check and raise.
-  assert.deepEqual((await hook('/v1/pretool', { ...mode, session_id: 'sid-a4' }).answer).json, PRE_ALLOW)
-  assert.deepEqual((await hook('/v1/permission', { ...mode, session_id: 'sid-a4' }).answer).json, ALLOW)
+  assert.deepEqual(log.filter((e) => e.kind === 'client-gone').map((e) => [e.route, e.host, e.sid]), [['permission', A.host, 'sid-a2'], ['permission', A.host, 'sid-a3']])
+  assert.deepEqual(log.filter((e) => ['held', 'unconfirmed'].includes(e.kind)), [], 'none of them taken')
+  // The session's next request, its client still there, is held as usual.
+  const next = hook({ session_id: 'sid-a3', tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await sleep(100)
+  assert.deepEqual([next.settled, bridge.deck.view().held.map((h) => h.tool)], [false, ['Bash']])
+  next.abort()
 })
 
 test('bridge: closing answers held requests with {} and open polls with no commands', async (t) => {

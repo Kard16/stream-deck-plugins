@@ -20,7 +20,7 @@ export type RouteAnswer = { status: number; body?: unknown; logged?: boolean };
 /**
  * What the bridge does with each route, once the Host, the token, the method and the body have passed.
  * The deck's session model implements it (src/model/sessions.ts). `permission` and `next` may hold their
- * request; the others answer at once. `permission`, `pretool` and `hello` may first read the registry once more
+ * request; the others answer at once. `permission` and `hello` may first read the registry once more
  * (PROTOCOL.md, Desktop sessions only), and then return a promise that settles once they have answered or held
  * the request.
  */
@@ -31,8 +31,6 @@ export interface BridgeRoutes {
 	 * request is display-only (PROTOCOL.md, Held requests).
 	 */
 	permission(body: unknown, deckHost: string | undefined, reply: PollReply, inputScrubbed: boolean): void | Promise<void>;
-	/** `POST /v1/pretool`: the mode hook's input, and the `X-Deck-Host` header as sent. Answered, never held. */
-	pretool(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void>;
 	hello(body: Obj): RouteAnswer | Promise<RouteAnswer>;
 	events(body: Obj): RouteAnswer;
 	/** `GET /v1/next`: held, or answered at once, with 409 `hello first` for a session no instance has said hello for. */
@@ -62,7 +60,6 @@ const CLIENT_ERRORS: Record<string, number> = { HPE_HEADER_OVERFLOW: 431, HPE_CH
 
 const METHODS: Record<string, "GET" | "POST"> = {
 	[ROUTES.permission]: "POST",
-	[ROUTES.pretool]: "POST",
 	[ROUTES.hello]: "POST",
 	[ROUTES.events]: "POST",
 	[ROUTES.next]: "GET",
@@ -293,7 +290,7 @@ export class BridgeServer {
 					refuse(400, `the body isn't JSON (${Buffer.byteLength(text)} bytes)`);
 					return;
 				}
-				const hook = target === ROUTES.permission || target === ROUTES.pretool;
+				const hook = target === ROUTES.permission;
 				// A hook's body is Claude Code's, and its route answers whatever it is; the mod's are objects.
 				if (!hook && !isObj(parsed)) {
 					refuse(400, "the body isn't a JSON object");
@@ -311,7 +308,7 @@ export class BridgeServer {
 						const header = req.headers["x-deck-host"];
 						const deckHost = typeof header === "string" ? header : undefined;
 						const held = this.#heldReply(req, res);
-						return target === ROUTES.permission ? routes.permission(body, deckHost, held, inputScrubbed) : routes.pretool(body, deckHost, held);
+						return routes.permission(body, deckHost, held, inputScrubbed);
 					}
 					const obj = body as Obj;
 					const answer = target === ROUTES.hello ? routes.hello(obj) : target === ROUTES.events ? routes.events(obj) : routes.result(obj);

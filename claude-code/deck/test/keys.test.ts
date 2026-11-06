@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { IN_FLIGHT_MS, type PollReply } from "../src/bridge/commands.js";
-import { decisionKeySvg, modeKeySvg, promptKeySvg, sessionKeySvg, svgDataUrl, wrap } from "../src/keys/art.js";
-import { ModeKeys, PromptKeys, REFUSED_SHOW_MS, SENT_SHOW_MS } from "../src/keys/commands.js";
+import { decisionKeySvg, promptKeySvg, sessionKeySvg, svgDataUrl, wrap } from "../src/keys/art.js";
+import { PromptKeys, REFUSED_SHOW_MS, SENT_SHOW_MS } from "../src/keys/commands.js";
 import { DecisionKeys, SETTLE_MS } from "../src/keys/decision.js";
 import { SessionKeys, sessionKeyLook } from "../src/keys/session.js";
 import { SessionModel } from "../src/model/sessions.js";
@@ -350,40 +350,6 @@ describe("Saved Prompt keys", () => {
 	});
 });
 
-describe("Mode keys", () => {
-	test("show the mode, blue while it's the target's; a press changes the target's mode, and ok when done", () => {
-		const { clock, model, surface, feedback, mod } = setup();
-		const poll = mod(A);
-		model.pick(A);
-		const keys = new ModeKeys(model, { clock });
-		keys.add("plan", surface("plan"), { mode: "plan" });
-		keys.add("manual", surface("manual"), { mode: "default" });
-		model.events({ host: A, inst: `i-${A}`, seq: 1, events: [{ t: "settings", mode: "default" }] });
-		assert.deepEqual(keys.look("manual"), { mode: "Manual", active: true, pending: false, target: "Session 1", online: true });
-		assert.equal(keys.look("plan")?.active, false);
-		keys.press("plan");
-		assert.deepEqual(JSON.parse(poll.sent[0] ?? "null"), { cmds: [{ id: "c1", t: "mode", mode: "plan" }] });
-		assert.equal(keys.look("plan")?.pending, true);
-		model.result({ host: A, inst: `i-${A}`, id: "c1", state: "done" });
-		model.events({ host: A, inst: `i-${A}`, seq: 2, events: [{ t: "settings", mode: "plan" }] });
-		assert.deepEqual([keys.look("plan")?.active, keys.look("plan")?.pending], [true, false]);
-		assert.deepEqual(feedback, ["plan:ok"]);
-	});
-
-	test("a refused change alerts; a key without a mode alerts", () => {
-		const { clock, model, surface, feedback, mod } = setup();
-		mod(A);
-		model.pick(A);
-		const keys = new ModeKeys(model, { clock });
-		keys.add("k", surface("k"), {});
-		keys.press("k");
-		keys.press("k", { mode: "bypassPermissions" });
-		keys.press("k", { mode: "auto" });
-		model.result({ host: A, inst: `i-${A}`, id: "c1", state: "refused", error: "the app refused" });
-		assert.deepEqual(feedback, ["k:alert", "k:alert", "k:alert"]);
-	});
-});
-
 describe("Session key", () => {
 	test("shows the target's title and status; a press jumps to it", () => {
 		const { clock, model, surface, feedback, jumps, open } = setup();
@@ -410,7 +376,6 @@ describe("key art", () => {
 		assert.match(decisionKeySvg({ decision: "allow", online: true, count: 1, oldest: { title: "<b>&", summary: "x", ask: false } }), /&lt;b&gt;&amp;/);
 		assert.match(decisionKeySvg({ decision: "deny", online: false, count: 0, oldest: null }), /Offline/);
 		assert.match(promptKeySvg({ label: null, target: null, state: "idle", online: true }), /Set text/);
-		assert.match(modeKeySvg({ mode: "Accept edits", active: true, pending: true, target: "S", online: true }), /Setting…/);
 		assert.match(sessionKeySvg({ title: "A very long session title that needs wrapping", status: "done", statusColor: "#fff" }), /…/);
 		assert.deepEqual(wrap("Run the tests and report.", 11, 3), ["Run the", "tests and", "report."]);
 		assert.deepEqual(wrap("one two three four five six seven", 9, 2), ["one two", "three fo…"]);

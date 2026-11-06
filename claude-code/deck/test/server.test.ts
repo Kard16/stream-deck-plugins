@@ -15,7 +15,6 @@ import { type Outcome, type RequestOptions, send, sendRaw, sleep, waitFor, withi
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
-const PRETOOL_ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"The mode change pressed on the Stream Deck."}}';
 const TOKEN = randomBytes(32).toString("hex");
 const HOST = "local_test-server";
 const BODY = JSON.stringify({ session_id: "sess-1", hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "ls" } });
@@ -24,9 +23,6 @@ const MOD = { sid: "sess-1", host: HOST, inst: "i1" };
 const HOOK = { "x-deck-host": HOST };
 /** The session the tests' requests come from, as the registry lists it: the hooks' requests count only from it. */
 const LISTED: RegistrySession = { key: "101", name: "Server test", status: "busy", cwd: "/x", hostSessionId: HOST, sessionId: MOD.sid, statusUpdatedAt: 1, startedAt: 1 };
-/** The mode hook's input for the deck's own change to `mode`. */
-const modeCheck = (mode: string, sid = MOD.sid): string =>
-	JSON.stringify({ session_id: sid, hook_event_name: "PreToolUse", tool_name: "mcp__ccd_session_mgmt__set_session_permission_mode", tool_input: { session_id: "self", mode }, tool_use_id: "toolu_plugin_0001" });
 
 function status(outcome: Outcome): number | string {
 	return "status" in outcome ? outcome.status : outcome.error;
@@ -251,8 +247,7 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 			permission: () => {
 				throw new Error("boom");
 			},
-			pretool: () => Promise.reject(new Error("bang")),
-			hello: () => ({ status: 200, body: { v: 1, ok: true } }),
+			hello: () => Promise.reject(new Error("bang")),
 			events: () => ({ status: 204 }),
 			next: () => {},
 			result: () => ({ status: 204 }),
@@ -261,9 +256,9 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		server = bridge;
 		const port = await bridge.listen();
 		assert.equal(status(await send(port, { token: TOKEN, body: BODY }).outcome), 500);
-		const rejected = await send(port, { token: TOKEN, path: "/v1/pretool", body: BODY }).outcome;
+		const rejected = await send(port, { token: TOKEN, path: "/v1/hello", body: "{}" }).outcome;
 		assert.deepEqual([status(rejected), json(rejected)], [500, { error: "internal error" }], "a route's promise that rejects");
-		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: "{}" }).outcome), 200);
+		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/events", body: "{}" }).outcome), 204);
 		assert.ok(log.at("error").some((l) => l.includes("boom")));
 		assert.ok(log.at("error").some((l) => l.includes("bang")));
 		assert.equal(bridge.routed, 3, "each counts as routed once it's answered");
@@ -405,7 +400,6 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 				got.push({ input: (body as { tool_input?: unknown }).tool_input, inputScrubbed });
 				reply.send(200, "{}");
 			},
-			pretool: (_body, _host, reply) => reply.send(200, "{}"),
 			hello: () => ({ status: 200, body: { v: 1, ok: true } }),
 			events: () => ({ status: 204 }),
 			next: () => {},
@@ -452,54 +446,15 @@ describe("bridge server (ephemeral ports on 127.0.0.1)", () => {
 		assert.deepEqual(json(await within(kept.outcome, 2000)), answerDecision(input("Blue"), { "Red or blue?": "Blue" }));
 	});
 
-	test("POST /v1/pretool is answered at once: the allow for the deck's own mode change in flight, once, and {} for anything else", async () => {
-		const { model, log, port } = await start();
-		// Never held: a check not answered within 2 s fails the test rather than holding it up.
-		const check = (body: string, headers: Record<string, string> = HOOK) => within(send(port, { token: TOKEN, path: "/v1/pretool", body, headers }).outcome, 2000);
-		const none = await check(modeCheck("plan"));
-		assert.deepEqual([status(none), "body" in none && none.body], [200, "{}"], "nothing in flight");
-		// The mod says hello and takes the deck's mode command.
-		assert.equal(status(await send(port, { token: TOKEN, path: "/v1/hello", body: JSON.stringify({ v: 1, ...MOD, model: "m" }) }).outcome), 200);
-		const cmd = model.commands.queue(HOST, { t: "mode", mode: "plan" });
-		const taken = await send(port, { token: TOKEN, method: "GET", path: `/v1/next?sid=${MOD.sid}&host=${HOST}&inst=${MOD.inst}&wait=0` }).outcome;
-		assert.deepEqual(json(taken), { cmds: [{ id: cmd.id, t: "mode", mode: "plan" }] });
-		// Another mode, a process the registry doesn't confirm, or no host: no decision, and the allow stays unused.
-		for (const [body, headers] of [
-			[modeCheck("auto"), HOOK],
-			[modeCheck("plan", "sess-child"), HOOK],
-			[modeCheck("plan"), {}],
-		] as const) {
-			const answer = await check(body, headers);
-			assert.deepEqual([status(answer), "body" in answer && answer.body], [200, "{}"], `${body} ${JSON.stringify(headers)}`);
-		}
-		const allowed = await check(modeCheck("plan"));
-		assert.ok("status" in allowed);
-		assert.deepEqual([allowed.status, allowed.body, allowed.headers["content-type"]], [200, PRETOOL_ALLOW_JSON, "application/json"]);
-		const again = await check(modeCheck("plan"));
-		assert.deepEqual([status(again), "body" in again && again.body], [200, "{}"], "only the first check per command");
-		// Never held: nothing waits on the deck.
-		assert.equal(model.held.size, 0);
-		assert.ok(log.at("info").some((l) => l === `info ALLOWED the mode check for the change to "plan" for ${HOST}: the deck's own command ${cmd.id}`), log.at("info").join("\n"));
-		assert.ok(log.at("debug").some((l) => l === `debug PRETOOL ${HOST}: no decision: no mode command in flight for "plan" that hasn't had its check allowed`), log.at("debug").join("\n"));
-		assert.ok(!log.at("info").some((l) => l.includes("PRETOOL")), "no decision is logged at debug");
-	});
-
-	test("POST /v1/pretool has the Host and token checks of every route, and the transport's errors", async () => {
-		const { port } = await start();
-		const body = modeCheck("plan");
-		assert.equal(status(await send(port, { token: TOKEN, host: "evil.example", path: "/v1/pretool", body, headers: HOOK }).outcome), 403);
-		assert.equal(status(await send(port, { path: "/v1/pretool", body, headers: HOOK }).outcome), 401);
-		assert.equal(status(await send(port, { token: "0".repeat(64), path: "/v1/pretool", body, headers: HOOK }).outcome), 401);
-		const get = await send(port, { token: TOKEN, method: "GET", path: "/v1/pretool" }).outcome;
-		assert.equal(status(get), 405);
-		if ("headers" in get) assert.equal(get.headers.allow, "POST");
-		const garbled = await send(port, { token: TOKEN, path: "/v1/pretool", body: "not json", headers: HOOK }).outcome;
-		assert.deepEqual([status(garbled), json(garbled)], [400, { error: "Bad Request" }]);
-		// JSON that isn't a PreToolUse's input is still answered with no decision: a 2xx is one of the two bodies.
-		for (const odd of ["[1,2]", '"x"', "{}", '{"tool_name":7}']) {
-			const answer = await within(send(port, { token: TOKEN, path: "/v1/pretool", body: odd, headers: HOOK }).outcome, 2000);
-			assert.deepEqual([status(answer), "body" in answer && answer.body], [200, "{}"], odd);
-		}
+	test("POST /v1/pretool gets 404 at once, as any unknown route does: a session started before plugin 0.3.0 keeps its mode hook, and takes that as no decision", async () => {
+		const { model, port } = await start();
+		// What that hook sends, with the token and the session's host, before a call to the app's mode tool.
+		const body = JSON.stringify({ session_id: MOD.sid, hook_event_name: "PreToolUse", tool_name: "mcp__ccd_session_mgmt__set_session_permission_mode", tool_input: { session_id: "self", mode: "plan" } });
+		const answer = await atOnce(port, { token: TOKEN, path: "/v1/pretool", body, headers: HOOK });
+		const unknown = await atOnce(port, { token: TOKEN, path: "/v1/nope", body, headers: HOOK });
+		assert.deepEqual([status(answer), json(answer)], [404, { error: "Not Found" }]);
+		assert.deepEqual([status(unknown), json(unknown)], [status(answer), json(answer)]);
+		assert.deepEqual([model.held.size, model.commands.list().length], [0, 0]);
 	});
 
 	test("a client refused again and again is logged quietly: the first per route and reason at info, then one line in 10 minutes with the count since, the rest at debug", async () => {

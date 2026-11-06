@@ -1,4 +1,4 @@
-import type { CommandWire, Mode } from "../protocol/wire.js";
+import type { CommandWire } from "../protocol/wire.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import type { Responder } from "./held.js";
@@ -12,13 +12,7 @@ export type CommandState = "queued" | "delivered" | "waiting" | "done" | "refuse
 
 export const FINAL_STATES: ReadonlySet<CommandState> = new Set(["done", "refused", "failed"]);
 
-export type CommandSpec = { t: "prompt"; text: string } | { t: "mode"; mode: Mode };
-
-/**
- * The two hooks that can ask about a mode command's change, each of which the bridge allows once per command
- * without a press: the mode check (`POST /v1/pretool`) and kind mode's PermissionRequest (`POST /v1/permission`).
- */
-export type ModeHook = "pretool" | "permission";
+export type CommandSpec = { t: "prompt"; text: string };
 
 export type Command = CommandSpec & {
 	/** "c1", "c2"… unique within the bridge's run. */
@@ -30,9 +24,6 @@ export type Command = CommandSpec & {
 	deliveredAt: number | null;
 	/** `error` from a refused or failed result, or why the deck gave up on it. */
 	error: string | null;
-	detail: string | null;
-	/** Which hooks have had their allow for this mode command: one each, counted apart (PROTOCOL.md, Mode checks). */
-	allowed: Record<ModeHook, boolean>;
 };
 
 /** A held HTTP request the queue can also be told closed early. */
@@ -140,7 +131,7 @@ export class CommandQueue {
 
 	/** Queues a command for a session and hands it to its open poll, if there is one. */
 	queue(host: string, spec: CommandSpec): Command {
-		const cmd: Command = { ...spec, id: `c${this.#nextId++}`, host, state: "queued", inst: null, deliveredAt: null, error: null, detail: null, allowed: { pretool: false, permission: false } };
+		const cmd: Command = { ...spec, id: `c${this.#nextId++}`, host, state: "queued", inst: null, deliveredAt: null, error: null };
 		this.#commands.set(cmd.id, cmd);
 		this.#log.info(`QUEUED ${cmd.id} ${describe(cmd)} for ${host}`);
 		this.#prune();
@@ -191,7 +182,7 @@ export class CommandQueue {
 	 * another session, a result with no inst or from an instance other than the one the command was delivered to,
 	 * or a state the protocol doesn't have (PROTOCOL.md, Commands).
 	 */
-	result(host: string, inst: string | null, id: string, state: string | null, error: string | null, detail: string | null): boolean {
+	result(host: string, inst: string | null, id: string, state: string | null, error: string | null): boolean {
 		const cmd = this.#commands.get(id);
 		const ignore = (why: string): false => {
 			this.#log.info(`RESULT ${quote(id, 20)} ${quote(state, 20)} from ${host} ignored: ${why}`);
@@ -207,14 +198,11 @@ export class CommandQueue {
 			if (cmd.state === "waiting") return ignore("already waiting");
 			cmd.state = "waiting";
 			// The mod has the prompt, and the engine sends it when the session's turn ends, however long that
-			// takes, so the 60 s no longer applies: the session's polls bound it instead. Mode commands skip
-			// waiting; a stray one keeps its 60 s, so the window in which the bridge allows that mode change
-			// without a press stays bounded.
-			if (cmd.t === "prompt") this.#stopTimer(cmd.id);
+			// takes, so the 60 s no longer applies: the session's polls bound it instead.
+			this.#stopTimer(cmd.id);
 		} else if (state === "done" || state === "refused" || state === "failed") {
 			cmd.state = state;
 			cmd.error = state === "done" ? null : (error ?? "no reason given");
-			cmd.detail = detail;
 			this.#stopTimer(cmd.id);
 		} else return ignore("not a state");
 		this.#watchPolls(host);
@@ -224,18 +212,6 @@ export class CommandQueue {
 		else this.#log.info(line);
 		this.#emit();
 		return true;
-	}
-
-	/**
-	 * The session's mode command in flight (delivered, or a stray waiting) for `mode` that `hook` hasn't had its
-	 * allow for yet; the caller marks it allowed. Each hook gets one allow per command, whatever the other got.
-	 */
-	inFlightMode(host: string, mode: unknown, hook: ModeHook): Command | null {
-		for (const cmd of this.#commands.values()) {
-			if (cmd.host !== host || cmd.t !== "mode" || cmd.mode !== mode || cmd.allowed[hook]) continue;
-			if (cmd.state === "delivered" || cmd.state === "waiting") return cmd;
-		}
-		return null;
 	}
 
 	/**
@@ -452,11 +428,11 @@ export class CommandQueue {
 
 /** A command as the poll answers it. */
 export function toWire(cmd: Command): CommandWire {
-	return cmd.t === "prompt" ? { id: cmd.id, t: "prompt", text: cmd.text } : { id: cmd.id, t: "mode", mode: cmd.mode };
+	return { id: cmd.id, t: "prompt", text: cmd.text };
 }
 
 function describe(cmd: Command): string {
-	return cmd.t === "prompt" ? `prompt (${cmd.text.length} characters)` : `mode ${cmd.mode}`;
+	return `prompt (${cmd.text.length} characters)`;
 }
 
 function send(reply: PollReply, cmds: Command[]): void {

@@ -1,6 +1,6 @@
 // streamdeck-bridge: the mod, one instance per session (PROTOCOL.md, "Parties"). It says hello to the Stream Deck
-// bridge, reports the session's events, and fetches and runs the deck's commands. The hooks in hooks.json are the
-// plugin's other half: the PermissionRequest hook, and the mode hook, a PreToolUse hook on the app's mode tool alone.
+// bridge, reports the session's events, and fetches and runs the deck's commands. The PermissionRequest hook in
+// hooks.json is the plugin's other half.
 //
 // Every Claude Code process that reads ~/.claude/settings.json loads this mod, but it talks to the bridge only in a
 // desktop session of its own (desktop.ts). Anywhere else it sends nothing, logs once why, and its hooks pass through.
@@ -43,22 +43,7 @@ function adapter($: Dollar): BridgeHost & CommandHost {
       const r = await $.prompt.submit({ text, asUser: true })
       return r.drop === undefined ? {} : { drop: r.drop }
     },
-    setMode: async mode => {
-      const r = await $.mcp.call('ccd_session_mgmt', 'set_session_permission_mode', { session_id: 'self', mode })
-      return { isError: r.isError === true, text: Array.isArray(r.content) ? textOf(r.content) : '' }
-    },
   }
-}
-
-/** The text blocks of an MCP result, joined: the app's tools answer in text. */
-function textOf(blocks: readonly unknown[]): string {
-  const texts: string[] = []
-  for (const b of blocks) {
-    if (typeof b !== 'object' || b === null) continue
-    const { type, text } = b as { type?: unknown; text?: unknown }
-    if (type === 'text' && typeof text === 'string') texts.push(text)
-  }
-  return texts.join('\n')
 }
 
 /** The bridge, made and started by the first hook to run. */

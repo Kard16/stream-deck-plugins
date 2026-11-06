@@ -6,14 +6,10 @@ import type { BridgeRoutes, BridgeState, RouteAnswer } from "../bridge/server.js
 import { heldAsk } from "../protocol/ask.js";
 import { fingerprint, summary } from "../protocol/fingerprint.js";
 import {
-	ALLOW_DECISION,
 	ASK_TOOLS,
 	asHost,
 	EXIT_PLAN,
 	type Hello,
-	type HookRequest,
-	isObj,
-	MODE_TOOL,
 	type ModEvent,
 	type ModRef,
 	modRef,
@@ -21,12 +17,10 @@ import {
 	type Obj,
 	parseEvent,
 	parseHello,
-	parseHook,
 	parsePermission,
 	parsePoll,
 	parseResult,
 	type PermissionRequest,
-	PRETOOL_ALLOW,
 	PROTOCOL_VERSION,
 	ROUTES,
 } from "../protocol/wire.js";
@@ -65,7 +59,7 @@ export type SessionView = {
 	model: string | null;
 	effort: string | null;
 	mode: string | null;
-	/** The session has a current mod instance, which only a hello makes so, to take prompts and mode changes. */
+	/** The session has a current mod instance, which only a hello makes so, to take prompts. */
 	plugin: boolean;
 	/** False for a picked target whose registry file has gone, which has ended, and for a slotted session that isn't running. */
 	listed: boolean;
@@ -259,10 +253,9 @@ export type SessionModelOptions = {
 /**
  * The deck's session model (PROTOCOL.md, "The deck's session model"). It merges the registry, the app's
  * records and what the bridge hears, keyed by the app's `local_…` id; it's also the bridge's routes. It holds
- * the PermissionRequests, answers the mode checks, applies the release rules, queues the commands that key
- * presses make, and works out each session's status, settings and context, and the target session for prompts
- * and mode. It lists only the sessions the registry lists, and takes the hooks' requests only from those
- * (PROTOCOL.md, Desktop sessions only).
+ * the PermissionRequests, applies the release rules, queues the commands that key presses make, and works out
+ * each session's status, settings and context, and the target session for prompts. It lists only the sessions
+ * the registry lists, and takes the hook's requests only from those (PROTOCOL.md, Desktop sessions only).
  */
 export class SessionModel implements BridgeRoutes {
 	readonly held: HeldRequests;
@@ -482,9 +475,8 @@ export class SessionModel implements BridgeRoutes {
 	// ---- the bridge's routes ----
 
 	/**
-	 * `POST /v1/permission`, from a confirmed session only: the deck's own mode change in flight is allowed at once
-	 * (kind mode), and anything else is held. A request from any other process gets no decision at once.
-	 * `inputScrubbed`: the bridge's token scrub changed something inside the body's `tool_input` (BridgeRoutes).
+	 * `POST /v1/permission`, held, from a confirmed session only. A request from any other process gets no decision
+	 * at once. `inputScrubbed`: the bridge's token scrub changed something inside the body's `tool_input` (BridgeRoutes).
 	 */
 	permission(body: unknown, deckHost: string | undefined, reply: PollReply, inputScrubbed = false): void | Promise<void> {
 		// When it arrived, for release rules 2 and 3, before any second reading of the registry.
@@ -496,20 +488,6 @@ export class SessionModel implements BridgeRoutes {
 			return;
 		}
 		return this.#fromConfirmed(ROUTES.permission, deckHost, p.sid, reply, (host) => this.#takePermission(p, host, at, reply, inputScrubbed));
-	}
-
-	/**
-	 * `POST /v1/pretool`, the mode check: answered at once and never held. Allowed only for the deck's own mode
-	 * change in flight, from a confirmed session; anything else gets no decision (PROTOCOL.md, Mode checks).
-	 */
-	pretool(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void> {
-		const p = parseHook(body);
-		if (!p) {
-			this.#log.debug("PRETOOL: no decision: the body isn't a PreToolUse (no tool_name)");
-			reply.send(200, JSON.stringify(NO_DECISION));
-			return;
-		}
-		return this.#fromConfirmed(ROUTES.pretool, deckHost, p.sid, reply, (host) => this.#checkMode(p, host, reply));
 	}
 
 	/**
@@ -604,7 +582,7 @@ export class SessionModel implements BridgeRoutes {
 		const b = this.#modSession(r);
 		if (!b) return NO_HOST;
 		this.#noHello(b, r.inst, "sends a result");
-		if (r.id !== null) this.commands.result(b.host, r.inst, r.id, r.state, r.error, r.detail);
+		if (r.id !== null) this.commands.result(b.host, r.inst, r.id, r.state, r.error);
 		return { status: 204 };
 	}
 
@@ -631,7 +609,7 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * The session prompts and mode go to: the one last picked on the Sessions dial, even after it has ended
+	 * The session prompts go to: the one last picked on the Sessions dial, even after it has ended
 	 * (presses then do nothing but alert, kickoff answer 4); until one is picked, the one most recently on
 	 * screen in the app, by its latest `attach` or its record's `lastFocusedAt`, whichever is later.
 	 */
@@ -1081,25 +1059,13 @@ export class SessionModel implements BridgeRoutes {
 
 	/**
 	 * A PermissionRequest from a confirmed session. Its mode and effort are the session's, the engine's own at that
-	 * moment, which no hello replaces (`take`). Kind mode, the deck's own mode change in flight, is allowed at once,
-	 * once per command; anything else is held (PROTOCOL.md, Permission requests). `inputScrubbed`: as for `permission`.
+	 * moment, which no hello replaces (`take`). It's held (PROTOCOL.md, Permission requests). `inputScrubbed`: as for
+	 * `permission`.
 	 */
 	#takePermission(p: PermissionRequest, host: string, at: number, reply: PollReply, inputScrubbed: boolean): void {
 		const b = this.#bridgeFor(host);
 		take(b, "mode", p.mode, "permission");
 		take(b, "effort", p.effort, "permission");
-		// Kind mode: the deck's own mode change, in flight, raised this. One of the two answers the bridge gives
-		// without a key press, along with the mode check's allow; a key press started both.
-		if (p.tool === MODE_TOOL && isObj(p.input) && p.input.session_id === "self") {
-			const cmd = this.commands.inFlightMode(host, p.input.mode, "permission");
-			if (cmd) {
-				cmd.allowed.permission = true;
-				reply.send(200, JSON.stringify(ALLOW_DECISION));
-				this.#log.info(`ALLOWED the mode change to ${quote(String(p.input.mode), 20)} for ${host}: the deck's own command ${cmd.id}`);
-				this.#emit();
-				return;
-			}
-		}
 		// An ask keeps its tool_input, while it's at most 64 KiB of JSON, so its session's dial can show the form or the
 		// plan and echo it back; over that, a form the deck can't read, or an input the token scrub changed, which can't
 		// go back as it came, it's display-only (PROTOCOL.md, Held requests). A tool's request keeps nothing: Allow and
@@ -1112,26 +1078,6 @@ export class SessionModel implements BridgeRoutes {
 		}
 		const held = this.held.hold({ at, host, tool: p.tool, kind, summary: summary(p.tool, p.input), fp: fingerprintOrNull(p.tool, p.input), ask }, reply);
 		reply.onClose(() => this.held.close(held.id));
-	}
-
-	/**
-	 * A mode check from a confirmed session: the allow for the first check of the deck's own mode change in flight
-	 * for that mode, counted apart from kind mode's PermissionRequest; no decision for anything else (PROTOCOL.md,
-	 * Mode checks).
-	 */
-	#checkMode(p: HookRequest, host: string, reply: PollReply): void {
-		const self = p.tool === MODE_TOOL && isObj(p.input) && p.input.session_id === "self";
-		const mode = self && isObj(p.input) ? p.input.mode : undefined;
-		const cmd = self ? this.commands.inFlightMode(host, mode, "pretool") : null;
-		if (!cmd) {
-			reply.send(200, JSON.stringify(NO_DECISION));
-			const why = self ? `no mode command in flight for ${typeof mode === "string" ? quote(mode, 20) : "that mode"} that hasn't had its check allowed` : `${quote(p.tool, 60)} isn't the app's mode tool for the session itself`;
-			this.#log.debug(`PRETOOL ${host}: no decision: ${why}`);
-			return;
-		}
-		cmd.allowed.pretool = true;
-		reply.send(200, JSON.stringify(PRETOOL_ALLOW));
-		this.#log.info(`ALLOWED the mode check for the change to ${quote(String(mode), 20)} for ${host}: the deck's own command ${cmd.id}`);
 	}
 
 	#bridgeFor(host: string): BridgeSession {

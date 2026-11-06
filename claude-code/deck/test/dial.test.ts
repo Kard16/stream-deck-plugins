@@ -3,11 +3,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 
-import type { PollReply } from "../src/bridge/commands.js";
 import { modelName } from "../src/model/format.js";
 import { SessionModel } from "../src/model/sessions.js";
-import { CHOICE_MS, ModeDials } from "../src/mode/dials.js";
-import { modeStrip } from "../src/mode/strip.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { COALESCE_MS, SessionsDials } from "../src/sessions/dials.js";
 import { sessionsStrip, STRIP_COLORS } from "../src/sessions/strip.js";
@@ -15,16 +12,6 @@ import type { Feedback } from "../src/util/painter.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { deckRoot } from "./helpers/paths.js";
 import { RecordingLog } from "./helpers/recording-log.js";
-
-class FakeReply implements PollReply {
-	open = true;
-	sent: string[] = [];
-	send(_status: number, body: string): void {
-		this.open = false;
-		this.sent.push(body);
-	}
-	onClose(): void {}
-}
 
 function session(key: string, fields: Partial<RegistrySession> = {}): RegistrySession {
 	return { key, name: `Session ${key}`, status: "idle", cwd: `/Users/me/p${key}`, hostSessionId: `local_${key}`, sessionId: `uuid-${key}`, statusUpdatedAt: 1, startedAt: Number(key), ...fields };
@@ -183,119 +170,6 @@ describe("Sessions dial", () => {
 	});
 });
 
-describe("Mode dial", () => {
-	function modeSetup() {
-		const clock = new FakeClock();
-		const log = new RecordingLog();
-		const model = new SessionModel({ clock, log, wallNow: () => 5000 });
-		model.setRegistry([session("1"), session("2")]);
-		model.setBridgeState("listening");
-		model.hello({ v: 1, sid: "uuid-1", host: "local_1", inst: "i", model: "claude-haiku-5-5", mode: "default", effort: "low" });
-		const poll = new FakeReply();
-		model.next(new URLSearchParams({ host: "local_1", inst: "i" }), poll);
-		model.pick("local_1");
-		const dials = new ModeDials(model, { clock, log });
-		let alerts = 0;
-		const sent: Feedback[] = [];
-		dials.add("m", { setFeedback: (p) => sent.push(p), showAlert: () => alerts++ });
-		const strip = (): Record<string, unknown> => Object.fromEntries(Object.entries(dials.painted("m") ?? {}).map(([k, v]) => [k, (v as { value: unknown }).value]));
-		return { clock, model, dials, poll, sent, strip, alerts: () => alerts };
-	}
-
-	test("shows the target's title, mode, model and effort, in the layout's own keys", () => {
-		const { clock, sent, strip } = modeSetup();
-		clock.advance(200);
-		assert.deepEqual(strip(), { target: "Session 1", mode: "Manual", meta: "Haiku 5.5 · low" });
-		assert.deepEqual(Object.keys(sent[0] ?? {}).sort(), ["meta", "mode", "target"], "never title or icon");
-	});
-
-	test("turning chooses a mode, one per tick, stopping at the ends; a press applies it to the target", () => {
-		const { clock, model, dials, poll, strip } = modeSetup();
-		dials.rotate("m", 1, false);
-		clock.advance(COALESCE_MS + 100);
-		assert.equal(strip().mode, "→ Accept edits");
-		dials.rotate("m", 5, false);
-		clock.advance(COALESCE_MS + 100);
-		assert.equal(dials.shown("m"), "auto");
-		dials.rotate("m", -1, false);
-		clock.advance(COALESCE_MS + 100);
-		dials.down("m");
-		dials.up("m");
-		assert.deepEqual(JSON.parse(poll.sent[0] ?? "null"), { cmds: [{ id: "c1", t: "mode", mode: "plan" }] });
-		clock.advance(200);
-		assert.equal(strip().mode, "Plan…");
-		model.result({ host: "local_1", inst: "i", id: "c1", state: "done" });
-		model.events({ host: "local_1", inst: "i", seq: 1, events: [{ t: "settings", mode: "plan" }] });
-		clock.advance(200);
-		assert.equal(strip().mode, "Plan");
-	});
-
-	test("an unapplied choice goes back to the target's mode after a while, or on long-touch", () => {
-		const { clock, dials, strip } = modeSetup();
-		dials.rotate("m", 2, false);
-		clock.advance(COALESCE_MS + 100);
-		assert.equal(strip().mode, "→ Plan");
-		clock.advance(CHOICE_MS);
-		assert.equal(strip().mode, "Manual");
-		dials.rotate("m", 1, false);
-		clock.advance(COALESCE_MS + 100);
-		dials.tap("m", true);
-		clock.advance(200);
-		assert.equal(strip().mode, "Manual");
-	});
-
-	test("a refused change alerts; a choice doesn't carry over to another target", () => {
-		const { clock, model, dials, strip, alerts } = modeSetup();
-		dials.rotate("m", 3, false);
-		clock.advance(COALESCE_MS + 100);
-		dials.tap("m", false);
-		model.result({ host: "local_1", inst: "i", id: "c1", state: "refused", error: "no" });
-		assert.equal(alerts(), 1);
-		dials.rotate("m", 1, false);
-		clock.advance(COALESCE_MS + 100);
-		model.pick("local_2");
-		clock.advance(200);
-		assert.deepEqual(strip(), { target: "Session 2", mode: "—", meta: "— · —" });
-		dials.tap("m", false);
-		assert.equal(alerts(), 1, "no choice for this target, so the tap applies nothing");
-		assert.equal(model.commands.get("c2"), null);
-	});
-
-	test("a press or tap without a turn does nothing, though the strip shows the target's mode: no command, no alert", () => {
-		const { clock, model, dials, poll, strip, alerts } = modeSetup();
-		clock.advance(200);
-		assert.equal(strip().mode, "Manual");
-		const pressAndTap = (): void => {
-			dials.down("m");
-			dials.up("m");
-			dials.tap("m", false);
-		};
-		pressAndTap();
-		assert.deepEqual([poll.sent, alerts(), model.commands.get("c1")], [[], 0, null], "before any turn");
-		// After a choice goes back, on its own or on long-touch.
-		dials.rotate("m", 2, false);
-		clock.advance(COALESCE_MS + 100);
-		clock.advance(CHOICE_MS);
-		pressAndTap();
-		dials.rotate("m", 1, false);
-		clock.advance(COALESCE_MS + 100);
-		dials.tap("m", true);
-		pressAndTap();
-		assert.deepEqual([poll.sent, alerts(), model.commands.get("c1")], [[], 0, null], "after the choice went back");
-		// After a change is applied: its press sends one command, and the presses after it none.
-		dials.rotate("m", 1, false);
-		clock.advance(COALESCE_MS + 100);
-		dials.tap("m", false);
-		assert.deepEqual(JSON.parse(poll.sent[0] ?? "null"), { cmds: [{ id: "c1", t: "mode", mode: "acceptEdits" }] });
-		model.result({ host: "local_1", inst: "i", id: "c1", state: "done" });
-		model.events({ host: "local_1", inst: "i", seq: 1, events: [{ t: "settings", mode: "acceptEdits" }] });
-		clock.advance(200);
-		assert.equal(strip().mode, "Accept edits");
-		pressAndTap();
-		assert.deepEqual([alerts(), model.commands.get("c2")], [0, null], "after the change was applied");
-	});
-});
-
 describe("strip layouts (com.karimdhanji.claude.sdPlugin/layouts)", () => {
 	const layoutKeys = (file: string): string[] => {
 		const layout = JSON.parse(readFileSync(path.join(deckRoot(), "com.karimdhanji.claude.sdPlugin", "layouts", file), "utf8")) as { items: { key: string }[] };
@@ -308,8 +182,6 @@ describe("strip layouts (com.karimdhanji.claude.sdPlugin/layouts)", () => {
 		const cases: [string, string[]][] = [
 			["sessions.json", Object.keys(sessionsStrip(view, 0, 1, true))],
 			["sessions.json", Object.keys(sessionsStrip(null, 0, 0, false))],
-			["mode.json", Object.keys(modeStrip({ target: view, choice: "auto", applying: false, online: true }))],
-			["mode.json", Object.keys(modeStrip({ target: null, choice: null, applying: false, online: false }))],
 		];
 		for (const [file, keys] of cases) {
 			assert.deepEqual([...keys].sort(), layoutKeys(file), file);

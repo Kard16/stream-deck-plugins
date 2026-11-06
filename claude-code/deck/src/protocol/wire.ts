@@ -10,7 +10,6 @@ export const PROTOCOL_VERSION = 1;
 
 export const ROUTES = {
 	permission: "/v1/permission",
-	pretool: "/v1/pretool",
 	hello: "/v1/hello",
 	events: "/v1/events",
 	next: "/v1/next",
@@ -30,22 +29,8 @@ export const DENY_MESSAGE = "Denied from the Stream Deck.";
 export const DENY_DECISION = {
 	hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: DENY_MESSAGE, interrupt: true } },
 } as const;
-/** No decision: the app's own dialog decides. For a mode check, the session's own permission check decides. */
+/** No decision: the app's own dialog decides. */
 export const NO_DECISION = {} as const;
-
-/**
- * The mode check's allow (PROTOCOL.md, Mode checks): the PreToolUse hook's answer that lets the deck's own mode
- * change past the session's permission check, the auto-mode classifier included. The only other answer is `{}`.
- */
-export const PRETOOL_ALLOW = {
-	hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "The mode change pressed on the Stream Deck." },
-} as const;
-
-/**
- * The app's mode tool, as a PermissionRequest and a mode check name it. The deck's own mode commands call it: the
- * mode hook asks first, and a raise brings up a PermissionRequest for it (S4).
- */
-export const MODE_TOOL = "mcp__ccd_session_mgmt__set_session_permission_mode";
 
 /** The two tools that need the person: Claude Code ignores a plain Allow for them (the engine check, 2026-11-04). */
 export const ASK_QUESTION = "AskUserQuestion";
@@ -94,14 +79,6 @@ export function approvePlanDecision(input: unknown, mode: PlanMode): UpdatedAllo
 			decision: { behavior: "allow", updatedInput: input, updatedPermissions: [{ type: "setMode", mode, destination: "session" }] },
 		},
 	};
-}
-
-/** The modes the deck sets, in the order the Mode dial offers them. Never bypassPermissions. */
-export const MODES = ["default", "acceptEdits", "plan", "auto"] as const;
-export type Mode = (typeof MODES)[number];
-
-export function isMode(v: unknown): v is Mode {
-	return typeof v === "string" && (MODES as readonly string[]).includes(v);
 }
 
 /**
@@ -153,10 +130,7 @@ export function parsePermission(body: unknown): PermissionRequest | null {
 	return { ...hook, mode: text(body.permission_mode, 40), effort };
 }
 
-/**
- * What the bridge reads from either hook's body: the session it says it's from, the tool and its input. A mode
- * check's body is a PreToolUse's, of which the bridge reads no more (PROTOCOL.md, Mode checks).
- */
+/** What the bridge reads from the hook's body: the session it says it's from, the tool and its input. */
 export type HookRequest = {
 	/** `session_id`: Claude Code's id for the session the request comes from. */
 	sid: string | null;
@@ -244,10 +218,10 @@ export function parseEvent(e: unknown): ModEvent | null {
 	}
 }
 
-export type Result = ModRef & { id: string | null; state: string | null; error: string | null; detail: string | null };
+export type Result = ModRef & { id: string | null; state: string | null; error: string | null };
 
 export function parseResult(o: Obj): Result {
-	return { ...modRef(o), id: text(o.id, 40), state: text(o.state, 20), error: text(o.error, 300), detail: text(o.detail, 300) };
+	return { ...modRef(o), id: text(o.id, 40), state: text(o.state, 20), error: text(o.error, 300) };
 }
 
 /** The long poll's longest and default wait, in seconds. */
@@ -264,4 +238,4 @@ export function parsePoll(params: URLSearchParams): Poll {
 }
 
 /** A command as `GET /v1/next` sends it. */
-export type CommandWire = { id: string; t: "prompt"; text: string } | { id: string; t: "mode"; mode: Mode };
+export type CommandWire = { id: string; t: "prompt"; text: string };

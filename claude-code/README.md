@@ -1,11 +1,10 @@
 # Claude Code on the Stream Deck +
 
-Live status for the Claude desktop app's Code-tab sessions, with a key and a dial for each session, answers to questions, plans and approvals, saved prompts and mode changes on the deck, for this Mac. Two plugins talk over localhost:
+Live status for the Claude desktop app's Code-tab sessions, with a key and a dial for each session, answers to questions, plans and approvals, and saved prompts on the deck. Two plugins talk over localhost:
 
-- **`streamdeck-bridge`** (`plugin/`) is a Claude Code plugin, so it runs inside each session. It has three parts:
-  - a mod that reports the session's status and runs what the deck sends;
-  - a PermissionRequest hook that puts approvals on the deck;
-  - a PreToolUse hook for the deck's own mode changes.
+- **`streamdeck-bridge`** (`plugin/`) is a Claude Code plugin, so it runs inside each session. It has two parts:
+  - a mod that reports the session's status and runs the saved prompts the deck sends;
+  - a PermissionRequest hook that puts approvals on the deck.
 - **The Stream Deck plugin** (`deck/`, `com.karimdhanji.claude`) runs in the Stream Deck app and hosts the bridge on 127.0.0.1:47600. It also reads the session registry (`~/.claude/sessions/`) and the app's session records, so it lists every running session, with or without the plugin.
 
 The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, decisions and test results are in [`docs/claude-code/plan.md`](../docs/claude-code/plan.md).
@@ -18,7 +17,7 @@ The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, d
 | The 4 dials | **Session Slot**, the same action on a dial | The session on the key above. The strip shows its details, or the question, plan or approval it's waiting on. Turn to page or pick; press or tap to jump or send. |
 | Top row | **Other Sessions**, and any of the keys below | How many sessions on no slot need you. Press to jump to the one that has waited longest. |
 
-The Sessions and Mode dials and the other keys work as before, on this page or another.
+The Sessions dial and the other keys work as before, on this page or another.
 
 ## Session Slot keys
 
@@ -30,7 +29,7 @@ The Sessions and Mode dials and the other keys work as before, on this page or a
 - **Not running**, dimmed: the session's process has stopped, after a Claude app restart say. A press opens it, and the app starts it again.
 - **No session:** an empty slot. Hold the key to add the session on screen.
 
-**Press** to jump to the session in the app. It becomes the target, as a pick on the Sessions dial does, so the Saved Prompt and Mode keys act on it. A press in the moment before the key shows a change, such as a swap, alerts and does nothing.
+**Press** to jump to the session in the app. It becomes the target, as a pick on the Sessions dial does, so the Saved Prompt keys act on it. A press in the moment before the key shows a change, such as a swap, alerts and does nothing.
 
 **Hold** for half a second to put the session that's on screen in the app on this key. If it's on another slot, the two swap. The key shows OK, or an alert when the deck doesn't know which session is on screen, or that session is archived.
 
@@ -66,13 +65,11 @@ Turn to page. Press or tap to jump to the session. Long-touch goes back to the f
 
 A key for the top row, about the running sessions on no Session Slot. It shows how many need you, and the title of the one that has waited longest, with what it waits on and for how long. How many are done and not seen is in small type. With none needing you, it's dim and says how many others are running. Press to jump to the one that has waited longest, which becomes the target; with none, it alerts. As on a Session Slot key, a press in the moment before the key shows a change alerts.
 
-## The Sessions and Mode dials
+## The Sessions dial
 
-- **Sessions:** turn to scroll the running sessions on the strip. Each shows its title, status, context %, model and effort. Press or tap to jump to that session in the app and make it the target.
-- **Mode:** shows the target session's mode, model and effort.
-  - Turn to choose Manual, Accept edits, Plan or Auto.
-  - Press or tap to apply it. Without a turn, a press or tap does nothing, so it can't re-apply a mode the deck shows a moment late. Long-touch cancels the choice.
-  - Model and effort are shown, never changed.
+Turn to scroll the running sessions on the strip. Each shows its title, status, context %, model and effort. Press or tap to jump to that session in the app and make it the target.
+
+The deck never changes a session's mode, model or effort. This strip shows the model and effort, and a Session Slot's Setup page also shows the mode. The Mode dial and Mode keys went in Phase 8 (2026-11-06): a placed one shows as a missing action, so remove it in the Stream Deck app.
 
 ## The other keys
 
@@ -81,7 +78,6 @@ A key for the top row, about the running sessions on no Session Slot. It shows h
 | Approve | Shows the oldest request waiting for permission, across sessions: its session, tool, and file or command. Press to allow it. | |
 | Deny | The same request. Press to deny it, which stops the turn like the app's own No. | |
 | Saved Prompt | Sends its text to the target session as your own message. A busy session gets it when its turn ends. The key shows waiting, sent or refused. | **Prompt** (the text) and **Key label** |
-| Mode Key | Sets the target session to one mode. | **Mode** |
 | Session | The target session's title and status. Press to jump to it. | |
 
 **How Approve and Deny behave:**
@@ -111,14 +107,10 @@ The target is the session last picked on the Sessions dial, or last jumped to fr
 ## Which sessions it covers
 
 - **Every running Code-tab session is on the Sessions dial,** can fill a Session Slot, and can be jumped to.
-- **Approvals, prompts, mode and the full status need the plugin.**
+- **Approvals, prompts and the full status need the plugin.**
   - A session gets the plugin, its hooks included, when it starts. A session that was already running gets it at its next start, for example after the Claude app restarts.
 - **Only desktop sessions talk to the deck.** The plugin also loads in terminal and VS Code sessions, in `claude -p` runs, and in `claude` processes that a session starts, but there it stays quiet. Their permission prompts stay where they are.
 - **The deck acts only on a press,** and only for the request or session it shows.
-
-## Mode changes from Auto
-
-In Auto, Claude Code's auto-mode classifier would refuse the plugin's own call to change the mode. The deck's mode hook gets the change past it, and the deck allows only a change you pressed for. A raise, such as back to Auto, brings up the app's approval, which the deck allows for the same press. A session started before plugin 0.2.0 can't change mode from Auto.
 
 ## Setup
 
@@ -192,7 +184,7 @@ chmod 600 ~/.claude/settings.json
 - **A key stays lit after you looked:** the deck counts a look when the session comes on screen in the app on this Mac, or while it's on screen there with Claude in front. It checks which app is in front only while a Session Slot or Other Sessions key is on the deck. A press on its key counts too.
 - **A dial alerts and sends nothing:** the request had been on the strip for under a second, your pick had only just shown, or it was answered somewhere else first. Look at the strip again, then press.
 - **A dial reads Answer in app:** the deck couldn't read the question's form, the request is over 64 KiB, or, rarely, it held part of the deck's token, which the deck takes out of everything it reads. Answer in the app.
-- **A Saved Prompt or Mode press alerts:** the deck's log says why. Often the target has ended, or its last prompt is still waiting. It can also mean the session's plugin hasn't checked in for a minute, as when the session's process was replaced while the deck restarted. The deck sends it nothing until it checks in again, which a live plugin does within a second. Approve and Deny still work meanwhile.
+- **A Saved Prompt press alerts:** the deck's log says why. Often the target has ended, or its last prompt is still waiting. It can also mean the session's plugin hasn't checked in for a minute, as when the session's process was replaced while the deck restarted. The deck sends it nothing until it checks in again, which a live plugin does within a second. Approve and Deny still work meanwhile.
 - **Logs:**
   - The deck: `deck/com.karimdhanji.claude.sdPlugin/logs/com.karimdhanji.claude.0.log`. For more detail, write `debug` to `deck/com.karimdhanji.claude.sdPlugin/log-level.txt` and restart the plugin.
   - The mod: each session's own debug log.
@@ -203,7 +195,7 @@ chmod 600 ~/.claude/settings.json
 mise exec -- node claude-code/tools/recheck.mjs
 ```
 
-It checks the app internals this relies on: the registry and record fields, the jump route, the mode tool, and the mods API on the newest bundled Claude Code. Then try one jump and one mode change on the deck.
+It checks the app internals this relies on: the registry and record fields, the jump route, and the mods API on the newest bundled Claude Code. Then try one jump and one approval on the deck.
 
 ## Development
 

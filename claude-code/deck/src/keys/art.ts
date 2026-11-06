@@ -19,7 +19,7 @@ const ASK_BG = "#7A5A12";
 const WAITING_BG = "#5C4A1A";
 const SENT_BG = "#1E6B43";
 const REFUSED_BG = "#7A2626";
-/** The Mode key while its mode is the target's. */
+/** A working session's slot key. */
 const ACTIVE_BG = "#1F4E8C";
 const FONT = "Helvetica Neue, Helvetica, Arial, sans-serif";
 
@@ -127,11 +127,6 @@ function bubble(color: string, width = 10): string {
 	return `<path d="M30 34H114Q122 34 122 42V86Q122 94 114 94H66L44 112V94H30Q22 94 22 86V42Q22 34 30 34Z" stroke="${color}" stroke-width="${width}" stroke-linejoin="round" fill="none"/>`;
 }
 
-/** A switch, its knob to the right: a mode. */
-function toggle(color: string, accent: string, width = 10): string {
-	return `<rect x="22" y="46" width="100" height="52" rx="26" stroke="${color}" stroke-width="${width}" fill="none"/><circle cx="96" cy="72" r="15" fill="${accent}"/>`;
-}
-
 /** A window with a dot in its bar: one session. */
 function windowGlyph(color: string, accent: string, width = 10): string {
 	return `<rect x="22" y="30" width="100" height="84" rx="12" stroke="${color}" stroke-width="${width}" fill="none"/><path d="M22 54H122" stroke="${color}" stroke-width="${width}"/><circle cx="40" cy="42" r="5" fill="${accent}"/>`;
@@ -216,31 +211,6 @@ export function promptKeySvg(look: PromptLook, size = 144): string {
 	const body = lines.map((l, i) => line(l, top + i * 25, fg, 19, 600)).join("");
 	const bottom = !look.online ? "Offline" : state ? state.text : look.target ? `→ ${look.target}` : "No target";
 	return key(bg, body + line(bottom, 128, state ? "#FFFFFF" : CAPTION, 15, state ? 700 : 500), size);
-}
-
-// ---- Mode key ----
-
-export type ModeKeyLook = {
-	/** The mode's name, as the app shows it; null when none is set. */
-	mode: string | null;
-	/** It's the target's mode now. */
-	active: boolean;
-	/** The last press's change is in flight. */
-	pending: boolean;
-	target: string | null;
-	online: boolean;
-};
-
-/** A Mode key: its mode, blue while it's the target's mode, with the target below. */
-export function modeKeySvg(look: ModeKeyLook, size = 144): string {
-	if (look.mode === null) return key(BG, raised(toggle(CAPTION, CAPTION)) + caption("Set mode", CAPTION, 18), size);
-	const bg = !look.online ? DIM_BG : look.active ? ACTIVE_BG : BG;
-	const fg = look.online ? FG : DIM_FG;
-	const lines = wrap(look.mode, fits(24), 2);
-	const top = lines.length === 1 ? 74 : 62;
-	const body = lines.map((l, i) => line(l, top + i * 28, fg, 24, 700)).join("");
-	const bottom = !look.online ? "Offline" : look.pending ? "Setting…" : look.target ?? "No target";
-	return key(bg, line("MODE", 30, look.active ? "#BFD8FF" : CAPTION, 14, 700) + body + line(bottom, 128, look.pending ? "#F2C94C" : CAPTION, 15, 500), size);
 }
 
 // ---- Session key ----
@@ -454,15 +424,6 @@ export function sessionsEncoderSvg(size = 72): string {
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144">${rows(FG, ACCENT)}</svg>`;
 }
 
-/** The Mode dial's key image and encoder icon: the switch. */
-export function modeDialKeySvg(size = 144): string {
-	return key(BG, toggle(FG, ACCENT), size);
-}
-
-export function modeEncoderSvg(size = 72): string {
-	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144">${toggle(FG, ACCENT)}</svg>`;
-}
-
 /** The Session Slot dial's encoder icon: the slot glyph without a background. Its key image is the empty slot's face. */
 export function slotEncoderSvg(size = 72): string {
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144">${slotGlyph(FG, ACCENT)}</svg>`;
@@ -470,7 +431,7 @@ export function slotEncoderSvg(size = 72): string {
 
 // ---- the action list ----
 
-export type IconKind = "sessions" | "approve" | "deny" | "prompt" | "mode" | "mode-key" | "session" | "slot" | "others";
+export type IconKind = "sessions" | "approve" | "deny" | "prompt" | "session" | "slot" | "others";
 
 /** The 20 px action-list icons: monochrome white on transparent, as the manifest asks. */
 export function actionIconSvg(kind: IconKind): string {
@@ -480,8 +441,6 @@ export function actionIconSvg(kind: IconKind): string {
 		approve: check(white, 17),
 		deny: cross(white, 17),
 		prompt: bubble(white, 13),
-		mode: toggle(white, white, 13),
-		"mode-key": toggle(white, white, 13),
 		session: windowGlyph(white, white, 13),
 		slot: slotGlyph(white, white, 13),
 		others: stackGlyph(white, 13),

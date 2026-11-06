@@ -3,12 +3,11 @@
 // - `mod` and `engine` lines are skipped: they're for the plugin side's own runner.
 // - `plugin` lines are sent in order, `*` values as they are, with the right token and Host unless the line
 //   sets them (`$TOKEN` stands for the token, null leaves a header out). Each answer is awaited, except for
-//   /v1/permission and /v1/next, which may be held: a later `reply` line checks those, waiting up to 2 s. A mode
-//   check, /v1/pretool, is answered at once, and awaited like the rest. Answers to the rest must be 200 or 204
-//   unless a `reply` line says otherwise.
-// - Lines for /v1/permission and /v1/pretool are Claude Code's, the hooks' input, never the mod's: their bodies
-//   are sent as they are, with no inst bound (see uniqueInst below), and their answers, which Claude Code acts on,
-//   are held to PROTOCOL.md's bodies (hookAnswerMismatch).
+//   /v1/permission and /v1/next, which may be held: a later `reply` line checks those, waiting up to 2 s. Answers to
+//   the rest must be 200 or 204 unless a `reply` line says otherwise.
+// - Lines for /v1/permission are Claude Code's, the hook's input, never the mod's: their bodies are sent as they
+//   are, with no inst bound (see uniqueInst below), and their answers, which Claude Code acts on, are held to
+//   PROTOCOL.md's bodies (hookAnswerMismatch).
 // - `press`, `registry` and `expect` lines go to a driver (drivers.mjs), which presses keys, changes the registry
 //   and reads the deck's state itself, or asks a person to press and skips the rest. A driver that skips registry
 //   lines skips the replies that hang on them too, and reports them: one that waits on a registry change; one to a
@@ -20,15 +19,15 @@
 //   file (Identity). A driver may skip a press too, and the replies to polls that expect a command then go with it:
 //   only a press queues one.
 // The deck's command ids bind to the fixture's names at their first appearance in a reply. An answer to a
-// permission request must also be exactly one of PROTOCOL.md's five, fitting the request it answers, and one to a
-// mode check one of its two, whatever its reply line expects, since it's what Claude Code acts on, or an error answer
-// when it isn't 2xx. An Answer or an Approve plan must equal the line's body exactly, updatedInput included.
+// permission request must also be exactly one of PROTOCOL.md's five, fitting the request it answers, whatever its
+// reply line expects, since it's what Claude Code acts on, or an error answer when it isn't 2xx. An Answer or an
+// Approve plan must equal the line's body exactly, updatedInput included.
 
 import { performance } from 'node:perf_hooks'
 
 import { hostHeader, send, within } from './client.mjs'
 import { ANY, Bindings, commandIdHook, exactMismatch, mismatch, show } from './match.mjs'
-import { ALLOW, ASK_TOOLS, DENY, HOOK_ROUTES, MOD_ROUTES, PLAN_MODES, PRE_ALLOW, ROUTES, summary } from './protocol.mjs'
+import { ALLOW, ASK_TOOLS, DENY, HOOK_ROUTES, MOD_ROUTES, PLAN_MODES, ROUTES, summary } from './protocol.mjs'
 
 /** A line that didn't go as the fixture says. */
 export class PlayFailure extends Error {
@@ -73,7 +72,7 @@ function settledWithin(promise, ms) {
  * What Claude Code applies along with a decision: a rewritten tool input, and rules, directories or a mode for the
  * session or a settings file. PROTOCOL.md, "Permission requests", as amended on 2026-11-04 for session keys: the deck
  * sends updatedInput only in an Answer or an Approve plan, and updatedPermissions only in an Approve plan, both in a
- * PermissionRequest's allow; a mode check's answer has neither.
+ * PermissionRequest's allow.
  */
 const NEVER_SENT = Object.freeze(['updatedPermissions', 'updatedInput'])
 
@@ -98,13 +97,12 @@ function findKey(v, keys, at, skip = null) {
 }
 
 /**
- * NEVER_SENT anywhere it doesn't belong in an answer to `route`, as findKey gives it, or null. In a mode check's answer
- * it belongs nowhere. In a permission request's, an allow's decision is where an Answer or an Approve plan has them,
- * and what's inside its updatedInput is the request's own input, echoed: so an allow's decision is left to the
- * checks of the body it is, and the rest searched.
+ * NEVER_SENT anywhere it doesn't belong in a permission request's answer, as findKey gives it, or null. An allow's
+ * decision is where an Answer or an Approve plan has them, and what's inside its updatedInput is the request's own
+ * input, echoed: so an allow's decision is left to the checks of the body it is, and the rest searched.
  */
-function misplaced(route, actual) {
-  const decision = route === ROUTES.permission && isObject(actual) && isObject(actual.hookSpecificOutput) ? actual.hookSpecificOutput.decision : undefined
+function misplaced(actual) {
+  const decision = isObject(actual) && isObject(actual.hookSpecificOutput) ? actual.hookSpecificOutput.decision : undefined
   return findKey(actual, NEVER_SENT, 'body', isObject(decision) && decision.behavior === 'allow' ? decision : null)
 }
 
@@ -207,11 +205,11 @@ function extraField(expected, actual, at, name) {
 }
 
 /**
- * What a 2xx answer to each hook's route may be (PROTOCOL.md, "Permission requests" and "Mode checks"): `names` in
- * words, `decision(out)` the one whose `hookSpecificOutput` an answer that has one must be exactly, as `[name,
- * body]`, `exactly` what that means, `never` how to say a NEVER_SENT field is where it doesn't belong, and for a
- * permission request `request(name, request)` whether the decision fits the request it answers and `input(name, out,
- * request)` whether an Answer's or an Approve plan's own fields are right.
+ * What a 2xx answer to the hook's route may be (PROTOCOL.md, "Permission requests"): `names` in words,
+ * `decision(out)` the one whose `hookSpecificOutput` an answer that has one must be exactly, as `[name, body]`,
+ * `exactly` what that means, `never` how to say a NEVER_SENT field is where it doesn't belong, `request(name,
+ * request)` whether the decision fits the request it answers and `input(name, out, request)` whether an Answer's or
+ * an Approve plan's own fields are right.
  */
 const HOOK_ANSWERS = Object.freeze({
   [ROUTES.permission]: {
@@ -225,14 +223,6 @@ const HOOK_ANSWERS = Object.freeze({
     request: requestMismatch,
     input: (name, out, request) => (name === 'Answer' ? answerMismatch(out, request) : name === 'Approve plan' ? approvePlanMismatch(out, request) : null),
   },
-  [ROUTES.pretool]: {
-    names: "the mode check's allow or {}",
-    decision: () => ["the mode check's allow", PRE_ALLOW],
-    exactly: 'the bridge never denies or asks in a mode check, and its allow is exactly as PROTOCOL.md writes it',
-    never: (key) => `the deck never sends ${key} in a mode check (PROTOCOL.md)`,
-    request: () => null,
-    input: () => null,
-  },
 })
 
 /** Whether a permission answer, or a line's expected body, is an Answer or an Approve plan: its decision carries updatedInput or updatedPermissions. */
@@ -242,28 +232,27 @@ function carriesInput(body) {
 }
 
 /**
- * Why an answer to one of Claude Code's requests, the hooks', isn't one PROTOCOL.md allows, or null. It holds
- * whatever the reply line expects, since Claude Code acts on the answer: "Transport" exempts these routes from
+ * Why an answer to one of Claude Code's requests, the hook's, isn't one PROTOCOL.md allows, or null. It holds
+ * whatever the reply line expects, since Claude Code acts on the answer: "Transport" exempts this route from
  * "unknown fields are ignored".
  * - `updatedPermissions` and `updatedInput` are only where PROTOCOL.md puts them: in an Answer's and an Approve plan's
- *   decision, and nowhere in a mode check's answer. A deck that echoed a PermissionRequest's `permission_suggestions`
- *   into a Deny would otherwise add rules to the user's settings at every press, and still pass; one that put
- *   `updatedInput` in a mode check's allow could change the mode the call asks for.
+ *   decision. A deck that echoed a PermissionRequest's `permission_suggestions` into a Deny would otherwise add rules
+ *   to the user's settings at every press, and still pass.
  * - A 2xx answer, the one Claude Code parses, is exactly one of the route's bodies: Allow, Deny, an Answer, an Approve
- *   plan or {} for a permission request, the allow or {} for a mode check. No field of its own, at the top (Claude
- *   Code's own HOOK_FIELDS among them) or inside `hookSpecificOutput`. An Answer's answers are strings; an Approve
- *   plan's updatedPermissions is one setMode for the session, into auto, acceptEdits or default.
- * - With `request`, the hook's input the answer is for (a permission request's): the decision fits it. An Answer goes
- *   only to an AskUserQuestion, with its tool_input exactly as it came plus an answer for every question; an Approve
- *   plan only to an ExitPlanMode, with its tool_input unchanged; and a plain Allow to neither, as Claude Code ignores
- *   it there. A deck that answered a Write with an Answer would rewrite the call it allowed.
+ *   plan or {}. No field of its own, at the top (Claude Code's own HOOK_FIELDS among them) or inside
+ *   `hookSpecificOutput`. An Answer's answers are strings; an Approve plan's updatedPermissions is one setMode for the
+ *   session, into auto, acceptEdits or default.
+ * - With `request`, the hook's input the answer is for: the decision fits it. An Answer goes only to an
+ *   AskUserQuestion, with its tool_input exactly as it came plus an answer for every question; an Approve plan only to
+ *   an ExitPlanMode, with its tool_input unchanged; and a plain Allow to neither, as Claude Code ignores it there. A
+ *   deck that answered a Write with an Answer would rewrite the call it allowed.
  * - Any other is an error answer, which Claude Code doesn't parse: `{"error": "<reason>"}` exactly, as
  *   "Transport" writes it. auth's 405 for `GET /v1/permission` is one.
  */
 export function hookAnswerMismatch(route, actual, status = 200, request = undefined) {
   const answers = HOOK_ANSWERS[route]
   if (!answers) throw new Error(`${route} isn't one of the hooks' routes`)
-  const stray = misplaced(route, actual)
+  const stray = misplaced(actual)
   if (stray) return `${stray.at}: ${answers.never(stray.key)}, got ${show(stray.value)}`
   if (status < 200 || status > 299) {
     const extra = isObject(actual) ? Object.keys(actual).find((k) => k !== 'error') : undefined
@@ -360,12 +349,12 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
   const open = new Set()
   let sent = 0
   let lastAction = null
-  // Saved Prompt and Mode presses the driver skipped, so commands the fixture expects that no press queued.
+  // Saved Prompt presses the driver skipped, so commands the fixture expects that no press queued.
   let commandPressesSkipped = 0
   const result = { name: fx.name, ok: true, checked: 0, skipped: [] }
   const ctx = {
     fx, bindings, created: [], say, held: () => heldNow(), skip: (s) => result.skipped.push(s),
-    /** Whether command `label` (c1, c2…) can't have been queued: a Saved Prompt or Mode press was skipped, and it isn't bound. */
+    /** Whether command `label` (c1, c2…) can't have been queued: a Saved Prompt press was skipped, and it isn't bound. */
     unsent: (label) => commandPressesSkipped > 0 && bindings.real('cmd', label) === undefined,
   }
   const tag = Math.random().toString(36).slice(2, 8)
@@ -478,11 +467,6 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     if (!(p.as && fx.replied.has(p.as)) && r.status !== 200 && r.status !== 204) {
       throw new PlayFailure(line, `${p.method} ${route} answered ${r.status} ${r.text}`)
     }
-    // A mode check's answer is Claude Code's to act on: held to PROTOCOL.md's bodies whether or not a reply line checks it.
-    if (HOOKS.has(route)) {
-      const why = hookAnswerMismatch(route, r.json, r.status)
-      if (why) throw new PlayFailure(line, `${p.method} ${route}: ${why}`)
-    }
     if (route === ROUTES.events && (r.status === 200 || r.status === 204)) sawEvents(p.body)
   }
 
@@ -512,7 +496,7 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
     const cmds = entry.route === ROUTES.next && isObject(body) && Array.isArray(body.cmds) ? body.cmds : []
     if (cmds.some((c) => isObject(c) && ctx.unsent(c.id))) {
       // No command can come: only a press queues one, and the driver skipped it.
-      skip('it expects a command that only a Saved Prompt or Mode press queues, and the press was skipped', 'whose command no press queued')
+      skip('it expects a command that only a Saved Prompt press queues, and the press was skipped', 'whose command no press queued')
       return
     }
     const waitMs = lastAction === 'press' && driver.replyAfterPressMs ? driver.replyAfterPressMs : replyMs
@@ -557,7 +541,7 @@ export async function play(fx, { url, token, driver, say = () => {}, replyMs = 2
           await driver.press(line, { ...ctx, replyNext: nextAction(i) === 'reply' })
           const skipped = result.skipped.length > before
           const [key] = Object.keys(line.value)
-          if (skipped && (key === 'prompt' || key === 'mode')) commandPressesSkipped++
+          if (skipped && key === 'prompt') commandPressesSkipped++
           // A press the driver skipped gives no reply after it a person's time to come.
           lastAction = skipped ? 'press-skipped' : 'press'
           break

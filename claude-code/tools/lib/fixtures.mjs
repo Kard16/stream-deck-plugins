@@ -17,8 +17,8 @@ export const REPO = path.resolve(HERE, '..', '..', '..')
 export const FIXTURES_DIR = path.join(REPO, 'claude-code', 'protocol', 'fixtures')
 
 export const KINDS = Object.freeze(['note', 'setup', 'mod', 'engine', 'plugin', 'reply', 'press', 'registry', 'expect'])
-/** The keys a press line can name: the Approve and Deny keys, Saved Prompt, Mode, and a Session Slot dial (2026-11-04). */
-export const PRESSES = Object.freeze(['approve', 'deny', 'prompt', 'mode', 'dial'])
+/** The keys a press line can name: the Approve and Deny keys, Saved Prompt, and a Session Slot dial (2026-11-04). */
+export const PRESSES = Object.freeze(['approve', 'deny', 'prompt', 'dial'])
 /** What a dial line does, one of them: picks for a question, a decision for an approval, or a plan's choice. */
 export const DIAL_ACTIONS = Object.freeze(['picks', 'decision', 'plan'])
 
@@ -105,9 +105,8 @@ export function parseFixture(text, file = '<fixture>') {
         if (k.length !== 1 || !PRESSES.includes(k[0])) fail(n, `press has one key, one of ${PRESSES.join(', ')}`)
         const p = value[k[0]]
         if (!isObject(p)) fail(n, `press.${k[0]} must be an object`)
-        if ((k[0] === 'prompt' || k[0] === 'mode' || k[0] === 'dial') && typeof p.session !== 'string') fail(n, `press.${k[0]}.session must be a host`)
+        if ((k[0] === 'prompt' || k[0] === 'dial') && typeof p.session !== 'string') fail(n, `press.${k[0]}.session must be a host`)
         if (k[0] === 'prompt' && typeof p.text !== 'string') fail(n, 'press.prompt.text must be a string')
-        if (k[0] === 'mode' && typeof p.mode !== 'string') fail(n, 'press.mode.mode must be a string')
         if (k[0] === 'dial') {
           // PROTOCOL.md, "Fixtures": a Session Slot dial's line picks, decides or chooses for its session's request.
           const what = DIAL_ACTIONS.filter((a) => p[a] !== undefined)

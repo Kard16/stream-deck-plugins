@@ -75,8 +75,6 @@ export type WorldOptions = {
   mode?: Mode
   /** Answers `$.prompt.submit`: a drop reason refuses it; by default the prompt enters. */
   submit?: (text: string) => string | undefined
-  /** Answers `$.mcp.call` (`{ value }` or `{ deny }`); by default the mode changes. */
-  mcp?: (e: { server: string; tool: string; args: Record<string, unknown> }) => unknown
   /** Refuses every tool call at the permission check beneath the mod, with this reason, as a session's dialog does. */
   refuse?: string
   /**
@@ -146,10 +144,6 @@ export function world(on: On, o: WorldOptions = {}) {
   on('prompt.submit', (_$, e) => {
     const drop = o.submit?.(e.text)
     return drop === undefined ? { text: e.text, origin: e.origin } : { drop }
-  })
-  on('mcp.call', (_$, e) => {
-    if (o.mcp !== undefined) return o.mcp(e) as { value: { content: never[]; isError: boolean } }
-    return { value: { content: [{ type: 'text' as const, text: `This session now runs in ${String(e.args.mode)} mode.` }], isError: false } }
   })
 
   function answerPoll(entry: { req: Sent; reply: (a: Answer) => void }, cmds: unknown[]): void {

@@ -9,7 +9,6 @@ export const VERSION = 1
 /** The bridge's routes. Everything else under the server is 404. */
 export const ROUTES = Object.freeze({
   permission: '/v1/permission',
-  pretool: '/v1/pretool',
   hello: '/v1/hello',
   events: '/v1/events',
   next: '/v1/next',
@@ -19,7 +18,6 @@ export const ROUTES = Object.freeze({
 /** The method each route takes; any other gets 405. */
 export const ROUTE_METHODS = Object.freeze({
   [ROUTES.permission]: 'POST',
-  [ROUTES.pretool]: 'POST',
   [ROUTES.hello]: 'POST',
   [ROUTES.events]: 'POST',
   [ROUTES.next]: 'GET',
@@ -27,12 +25,11 @@ export const ROUTE_METHODS = Object.freeze({
 })
 
 /**
- * Claude Code's routes: the permission hook's and the mode hook's (PROTOCOL.md, "Parties"). Claude Code acts on
- * their answers, which are exactly the bodies PROTOCOL.md gives, and their bodies are the hooks' input, never the
- * mod's: no `inst`, no `seq`. The bridge takes them only from a session the registry confirms ("Desktop sessions
- * only").
+ * Claude Code's routes: the permission hook's (PROTOCOL.md, "Parties"). Claude Code acts on its answers, which are
+ * exactly the bodies PROTOCOL.md gives, and its bodies are the hook's input, never the mod's: no `inst`, no `seq`.
+ * The bridge takes them only from a session the registry confirms ("Desktop sessions only").
  */
-export const HOOK_ROUTES = Object.freeze([ROUTES.permission, ROUTES.pretool])
+export const HOOK_ROUTES = Object.freeze([ROUTES.permission])
 
 /** The mod's routes. Each request names its session with `sid`, `host` and `inst` (PROTOCOL.md, "Routes"). */
 export const MOD_ROUTES = Object.freeze([ROUTES.hello, ROUTES.events, ROUTES.next, ROUTES.result])
@@ -62,12 +59,6 @@ export const AT_ONCE_MS = 60_000
 export const HOST_PATTERN = /^local_[A-Za-z0-9-]{1,64}$/
 
 /**
- * The app's own tool that changes a session's mode. The deck's mode command calls it for `self`: the mode hook
- * asks first (`/v1/pretool`), and a raise brings up a PermissionRequest for it.
- */
-export const MODE_TOOL = 'mcp__ccd_session_mgmt__set_session_permission_mode'
-
-/**
  * Requests for these are kind ask (PROTOCOL.md, "Permission requests", as amended on 2026-11-04 for session keys):
  * Claude Code needs the person for them, so it ignores a plain Allow and takes an Allow only with updatedInput. Only
  * the session's own Session Slot dial answers one, with an Answer, an Approve plan or a Deny; on the Approve and Deny
@@ -87,10 +78,7 @@ export const PLAN_MODES = Object.freeze(['auto', 'acceptEdits', 'default'])
 /** What a fixture's dial line, or the fake's dial, may do with a plan: approve it into one of PLAN_MODES, or reject it. */
 export const DIAL_PLANS = Object.freeze([...PLAN_MODES, 'reject'])
 
-/** The modes a mode command may ask for. Never bypassPermissions. */
-export const MODES = Object.freeze(['default', 'acceptEdits', 'plan', 'auto'])
-
-/** A command's final states; `waiting` comes before them, and only for prompts. */
+/** A command's final states; a prompt's `waiting` comes before them. */
 export const FINAL_STATES = Object.freeze(['done', 'refused', 'failed'])
 
 const deepFreeze = (o) => {
@@ -152,15 +140,6 @@ export function approvePlanBody(input, mode) {
 export function joinLabels(labels) {
   return labels.map((l) => (l.includes(', ') || l.includes('"') ? JSON.stringify(l) : l)).join(', ')
 }
-
-/**
- * The mode check's allow (PROTOCOL.md, "Mode checks"): the mode hook's answer for the deck's own mode change in
- * flight, which takes it past the session's permission check, the auto-mode classifier included. The only other
- * answer to a mode check is NO_DECISION: the bridge never denies or asks there.
- */
-export const PRE_ALLOW = deepFreeze({
-  hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'The mode change pressed on the Stream Deck.' },
-})
 
 /** The error a hello gets, with 409, from a host the registry lists under another sessionId ("Desktop sessions only"). */
 export const NOT_THIS_SESSION = 'not this session'

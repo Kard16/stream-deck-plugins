@@ -51,8 +51,6 @@ const PARTS = Object.freeze({
   needsInputUrl: 'url:"claude://code/needs-input?source=desktop_action"',
   needsInputRoute: 'a.pathname==="/needs-input"',
   hostPattern: 'var lmr=/^local_[A-Za-z0-9-]{1,64}$/;',
-  modeServer: 'xJi="ccd_session_mgmt"',
-  modeTool: 'CJi="set_session_permission_mode"',
   summaryFields: 'var wM=["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid"];',
   // The record loader's OM, just after the list it walks: 523 bytes after it in 4.4212.0.
   noteworthy: 'if(t.is_noteworthy!==void 0){if(typeof t.is_noteworthy!="boolean")return;n.is_noteworthy=t.is_noteworthy}',
@@ -82,7 +80,7 @@ const VALIDATE_OK = {
   code: 0,
   lines: [
     '  ❯ ./register.ts hooks: session.start, turn.complete, tool.call',
-    '  ❯ ./register.ts calls: $.http.fetch (via adapter), $.mcp.call (via adapter)',
+    '  ❯ ./register.ts calls: $.http.fetch (via adapter), $.prompt.submit (via adapter)',
     '✘ Found 2 problems the plugin directory refuses a submission for:',
     '✔ Validation passed',
   ],
@@ -97,20 +95,10 @@ const TEST_NO_SUMMARY = { code: 0, lines: ['done'] }
 const TEST_NONE = { code: 0, lines: [' 0 pass', ' 0 fail', 'Ran 0 tests across 0 files. [0.01s]'] }
 const TEST_FAIL = {
   code: 1,
-  lines: ['(pass) one [1.00ms]', '(fail) a mode command calls the app\'s own tool [2.00ms]', '  AssertionError: expect(received).toEqual()', ' 1 pass', ' 1 fail', 'Ran 2 tests across 1 file. [0.10s]'],
+  lines: ['(pass) one [1.00ms]', '(fail) a prompt is submitted as the user\'s words [2.00ms]', '  AssertionError: expect(received).toEqual()', ' 1 pass', ' 1 fail', 'Ran 2 tests across 1 file. [0.10s]'],
 }
 
 const sh = (lines) => lines.map((l) => `echo '${l.replace(/'/g, "'\\''")}'`).join('\n')
-
-/**
- * What the engine's JavaScript says when it refuses a `$.mcp.call`, as 2.1.309's binary has it (check 6), and the
- * same words in another shape. The stand-in binary carries one of them in a comment.
- */
-const ENGINE_WORDS = Object.freeze({
-  template: 'throw new He(`${s.plugin}: $.mcp.call(${e}, ${n}) refused: ${q.deny}`)',
-  otherwise: 'throw new He(`${s.plugin}: $.mcp.call(${e} / ${n}) refused: ${q.deny}`)',
-  none: 'throw new He(`${s.plugin}: the call was denied: ${q.deny}`)',
-})
 
 /** The engine's JS check 6 looks for, as 2.1.317's has it, each in a file of its own. A test blanks or changes one. */
 const ENGINE_JS = Object.freeze({
@@ -130,15 +118,14 @@ function engineFiles({ js = {}, dts, mods = {}, files: more = {} } = {}) {
 /**
  * A stand-in for Claude Code's binary at `<root>/<version>/<hash>/claude.app/Contents/MacOS/claude`. It says what it was
  * given, refuses to go on with what it mustn't get (DECK_TOKEN, the real HOME, a config folder that isn't fresh, no
- * plugin), then answers as told. `sleep` makes validate hang, for the timeout. `engine` is which of ENGINE_WORDS its
- * comment carries. After its last line comes a Bun file table of `table` (engineFiles()), laid out with `tableOpts`
- * (bun-table.mjs), which the shell never reads, or nothing when `table` is null.
+ * plugin), then answers as told. `sleep` makes validate hang, for the timeout. After its last line comes a Bun file
+ * table of `table` (engineFiles()), laid out with `tableOpts` (bun-table.mjs), which the shell never reads, or nothing
+ * when `table` is null.
  */
-function fakeClaude(f, version, { validate = VALIDATE_OK, test: tests = TEST_OK, sleep = false, hash = 'abc123def456', engine = 'template', table = engineFiles(), tableOpts = {} } = {}) {
+function fakeClaude(f, version, { validate = VALIDATE_OK, test: tests = TEST_OK, sleep = false, hash = 'abc123def456', table = engineFiles(), tableOpts = {} } = {}) {
   const bin = path.join(f.claudeCodeRoot, version, hash, 'claude.app', 'Contents', 'MacOS', 'claude')
   fs.mkdirSync(path.dirname(bin), { recursive: true })
   fs.writeFileSync(bin, `#!/bin/sh
-# ${ENGINE_WORDS[engine]}
 echo "args: $1 $2"
 echo "plugin: $3"
 echo "home: $HOME"
@@ -544,10 +531,10 @@ test('recheck: a needed record field missing from every record fails, as do no r
 
 // ---- 4. the bundle
 
-test('recheck: the bundle is ok with every string, warns when only a corroborating one or a looser pattern is left, and fails when a route or the tool is gone', async (t) => {
+test('recheck: the bundle is ok with every string, warns when only a corroborating one or a looser pattern is left, and fails when one the deck or the mod needs is gone', async (t) => {
   const f = fixture(t)
   let rows = await R.checkBundle(f.asar)
-  assert.deepEqual(statuses(rows), { bundle: 'ok', 'bundle.jump': 'ok', 'bundle.needs-input': 'ok', 'bundle.local-id': 'ok', 'bundle.mode-tool': 'ok', 'bundle.summary-loader': 'ok', 'bundle.desktop-env': 'ok' })
+  assert.deepEqual(statuses(rows), { bundle: 'ok', 'bundle.jump': 'ok', 'bundle.needs-input': 'ok', 'bundle.local-id': 'ok', 'bundle.summary-loader': 'ok', 'bundle.desktop-env': 'ok' })
   assert.equal(byId(rows, 'bundle.desktop-env').reason, '?"claude-desktop-3p":"claude-desktop" ×1, .CLAUDE_CODE_HOST_SESSION_ID= ×1')
   assert.equal(byId(rows, 'bundle.jump').reason, 'claude://code/continue?session= ×1, "/continue" ×1')
   assert.equal(byId(rows, 'bundle.local-id').reason, '^local_[A-Za-z0-9-]{1,64}$ ×1')
@@ -568,8 +555,6 @@ test('recheck: the bundle is ok with every string, warns when only a corroborati
     [{ needsInputUrl: '', needsInputRoute: '' }, 'bundle.needs-input', 'warn', /^code\/needs-input not found; "\/needs-input" not found\. S5 found it/],
     [{ hostPattern: 'var lmr=/^local_[A-Za-z0-9_-]{1,128}$/;' }, 'bundle.local-id', 'warn', /^\^local_\[A-Za-z0-9-\]\{1,64\}\$ not found, though \^local_ is \(×1\), so it changed\. The app's route/],
     [{ hostPattern: 'var lmr=/^session_[a-z]+$/;' }, 'bundle.local-id', 'fail', /^\^local_\[A-Za-z0-9-\]\{1,64\}\$ not found\. The app's route ignores/],
-    [{ modeTool: 'CJi="set_session_mode"' }, 'bundle.mode-tool', 'fail', /^set_session_permission_mode not found \(found: ccd_session_mgmt ×1\)\. The Mode dial/],
-    [{ modeServer: '' }, 'bundle.mode-tool', 'fail', /^ccd_session_mgmt not found/],
     // The loader's list with a field more: the pair is still there, so it changed. Its check is looked for after the pair.
     [{ summaryFields: 'var wM=["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid","priority"];' }, 'bundle.summary-loader', 'warn', /^\["title",.*"summarizes_uuid"\] not found, though "status_category","status_detail" is \(×1\), so it changed \(found: is_noteworthy!="boolean" ×1 within 2048 bytes after the field list\)\. Status rule 6 reads/],
     // Its fields kept in another order, or gone: there's no list to look after.
@@ -622,7 +607,7 @@ test('recheck: check 5 runs the newest Claude Code\'s plugin validate and plugin
   let rows = await run()
   assert.deepEqual(statuses(rows), { 'mods.validate': 'ok', 'mods.test': 'ok' })
   assert.equal(byId(rows, 'mods.validate').reason, '2.1.309 passed on claude-code/plugin at HEAD: ./register.ts hooks 3 events and makes 2 $ calls')
-  assert.deepEqual(byId(rows, 'mods.validate').details.modules, [{ module: './register.ts', hooks: ['session.start', 'turn.complete', 'tool.call'], calls: ['$.http.fetch', '$.mcp.call'] }])
+  assert.deepEqual(byId(rows, 'mods.validate').details.modules, [{ module: './register.ts', hooks: ['session.start', 'turn.complete', 'tool.call'], calls: ['$.http.fetch', '$.prompt.submit'] }])
   assert.equal(byId(rows, 'mods.test').reason, '2.1.309: 2 pass, 0 fail, across 1 file, on claude-code/plugin at HEAD')
   assert.match(tailOf(byId(rows, 'mods.validate')), /^args: plugin validate$/m)
   assert.match(tailOf(byId(rows, 'mods.test')), /^args: plugin test$/m)
@@ -641,14 +626,14 @@ test('recheck: check 5 runs the newest Claude Code\'s plugin validate and plugin
   rows = await run()
   assert.deepEqual(statuses(rows), { 'mods.validate': 'fail', 'mods.test': 'fail' })
   assert.equal(byId(rows, 'mods.validate').reason, '2.1.309 failed (exit 1): modules../register.ts: broken: "session.bogus" is not an event')
-  assert.equal(byId(rows, 'mods.test').reason, "2.1.309 failed (exit 1): 1 of 2 failed; first: a mode command calls the app's own tool")
-  assert.deepEqual(byId(rows, 'mods.test').details.failed, ["a mode command calls the app's own tool"])
+  assert.equal(byId(rows, 'mods.test').reason, "2.1.309 failed (exit 1): 1 of 2 failed; first: a prompt is submitted as the user's words")
+  assert.deepEqual(byId(rows, 'mods.test').details.failed, ["a prompt is submitted as the user's words"])
 
   // A failure counted with exit 0 still fails, and a crash says what it printed.
   fakeClaude(f, '2.1.309', { test: { ...TEST_FAIL, code: 0 } })
   rows = await run()
   assert.equal(byId(rows, 'mods.test').status, 'fail')
-  assert.equal(byId(rows, 'mods.test').reason, "2.1.309 failed (exit 0): 1 of 2 failed; first: a mode command calls the app's own tool")
+  assert.equal(byId(rows, 'mods.test').reason, "2.1.309 failed (exit 0): 1 of 2 failed; first: a prompt is submitted as the user's words")
   fakeClaude(f, '2.1.309', { test: { code: 3, lines: ['error: the test runner crashed'] } })
   rows = await run()
   assert.equal(byId(rows, 'mods.test').status, 'fail')
@@ -712,49 +697,28 @@ test('recheck: check 5 fails without a version, a binary, a plugin at HEAD or in
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 
-// ---- 6. the engine's words
+// ---- 6. the engine
 
 /** Check 6's rows from the file table, as the default fake binary has it. */
 const TABLE_ROWS = { 'engine.registry-status': 'ok', 'engine.desktop-gate': 'ok' }
 
-test('recheck: check 6 finds the engine\'s words for a refused $.mcp.call in the newest bundled Claude Code: ok, warn when worded otherwise or gone, and fail with no binary', async (t) => {
-  // The older version keeps the words; only the newest is read.
+test('recheck: check 6 reads the newest bundled Claude Code\'s binary, and fails with no root or no binary that runs', async (t) => {
+  // Only the newest is read.
   const f = fixture(t, { cc: ['2.1.300', '2.1.309'] })
   const run = (claudeCodeRoot = f.claudeCodeRoot) => R.checkEngine({ claudeCodeRoot })
   let rows = await run()
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok', ...TABLE_ROWS })
+  assert.deepEqual(statuses(rows), { engine: 'ok', ...TABLE_ROWS })
   assert.match(byId(rows, 'engine').reason, /^Claude Code 2\.1\.309, 0\.0 MB$/)
-  assert.equal(byId(rows, 'engine.mcp-refused').reason, '$.mcp.call(<server>, <tool>) refused: <reason> ×1, as the mod reads it')
-  assert.deepEqual(byId(rows, 'engine.mcp-refused').details.sources, [
-    `claude-code/plugin/hooks/commands.ts:${lineOf('claude-code/plugin/hooks/commands.ts', 'const MODE_CALL_REFUSED = ')}`,
-    `claude-code/protocol/PROTOCOL.md:${lineOf('claude-code/protocol/PROTOCOL.md', '`$.mcp.call(<server>, <tool>) refused: <reason>` in 2.1.309')}`,
-  ])
+  assert.equal(byId(rows, 'engine').details.binary, path.join(f.claudeCodeRoot, '2.1.309', 'abc123def456', 'claude.app', 'Contents', 'MacOS', 'claude'))
 
-  fakeClaude(f, '2.1.309', { engine: 'otherwise' })
-  rows = await run()
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn', ...TABLE_ROWS })
-  assert.match(byId(rows, 'engine.mcp-refused').reason, /^\$\.mcp\.call\(<server>, <tool>\) refused: <reason> not found, though \$\.mcp\.call\(…\) refused: is \(×1\), so it changed\. The mod reports a mode change the engine refuses as refused/)
-  fakeClaude(f, '2.1.309', { engine: 'none' })
-  rows = await run()
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn', ...TABLE_ROWS })
-  assert.match(byId(rows, 'engine.mcp-refused').reason, /^\$\.mcp\.call\(<server>, <tool>\) refused: <reason> not found\. The mod reports/)
-
-  // No root, no version folder, no binary that runs: fail.
+  // No root, or no binary that runs: fail.
   assert.match((await run(path.join(f.root, 'nowhere')))[0].reason, /^can't list .*nowhere: ENOENT$/)
   const empty = path.join(f.root, 'empty-cc')
   fs.mkdirSync(path.join(empty, '2.1.309', 'abc', 'claude.app', 'Contents', 'MacOS'), { recursive: true })
-  fs.writeFileSync(path.join(empty, '2.1.309', 'abc', 'claude.app', 'Contents', 'MacOS', 'claude'), ENGINE_WORDS.template, { mode: 0o644 })
+  fs.writeFileSync(path.join(empty, '2.1.309', 'abc', 'claude.app', 'Contents', 'MacOS', 'claude'), 'not executable', { mode: 0o644 })
   rows = await run(empty)
   assert.deepEqual(statuses(rows), { engine: 'fail' })
   assert.match(rows[0].reason, /^no claude binary at .*2\.1\.309\/\*\/claude\.app\/Contents\/MacOS\/claude$/)
-
-  // What follows each $.mcp.call( decides, within the bytes the spec allows.
-  const spec = R.ENGINE_CHECKS[0]
-  const hits = (text) => R.engineHits(Buffer.from(text, 'latin1'), spec)
-  // The source's template; the compiled string table's pieces, as 2.1.309's binary has them too; another message.
-  assert.deepEqual(hits(`${ENGINE_WORDS.template}\n: $.mcp.call(\x00\x07\x01\x9f) refused: \n$.mcp.call (x): no tool`), { all: 2, template: 1, near: 1 })
-  assert.deepEqual(hits(`$.mcp.call(${'x'.repeat(130)}) refused: `), { all: 1, template: 0, near: 0 }, 'too far to be its words')
-  assert.deepEqual(hits('$.mcp.call(${a.b}, ${c$}) refused: ${d}'), { all: 1, template: 1, near: 0 })
 })
 
 test('recheck: check 6 finds in the engine\'s JS where it sets the registry\'s statuses and its own desktop test, each in the file it\'s in, and warns or fails as they change', async (t) => {
@@ -806,7 +770,7 @@ test('recheck: check 6 fails in one row, in place of the table\'s checks, when t
   for (const [opts, why] of [[{ table: null }, /no Bun file table: no trailer whose byte count and length agree/], [{ tableOpts: { entry: 56 } }, /isn't whole entries of 52 bytes/]]) {
     fakeClaude(f, '2.1.309', opts)
     const rows = await R.checkEngine({ claudeCodeRoot: f.claudeCodeRoot })
-    assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok', 'engine.table': 'fail' })
+    assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.table': 'fail' })
     assert.match(byId(rows, 'engine.table').reason, /^Claude Code 2\.1\.309's file table can't be read \(.*\), so its registry statuses and desktop gate can't be checked$/)
     assert.match(byId(rows, 'engine.table').reason, why)
   }
@@ -819,7 +783,7 @@ test('recheck: check 6 fails in one row, in place of the table\'s checks, when t
   // A table with no file it searches warns in their place.
   fakeClaude(f, '2.1.309', { table: { 'a.js.zst': 'x', 'b.node': ENGINE_JS.desktop, 'c.asset': ENGINE_JS.registry } })
   rows = await R.checkEngine({ claudeCodeRoot: f.claudeCodeRoot })
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok', 'engine.js': 'warn' })
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.js': 'warn' })
   assert.equal(byId(rows, 'engine.js').reason, "Claude Code 2.1.309's file table has no file to search but packed ones (.zst), native addons (.node) and assets (.asset), so its registry statuses and desktop gate can't be checked")
 })
 
@@ -1017,14 +981,14 @@ test('recheck: the command prints a table or JSON, exits 0 when nothing fails an
   assert.match(r.out, /^ok\s+bundle: jump route\s+/m)
   assert.doesNotMatch(r.out, /mods API:/)
   assert.match(r.out, /^ok\s+bundle: summary loader\s+/m)
-  assert.match(r.out, /^ok\s+engine: refused \$\.mcp\.call\s+\$\.mcp\.call\(<server>, <tool>\) refused: <reason> ×1, as the mod reads it$/m)
-  assert.match(r.out, /\n\n39 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
+  assert.match(r.out, /^ok\s+engine: registry statuses\s+/m)
+  assert.match(r.out, /\n\n37 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
 
   r = await cli([...flags(f), '--skip-plugin', '--json'], { env: { HOME: f.root } })
   assert.equal(r.code, 0)
   const j = JSON.parse(r.out)
   assert.equal(j.ok, true)
-  assert.deepEqual(j.summary, { ok: 39, warn: 0, fail: 0 })
+  assert.deepEqual(j.summary, { ok: 37, warn: 0, fail: 0 })
   assert.deepEqual(j.skipped, ['mods'])
   assert.equal(j.paths.sessions, '~/sessions', 'paths under HOME read ~')
   assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle', 'engine', 'seen', 'vendor'])
@@ -1070,7 +1034,7 @@ test('recheck: the command runs check 5 too, keeps DECK_TOKEN from Claude Code a
   r = await cli([...flags(f), '--repo', repo], { env: { HOME: f.root, TMPDIR: f.tmp } })
   assert.equal(r.code, 1)
   assert.match(r.out, /^fail\s+mods API: plugin test\s+2\.1\.309 failed \(exit 1\): 1 of 2 failed/m)
-  assert.match(r.out, /\n40 ok, 0 warn, 1 fail\n$/)
+  assert.match(r.out, /\n38 ok, 0 warn, 1 fail\n$/)
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 
@@ -1097,31 +1061,16 @@ test('recheck: its field lists and strings are the deck\'s and the mod\'s own, s
   }
   assert.ok(read('claude-code/deck/src/registry/registry.ts').includes('return name.endsWith(".json") && !name.startsWith(".");'), 'isSessionFile')
 
-  // The id pattern, the jump route, the mode tool, the mode names and the statuses.
+  // The id pattern, the jump route, the mode names and the statuses.
   const wire = read('claude-code/deck/src/protocol/wire.ts')
   assert.equal(/export const HOST_PATTERN = \/(.+)\/;/.exec(wire)?.[1], R.HOST_PATTERN.source)
   assert.equal(byId(R.BUNDLE_CHECKS, 'local-id').needles[0].text, R.HOST_PATTERN.source)
-  const modeTool = /export const MODE_TOOL = "([^"]+)";/.exec(wire)?.[1]
-  assert.equal(modeTool, 'mcp__ccd_session_mgmt__set_session_permission_mode')
-  for (const n of byId(R.BUNDLE_CHECKS, 'mode-tool').needles) assert.ok(modeTool.includes(n.text), n.text)
   assert.ok(read('claude-code/deck/src/plugin.ts').includes('`claude://code/continue?session=${encodeURIComponent(host)}`'))
   assert.equal(byId(R.BUNDLE_CHECKS, 'jump').needles[0].text, 'claude://code/continue?session=')
   const modeNames = /const MODE_NAMES: Record<string, string> = \{([^}]*)\}/.exec(read('claude-code/deck/src/model/format.ts'))?.[1] ?? ''
   assert.deepEqual([...modeNames.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]), [...R.MODE_NAMES])
   const status = read('claude-code/deck/src/model/status.ts')
   for (const s of R.REGISTRY_STATUSES) assert.ok(status.includes(`i.registry === "${s}"`), s)
-
-  // The mod's call, as committed (check 5 runs HEAD's plugin).
-  const register = execFileSync('git', ['-C', REPO, 'show', 'HEAD:claude-code/plugin/hooks/register.ts'], { encoding: 'utf8' })
-  assert.match(register, /\$\.mcp\.call\('ccd_session_mgmt', 'set_session_permission_mode', \{ session_id: 'self', mode \}\)/)
-
-  // The engine's words the mod reads from a refusal of that call (refusalOf, as committed): check 6's shape, with the
-  // server and the tool register.ts names.
-  const commands = execFileSync('git', ['-C', REPO, 'show', 'HEAD:claude-code/plugin/hooks/commands.ts'], { encoding: 'utf8' })
-  const words = /const MODE_CALL_REFUSED = '([^']+)'/.exec(commands)?.[1]
-  const spec = byId(R.ENGINE_CHECKS, 'mcp-refused')
-  assert.equal(words, `${spec.text}ccd_session_mgmt, set_session_permission_mode${spec.refused}`)
-  assert.match(ENGINE_WORDS.template.slice(ENGINE_WORDS.template.indexOf(spec.text)), spec.template, 'the stand-in carries the shape check 6 looks for')
 
   // The summary loader's fields: the list check 4 looks for in the bundle, and the one the fake deck's rule 6 reads. Its
   // is_noteworthy check is looked for after that list, or after the list's own looser pair.

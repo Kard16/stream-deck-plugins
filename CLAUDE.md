@@ -107,15 +107,15 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 
 **Mods API**
 - The reference is `claude-code/vendor/mods-api/`. Its version is on the first line of `claude-code.d.ts`, which declares every event and every call on `$`, with examples (grep it). `reference.md` covers loading, testing and failures. It's early access and changes between releases.
-- **After a Claude app update,** `node claude-code/vendor/refresh.mjs` rebuilds the reference from the newest bundled binary, without loading the skill. Then run the plugin's type check and `recheck.mjs`. recheck warns until the reference matches the newest bundled version, and `deck-install.mjs release` validates with the newest on its own.
+- **After a Claude app update,** `node claude-code/vendor/refresh.mjs` rebuilds the reference from the newest bundled binary, without loading the skill. The whole routine is under Commands, "After a Claude app update". recheck warns until the reference matches the newest bundled version, and `deck-install.mjs release` validates with the newest on its own.
 - A mod has no Node and no DOM. It reaches everything through `$`: `$.http.fetch`, `$.clock`, `$.process`, `$.env`, `$.session`, `$.prompt`.
 - Don't load the plugin-authoring skill: it arms the session's mods folder. Read the vendored copy instead.
 
 **The bridge protocol** is `claude-code/protocol/PROTOCOL.md`, frozen with its fixtures. Changes go through the main thread, and fixtures are edited in `make-fixtures.mjs`, never by hand.
 
 **Hooks**
-- Two `http` hooks: PermissionRequest for approvals, and PreToolUse matched to the app's mode tool alone, for the deck's own mode changes. Status comes from the mod.
-- Never give either hook `onFailure: "block"`: with the bridge down, the permission hook would deny every tool call.
+- One `http` hook, PermissionRequest, for approvals. Status comes from the mod. The PreToolUse mode hook went with mode changes, 2026-11-06.
+- Never give the hook `onFailure: "block"`: with the bridge down, it would deny every tool call.
 - A session reads `hooks.json` when it starts. A hot reload doesn't add a new hook.
 - PermissionRequest ignores exit code 2; answer with JSON.
 
@@ -146,7 +146,7 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `npx streamdeck validate com.karimdhanji.lightroom.sdPlugin`
 - The plugin is linked, and Stream Deck's developer mode is on (`npx streamdeck dev`). A linked plugin doesn't start without developer mode.
 
-**Claude Code plugin** (from the repo root; `CC` is the newest bundled binary, `$HOME/Library/Application Support/Claude/claude-code/2.1.317/91184d3d9ba3/claude.app/Contents/MacOS/claude` since 2026-11-03; `recheck.mjs --json` names it in `details.binary` after an update)
+**Claude Code plugin** (from the repo root; `CC` is the newest bundled binary: `CC="$(ls -d "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude | sort -V | tail -1)"`, 2.1.317 since 2026-11-03)
 - Run every `claude` or `"$CC"` command with `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`: the install puts both in this session's environment, and they would load the release copy too.
 - `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`
 - `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`. Put `perl -e 'alarm 180; exec @ARGV'` before `"$CC"` for `plugin test`: the test kit has no time limit of its own, and a mod that retries at once can hang it.
@@ -164,7 +164,14 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `deck-install.mjs setup` is for another Mac, from a fresh clone. It refuses here while the deck or the plugin has uncommitted changes, and the commands above are the ones for this Mac. `setup --dry-run` runs only its preflight.
 - `node --test claude-code/install/test/`
 
-**After a Claude app update:** `node claude-code/tools/recheck.mjs` re-checks the app internals the deck and the plugin rely on.
+**After a Claude app update** (Phase 8's routine, D1), in this order:
+1. `node claude-code/vendor/refresh.mjs`: the vendored mods API, from the newest bundled Claude Code.
+2. The plugin's type check, above. It includes `plugin-tsc/hook-contract.ts`, which holds the deck's answers to the engine's types.
+3. `node claude-code/tools/recheck.mjs`: the app internals the deck and the plugin rely on. Read each warn; a fail stops the routine.
+4. `plugin validate` and `plugin test` with the new `CC`.
+5. The smoke test, `docs/claude-code/smoke-test.md`, in a throwaway session.
+
+Then commit the refreshed reference, and run `deck-install.mjs release` if the plugin changed.
 
 **Claude tools and protocol** (from the repo root)
 - `node --test claude-code/tools/test/`

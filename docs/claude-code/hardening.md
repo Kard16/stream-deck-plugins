@@ -114,7 +114,7 @@ Each of these is small alone. Fix what the baseline shows matters, and say what 
 - A question, a plan into Manual, and an approval, each on the dial. Proof: `ANSWER #n … from its session's dial`.
 - An approval on the Approve key.
 - A Saved Prompt.
-- A mode change to Accept edits and back up to Auto.
+- ~~A mode change to Accept edits and back up to Auto.~~ Gone with mode changes, Phase 8 (2026-11-06).
 - A jump from a slot key and from Others. Proof: `Jump: opened … in N ms`.
 - Seen, a long press, and a swap between two slots, which wasn't tried live in Phase 7.
 
@@ -126,7 +126,7 @@ A small read-only script that checks the log for those lines after the run would
 - an accepted risk, written down.
 
 Candidates for recheck:
-- the full mode tool name, `mcp__ccd_session_mgmt__set_session_permission_mode`;
+- ~~the full mode tool name, `mcp__ccd_session_mgmt__set_session_permission_mode`;~~ Gone with mode changes, Phase 8 (2026-11-06).
 - the hook input's field names;
 - the engine's rule that AskUserQuestion and ExitPlanMode take an answer only with `updatedInput`;
 - `lsappinfo`'s output format and the app's bundle id;
@@ -209,12 +209,12 @@ Split `model/sessions.ts` only if a change in this phase needs it. Don't refacto
 | The app's records, `claude-code-sessions/<account>/<org>/<host>.json`: `title`, `isArchived`, `lastFocusedAt`, `lastActivityAt`, `cwd`, `model`, `effort`, `permissionMode`, `postTurnSummary`, `turnWrapUp` | titles, archived, seen, needs-you, records for slots whose session isn't running (`deck/src/records/records.ts`) | recheck check 3, plus the app loader's field list and `is_noteworthy` in app.asar. Not checked: the category and wrap-up rules (`records.ts:54-127`) |
 | The jump, `claude://code/continue?session=<host>`, through `/usr/bin/open` | every jump (`deck/src/plugin.ts:70-78`) | recheck check 4, as strings in app.asar. Not checked: that it focuses the window and starts a stopped session |
 | The `local_` host id pattern | the hooks' `X-Deck-Host`, and the mod's gate | recheck check 4, as a string |
-| The app's mode tool, `mcp__ccd_session_mgmt__set_session_permission_mode`, with `session_id: "self"` | mode commands, and the mode hook's matcher | recheck check 4 finds `ccd_session_mgmt` and `set_session_permission_mode` apart. Not checked: the full name, `"self"`, the modes it takes |
-| The engine's words for a refused `$.mcp.call` | the mode command's refused state | recheck check 6, a warn only |
+| The app's mode tool, `mcp__ccd_session_mgmt__set_session_permission_mode`, with `session_id: "self"` | mode commands, and the mode hook's matcher | recheck check 4 finds `ccd_session_mgmt` and `set_session_permission_mode` apart. Not checked: the full name, `"self"`, the modes it takes. Gone with mode changes, Phase 8 (2026-11-06). |
+| The engine's words for a refused `$.mcp.call` | the mode command's refused state | recheck check 6, a warn only. Gone with mode changes, Phase 8 (2026-11-06). |
 | The mods API: the events, `$` calls and event fields the mod uses (`plugin/hooks/register.ts:27-51`) | the mod | the plugin's `tsc` against `vendor/mods-api/`; recheck check 5 runs `plugin validate` and `plugin test` on the newest binary, against fixtures and a fake `$`, not the live engine |
 | The HTTP hooks: `type: http`, `$VAR` headers through `allowedEnvVars`, the timeout, and the PermissionRequest and PreToolUse bodies (`session_id`, `tool_name`, `tool_input`, `permission_mode`, `effort.level`) | approvals and the mode hook (`deck/src/protocol/wire.ts:148-174`) | `plugin validate` reads hooks.json. Not checked: the input fields, or the output shapes (`wire.ts:25-97`) |
 | Engine rules found by reading the binary (2026-11-04):<br>- a hook and the app's dialog race;<br>- answering in the app leaves the hook's request open;<br>- a failed connection is no decision;<br>- Deny with `interrupt` stops the turn;<br>- AskUserQuestion and ExitPlanMode take an Allow only with `updatedInput`;<br>- a failing `updatedInput` becomes a deny;<br>- the hook's win cancels the app's card;<br>- `setMode` with destination `session` | approvals, and every dial answer | not checked by recheck; the Phase 7 live test checked them. C2 and C3 |
-| A PreToolUse allow skips the auto-mode classifier for the mode tool, and a raise then brings a PermissionRequest | mode changes out of Auto | not checked; Phase 4's live test |
+| A PreToolUse allow skips the auto-mode classifier for the mode tool, and a raise then brings a PermissionRequest | mode changes out of Auto | not checked; Phase 4's live test. Gone with mode changes, Phase 8 (2026-11-06). |
 | Hooks are read only at session start; the engine re-runs the mod after the hooks worker is lost (`vendor/mods-api/reference.md`) | releases, and the mod's restarts | not checked |
 | The desktop environment: `CLAUDE_CODE_ENTRYPOINT` (`claude-desktop`, `claude-desktop-3p`), `CLAUDE_CODE_HOST_SESSION_ID`, `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TAGS` (`plugin/hooks/desktop.ts:19-35`) | the mod's desktop gate | not checked |
 | Settings `env` with `CLAUDE_CODE_PLUGIN_DIRS` and `DECK_TOKEN`, applied at session start, with the launch environment winning key by key | loading the plugin in the user's sessions | `deck-install.mjs status`, the values only |

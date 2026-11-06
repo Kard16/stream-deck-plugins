@@ -38,7 +38,7 @@ type Dial = {
  * The Sessions dial, without the SDK. Each placed dial scrolls the running sessions on its own strip, one
  * session per tick, stopping at either end, and follows its session by the app's `local_…` id while the list
  * changes. Press (without turning) and tap jump to the session in the app through the `open` callback and
- * make it the target for prompts and mode. Long-touch only logs.
+ * make it the target for prompts. Long-touch only logs.
  */
 export class SessionsDials {
 	readonly #model: SessionsModel;

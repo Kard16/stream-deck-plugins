@@ -2,9 +2,9 @@
 	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 	"UUID": "com.karimdhanji.claude",
 	"Name": "Claude Code",
-	"Version": "0.4.0.0",
+	"Version": "0.5.0.0",
 	"Author": "Karim Dhanji",
-	"Description": "Live status for Claude Code desktop sessions, with a key and a dial for each session, answers to questions, plans and approvals, saved prompts and mode changes.",
+	"Description": "Live status for Claude Code desktop sessions, with a key and a dial for each session, answers to questions, plans and approvals, and saved prompts.",
 	"Category": "Claude Code",
 	"CategoryIcon": "imgs/plugin/category-icon",
 	"Icon": "imgs/plugin/icon",
@@ -45,31 +45,6 @@
 					"Push": "Jump and target",
 					"Touch": "Jump and target",
 					"LongTouch": "Nothing"
-				}
-			}
-		},
-		{
-			"UUID": "com.karimdhanji.claude.mode",
-			"Name": "Mode",
-			"Tooltip": "The target session's mode, model and effort. Turn to choose Manual, Accept edits, Plan or Auto; press or tap to apply it.",
-			"Icon": "imgs/actions/mode/icon",
-			"Controllers": [
-				"Encoder"
-			],
-			"UserTitleEnabled": false,
-			"States": [
-				{
-					"Image": "imgs/actions/mode/key"
-				}
-			],
-			"Encoder": {
-				"layout": "layouts/mode.json",
-				"Icon": "imgs/actions/mode/encoder",
-				"TriggerDescription": {
-					"Rotate": "Choose a mode",
-					"Push": "Apply to the target",
-					"Touch": "Apply to the target",
-					"LongTouch": "Cancel the choice"
 				}
 			}
 		},
@@ -119,23 +94,6 @@
 			"States": [
 				{
 					"Image": "imgs/actions/prompt/key"
-				}
-			]
-		},
-		{
-			"UUID": "com.karimdhanji.claude.set-mode",
-			"Name": "Mode Key",
-			"Tooltip": "Changes the target session to the mode set in the key's settings.",
-			"Icon": "imgs/actions/mode-key/icon",
-			"Controllers": [
-				"Keypad"
-			],
-			"PropertyInspectorPath": "pi/mode.html",
-			"SupportedInMultiActions": false,
-			"UserTitleEnabled": false,
-			"States": [
-				{
-					"Image": "imgs/actions/mode-key/key"
 				}
 			]
 		},

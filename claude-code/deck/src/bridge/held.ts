@@ -11,8 +11,8 @@ export interface Responder {
 
 /**
  * `tool`: Approve and Deny answer it, and so does its session's Session Slot dial. `ask` (AskUserQuestion,
- * ExitPlanMode): the keys show it and a press on them jumps to its session; only its session's dial answers it. The
- * third kind, `mode`, is allowed at once and never held (PROTOCOL.md, Permission requests).
+ * ExitPlanMode): the keys show it and a press on them jumps to its session; only its session's dial answers it
+ * (PROTOCOL.md, Permission requests).
  */
 export type HeldKind = "tool" | "ask";
 

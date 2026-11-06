@@ -6,11 +6,11 @@ import path from "node:path";
 import { describe, test } from "node:test";
 
 import { type BridgeRoutes, BridgeServer, type RouteAnswer } from "../src/bridge/server.js";
-import { ModeKeys, PromptKeys } from "../src/keys/commands.js";
+import { PromptKeys } from "../src/keys/commands.js";
 import { DecisionKeys } from "../src/keys/decision.js";
 import type { SessionModel } from "../src/model/sessions.js";
 import { connectSources } from "../src/model/sources.js";
-import { ALLOW_DECISION, answerDecision, approvePlanDecision, DENY_DECISION, PRETOOL_ALLOW } from "../src/protocol/wire.js";
+import { ALLOW_DECISION, answerDecision, approvePlanDecision, DENY_DECISION } from "../src/protocol/wire.js";
 import { APPROVAL_CHOICES, PLAN_CHOICES, SlotDials, type SlotScreen } from "../src/slots/dials.js";
 import { dialSlotId, type SlotId } from "../src/slots/ids.js";
 import { Slots } from "../src/slots/slots.js";
@@ -28,9 +28,8 @@ import { RecordingLog } from "./helpers/recording-log.js";
  *   is the right token, `null` leaves a header out), and `*` values sent as they are. The runner waits for
  *   each answer, up to 2 s, except for `/v1/permission` and `/v1/next`, which may be held: for those it waits,
  *   as long, until the bridge has taken the request (held or answered, after any second reading of the
- *   registry), and a later `reply` line checks the answer, waiting up to 2 s. A mode check (`/v1/pretool`) is
- *   answered at once, so the runner waits for it like any other. An answer that doesn't come in time fails the
- *   fixture, so nothing the bridge holds by mistake can hold up the run.
+ *   registry), and a later `reply` line checks the answer, waiting up to 2 s. An answer that doesn't come in time
+ *   fails the fixture, so nothing the bridge holds by mistake can hold up the run.
  * - `press` lines go through the keys' own logic classes, with no settle time on Approve and Deny, `registry`
  *   lines to the fake folder, after which the watcher scans; a line for a file that's gone writes it anew, with
  *   its pid and the line's fields. `expect` lines are retried for up to 1 s.
@@ -44,9 +43,8 @@ import { RecordingLog } from "./helpers/recording-log.js";
  * - The model and the folders are wired as the plugin wires them (connectSources), so the model reads the fake
  *   folder again through the same watcher when a hook's request or a hello isn't confirmed by its latest reading.
  * - Command ids: the deck's real id is bound to the fixture's name at its first appearance in a `reply`.
- * - A 2xx from a hook's route must be exactly one of the bodies the route allows, whatever its `reply` line
- *   expects, and when no `reply` line names the request: Allow, Deny or `{}` from `/v1/permission`, the allow or
- *   `{}` from `/v1/pretool`. An expected `{}` means no decision (replyMismatches).
+ * - A 2xx from `/v1/permission` must be exactly one of the bodies the route allows, whatever its `reply` line
+ *   expects: Allow, Deny, `{}`, an Answer or an Approve plan. An expected `{}` means no decision (replyMismatches).
  * - At the end, a held request or poll that no `reply` line checked must still be open.
  *
  * The deck's wall clock follows the fixture: it starts at the setup's `statusUpdatedAt` and moves to each
@@ -111,11 +109,9 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 	const approve = new DecisionKeys(model, "allow", { paintIntervalMs: 0, settleMs: 0, open });
 	const deny = new DecisionKeys(model, "deny", { paintIntervalMs: 0, settleMs: 0, open });
 	const prompts = new PromptKeys(model, { paintIntervalMs: 0 });
-	const modes = new ModeKeys(model, { paintIntervalMs: 0 });
 	approve.add("approve", surface);
 	deny.add("deny", surface);
 	prompts.add("prompt", surface, {});
-	modes.add("mode", surface, {});
 	// The Session Slot dials, one per column of a Stream Deck +'s bottom row (2 rows of 4), filling as the deck's do.
 	const slots = new Slots(model, { store: new MemorySlotStore(), fillDelayMs: 0 });
 	const dials = new SlotDials(slots, model, { render: (screen: SlotScreen) => ({ layout: screen.kind, feedback: { screen: screen.kind } }), clock: new FakeClock(), paintIntervalMs: 0, settleMs: 0, pickSettleMs: 0, coalesceMs: 0, open });
@@ -211,10 +207,6 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 					// The fixture names the target: the session picked on the Sessions dial.
 					model.pick(session);
 					press(() => prompts.press("prompt", { text }));
-				} else if ("mode" in what) {
-					const { session, mode } = what.mode as { session: string; mode: string };
-					model.pick(session);
-					press(() => modes.press("mode", { mode }));
 				} else if ("dial" in what) {
 					press(() => playDial(what.dial as Obj, where(n)));
 				} else assert.fail(`${where(n)}: unknown press ${JSON.stringify(what)}`);
@@ -265,7 +257,6 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 		approve.remove("approve");
 		deny.remove("deny");
 		prompts.remove("prompt");
-		modes.remove("mode");
 		for (const id of dialIds) dials.remove(id);
 		model.dispose();
 		rmSync(root, { recursive: true, force: true });
@@ -404,8 +395,8 @@ async function play(fixture: Fixture, opts: PlayOptions = {}): Promise<void> {
 describe("fixtures, deck side (claude-code/protocol/fixtures/*.jsonl)", () => {
 	const fixtures = loadFixtures();
 
-	test("all 26 fixtures are here", () => {
-		assert.equal(fixtures.length, 26, fixtures.map((f) => f.name).join(", "));
+	test("all 23 fixtures are here", () => {
+		assert.equal(fixtures.length, 23, fixtures.map((f) => f.name).join(", "));
 	});
 
 	for (const fixture of fixtures) {
@@ -426,7 +417,6 @@ describe("the runner itself", () => {
 		(mine: Partial<BridgeRoutes>) =>
 		(model: SessionModel): BridgeRoutes => ({
 			permission: (body, host, reply, inputScrubbed) => model.permission(body, host, reply, inputScrubbed),
-			pretool: (body, host, reply) => model.pretool(body, host, reply),
 			hello: (body) => model.hello(body),
 			events: (body) => model.events(body),
 			next: (query, reply) => model.next(query, reply),
@@ -434,41 +424,18 @@ describe("the runner itself", () => {
 			...mine,
 		});
 
-	test("an answer that never comes fails the fixture in time, instead of holding up the run: a mode check's, a hello's", async () => {
-		const raise = fixture("mode-raise.jsonl");
-		// As with a mutation that held /v1/pretool in the last review, which npm test then waited on for good.
+	test("an answer that never comes fails the fixture in time, instead of holding up the run: a hello's", async () => {
 		const started = Date.now();
-		await assert.rejects(play(raise, { routes: replacing({ pretool: () => undefined }), replyMs: 300 }), /mode-raise\.jsonl:10: POST \/v1\/pretool got no answer within 300 ms/);
-		await assert.rejects(play(raise, { routes: replacing({ hello: () => new Promise<RouteAnswer>(() => {}) }), replyMs: 300 }), /mode-raise\.jsonl:4: POST \/v1\/hello got no answer within 300 ms/);
+		await assert.rejects(play(fixture("hello.jsonl"), { routes: replacing({ hello: () => new Promise<RouteAnswer>(() => {}) }), replyMs: 300 }), /hello\.jsonl:4: POST \/v1\/hello got no answer within 300 ms/);
 		assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
 	});
 
-	test("a mode check's 2xx is held to its two bodies even when no reply line names the request", async () => {
-		const raise = fixture("mode-raise.jsonl");
-		const unreplied: Fixture = { ...raise, lines: raise.lines.filter((l) => !("reply" in l && l.reply.to === "q1")) };
-		assert.equal(unreplied.lines.length, raise.lines.length - 1);
-		// The deck's own answer, the allow, passes.
-		await play(unreplied);
-		// An allow with a field Claude Code would act on, or a PermissionRequest's allow, doesn't.
-		const widened = { hookSpecificOutput: { ...PRETOOL_ALLOW.hookSpecificOutput, updatedInput: { session_id: "self", mode: "bypassPermissions" } } };
-		for (const body of [widened, ALLOW_DECISION]) {
-			const pretool: BridgeRoutes["pretool"] = (_body, _host, reply) => reply.send(200, JSON.stringify(body));
-			await assert.rejects(play(unreplied, { routes: replacing({ pretool }) }), /expected exactly the mode check's allow or \{\}/, JSON.stringify(body));
-		}
-	});
-
 	test("an answer no reply line checks must be 200 or 204, and one of its route's bodies if it's a hook's", () => {
-		assert.deepEqual(unrepliedMismatches("/v1/pretool", 200, JSON.stringify(PRETOOL_ALLOW)), []);
-		assert.deepEqual(unrepliedMismatches("/v1/pretool", 200, "{}"), []);
 		assert.deepEqual(unrepliedMismatches("/v1/permission", 200, JSON.stringify(DENY_DECISION)), []);
 		assert.deepEqual(unrepliedMismatches("/v1/hello", 200, '{"v":1,"ok":true}'), []);
 		assert.deepEqual(unrepliedMismatches("/v1/events", 204, ""), []);
 		for (const [route, status, body] of [
-			["/v1/pretool", 200, JSON.stringify(ALLOW_DECISION)],
-			["/v1/pretool", 200, JSON.stringify({ hookSpecificOutput: { ...PRETOOL_ALLOW.hookSpecificOutput, permissionDecision: "ask" } })],
-			["/v1/pretool", 204, ""],
-			["/v1/pretool", 200, "not json"],
-			["/v1/permission", 200, JSON.stringify(PRETOOL_ALLOW)],
+			["/v1/permission", 200, JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", interrupt: true } } })],
 			["/v1/events", 400, '{"error":"Bad Request"}'],
 			["/v1/next", 409, '{"error":"hello first"}'],
 		] as const) {
@@ -479,7 +446,6 @@ describe("the runner itself", () => {
 
 describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
 	const PERMISSION = "/v1/permission";
-	const PRETOOL = "/v1/pretool";
 	/** A body as the runner gets it: parsed from the wire. */
 	const wire = (body: unknown): unknown => JSON.parse(JSON.stringify(body));
 	const allow = wire(ALLOW_DECISION);
@@ -506,30 +472,6 @@ describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
 		for (const want of [deny, someDeny, undefined]) assert.notDeepEqual(replyMismatches(PERMISSION, 200, want, bare), [], JSON.stringify(want));
 	});
 
-	test("a 2xx from /v1/pretool is exactly the mode check's allow or {}, whatever the line expects; an expected {} is no decision", () => {
-		const allowCheck = wire(PRETOOL_ALLOW) as Obj;
-		assert.deepEqual(replyMismatches(PRETOOL, 200, allowCheck, wire(PRETOOL_ALLOW)), []);
-		assert.deepEqual(replyMismatches(PRETOOL, 200, {}, {}), []);
-		// The allow where the line expects {}: by the general rule, {} matches anything.
-		assert.notDeepEqual(replyMismatches(PRETOOL, 200, {}, allowCheck), []);
-		// A PermissionRequest's answers aren't a mode check's, even where the line expects only some decision.
-		for (const got of [allow, deny]) {
-			assert.notDeepEqual(replyMismatches(PRETOOL, 200, undefined, got), [], JSON.stringify(got));
-			assert.notDeepEqual(replyMismatches(PRETOOL, 200, { hookSpecificOutput: {} }, got), [], JSON.stringify(got));
-		}
-		// Nor are a mode check's a PermissionRequest's.
-		assert.notDeepEqual(replyMismatches(PERMISSION, 200, undefined, allowCheck), []);
-		// A deny, an ask, extra fields, or another reason, where the line expects the allow or no body at all.
-		const output = (fields: Obj): Obj => ({ hookSpecificOutput: { ...PRETOOL_ALLOW.hookSpecificOutput, ...fields } });
-		const odd = [output({ permissionDecision: "deny" }), output({ permissionDecision: "ask" }), output({ updatedInput: { mode: "bypassPermissions" } }), output({ permissionDecisionReason: "Allowed." }), { ...allowCheck, systemMessage: "hi" }];
-		for (const got of odd) assert.notDeepEqual(replyMismatches(PRETOOL, 200, undefined, got), [], JSON.stringify(got));
-		assert.deepEqual(mismatches(allowCheck, output({ updatedInput: {} })), [], "the general rule lets the extra field through");
-		assert.notDeepEqual(replyMismatches(PRETOOL, 200, allowCheck, output({ updatedInput: {} })), [], "the strict one doesn't");
-		// Any other status carries {"error"}.
-		assert.deepEqual(replyMismatches(PRETOOL, 401, undefined, { error: "Unauthorized" }), []);
-		assert.notDeepEqual(replyMismatches(PRETOOL, 401, undefined, {}), []);
-	});
-
 	test("an Answer and an Approve plan are /v1/permission bodies by their shape, and one the line expects must be equal exactly, updatedInput included", () => {
 		const input = { questions: [{ question: "Red or blue?", header: "Color", options: [{ label: "Red" }, { label: "Blue" }], multiSelect: false }] };
 		const answer = wire(answerDecision(input, { "Red or blue?": "Blue" }));
@@ -542,8 +484,6 @@ describe("the runner's reply checks (PROTOCOL.md, Matching)", () => {
 			// Where the line expects a plain Allow, the general rule would let updatedInput through; the strict one doesn't.
 			assert.deepEqual(mismatches(allow, body), []);
 			assert.notDeepEqual(replyMismatches(PERMISSION, 200, allow, body), [], JSON.stringify(body));
-			// Nor are they a mode check's.
-			assert.notDeepEqual(replyMismatches(PRETOOL, 200, undefined, body), [], JSON.stringify(body));
 		}
 		// Another answer, or another mode, where the line expects these.
 		assert.notDeepEqual(replyMismatches(PERMISSION, 200, answer, wire(answerDecision(input, { "Red or blue?": "Red" }))), []);

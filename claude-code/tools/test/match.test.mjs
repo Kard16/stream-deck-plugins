@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { Bindings, commandIdHook, exactMismatch, expectMismatch, matches, mismatch, pathMismatch } from '../lib/match.mjs'
 import { hookAnswerMismatch, permissionAnswerMismatch, replyMismatch } from '../lib/play.mjs'
-import { ALLOW, DENY, PRE_ALLOW, answerBody, approvePlanBody } from '../lib/protocol.mjs'
+import { ALLOW, DENY, answerBody, approvePlanBody } from '../lib/protocol.mjs'
 
 test('match: every expected field must be there and equal; extra fields are fine', () => {
   assert.ok(matches({ a: 1, b: { c: 'x' } }, { a: 1, b: { c: 'x', d: 2 }, e: 3 }))
@@ -243,47 +243,12 @@ test('match: an answer to a permission request has nothing beyond its body, at t
     assert.match(replyMismatch('/v1/permission', expected, actual, b, status) ?? 'no mismatch', why)
   }
   assert.match(permissionAnswerMismatch({ note: 'x' }), /^body\.note: not in any of PROTOCOL\.md's answers/)
+  // Another hook's answer, a PreToolUse's, is none of the five.
+  assert.match(permissionAnswerMismatch({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } }), /^body\.hookSpecificOutput\.hookEventName: expected "PermissionRequest", got "PreToolUse"/)
   // Elsewhere the general rule stands: a field added later is fine.
   assert.equal(replyMismatch('/v1/hello', { v: 1, ok: true }, { v: 1, ok: true, note: 'x' }, b), null)
-})
-
-test("match: an answer to a mode check is PROTOCOL.md's allow or {}, exactly, whatever the reply line expects", () => {
-  const b = new Bindings()
-  const route = '/v1/pretool'
-  const inside = (extra) => ({ hookSpecificOutput: { ...PRE_ALLOW.hookSpecificOutput, ...extra } })
-  assert.equal(replyMismatch(route, PRE_ALLOW, PRE_ALLOW, b), null)
-  assert.equal(replyMismatch(route, {}, {}, b), null)
-  assert.equal(replyMismatch(route, undefined, PRE_ALLOW, b), null)
-  // An expected {} is no decision: the allow fails it, though by the general rule {} matches anything.
-  assert.match(replyMismatch(route, {}, PRE_ALLOW, b), /^body: expected no decision \(\{\}\), got /)
-  const cases = [
-    // A PermissionRequest's Allow is no mode check's answer.
-    [PRE_ALLOW, ALLOW, 200, /^body\.hookSpecificOutput\.hookEventName: expected "PreToolUse", got "PermissionRequest" \(the bridge never denies or asks in a mode check, and its allow is exactly as PROTOCOL\.md writes it\)$/],
-    // The bridge never denies or asks here.
-    [undefined, inside({ permissionDecision: 'deny' }), 200, /^body\.hookSpecificOutput\.permissionDecision: expected "allow", got "deny"/],
-    [{}, inside({ permissionDecision: 'ask' }), 200, /^body\.hookSpecificOutput\.permissionDecision: expected "allow", got "ask"/],
-    // Its reason is PROTOCOL.md's, word for word.
-    [{ hookSpecificOutput: { permissionDecision: 'allow' } }, inside({ permissionDecisionReason: 'OK.' }), 200, /^body\.hookSpecificOutput\.permissionDecisionReason: expected "The mode change pressed on the Stream Deck\.", got "OK\."/],
-    // updatedInput would change the mode the call asks for.
-    [PRE_ALLOW, inside({ updatedInput: { session_id: 'self', mode: 'bypassPermissions' } }), 200, /^body\.hookSpecificOutput\.updatedInput: the deck never sends updatedInput in a mode check \(PROTOCOL\.md\)/],
-    // Fields of its own, inside or at the top, Claude Code's own among them.
-    [PRE_ALLOW, inside({ additionalContext: 'x' }), 200, /^body\.hookSpecificOutput\.additionalContext: not in the mode check's allow, got "x"/],
-    [PRE_ALLOW, { ...PRE_ALLOW, systemMessage: 'Allowed.' }, 200, /^body\.systemMessage: Claude Code acts on it, and none of PROTOCOL\.md's answers has it/],
-    [{}, { note: 'x' }, 200, /^body\.note: not in any of PROTOCOL\.md's answers, got "x" \(an answer is the mode check's allow or \{\} exactly\)$/],
-    // A 2xx answer is parsed, and must be one of the two; any other status is an error answer, exactly.
-    [undefined, undefined, 200, /^body: expected the mode check's allow or \{\}, got nothing$/],
-    [{ error: '*' }, { error: 'x', note: 'y' }, 405, /^body\.note: not in an error answer/],
-  ]
-  for (const [expected, actual, status, why] of cases) assert.match(replyMismatch(route, expected, actual, b, status) ?? 'no mismatch', why)
-  // Those with all the line expects in them, which the general rule alone would let through.
-  for (const i of [1, 2, 3, 4, 5, 6, 7]) {
-    const [expected, actual] = cases[i]
-    if (expected !== undefined) assert.equal(mismatch(expected, actual), null, `case ${i}: the general rule lets it through`)
-  }
-  assert.equal(replyMismatch(route, { error: '*' }, { error: '/v1/pretool takes POST' }, b, 405), null)
-  assert.equal(hookAnswerMismatch(route, {}), null)
-  assert.match(hookAnswerMismatch('/v1/permission', PRE_ALLOW), /^body\.hookSpecificOutput\.hookEventName: expected "PermissionRequest", got "PreToolUse"/, 'and the other way round')
-  assert.throws(() => hookAnswerMismatch('/v1/hello', {}), /isn't one of the hooks' routes/)
+  // The permission hook's route is Claude Code's only one since the mode check went (PROTOCOL.md, 2026-11-06).
+  for (const route of ['/v1/hello', '/v1/pretool']) assert.throws(() => hookAnswerMismatch(route, {}), /isn't one of the hooks' routes/, route)
 })
 
 test('match: expect lines, field by field', () => {

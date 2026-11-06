@@ -6,8 +6,6 @@ import { fileURLToPath } from "node:url";
 import streamDeck from "@elgato/streamdeck";
 
 import { ApproveKeyAction, DenyKeyAction } from "./actions/decision-keys.js";
-import { ModeDialAction } from "./actions/mode-dial.js";
-import { ModeKeyAction } from "./actions/mode-key.js";
 import { OthersKeyAction } from "./actions/others.js";
 import { PromptKeyAction } from "./actions/prompt-key.js";
 import { SessionKeyAction } from "./actions/session-key.js";
@@ -16,12 +14,11 @@ import { SessionSlotAction } from "./actions/slot.js";
 import { BRIDGE_HOST, BRIDGE_PORT, RUN_DIR, TOKEN_FILE } from "./bridge/config.js";
 import { BridgeServer } from "./bridge/server.js";
 import { type LoadedToken, loadOrCreateToken } from "./bridge/token.js";
-import { ModeKeys, PromptKeys } from "./keys/commands.js";
+import { PromptKeys } from "./keys/commands.js";
 import { DecisionKeys } from "./keys/decision.js";
 import { SessionKeys } from "./keys/session.js";
 import { lsappinfoCheck } from "./model/front.js";
 import { connectSources } from "./model/sources.js";
-import { ModeDials } from "./mode/dials.js";
 import { SessionsDials } from "./sessions/dials.js";
 import { heldToolOf, othersArt, slotKeyArt } from "./slots/art.js";
 import { SlotDials } from "./slots/dials.js";
@@ -99,11 +96,9 @@ bridge?.onState((state) => model.setBridgeState(state));
 const keysLog = scope("Keys");
 const dialsLog = scope("Dials");
 streamDeck.actions.registerAction(new SessionsDialAction(new SessionsDials(model, { log: dialsLog, open: openSession })));
-streamDeck.actions.registerAction(new ModeDialAction(new ModeDials(model, { log: dialsLog })));
 streamDeck.actions.registerAction(new ApproveKeyAction(new DecisionKeys(model, "allow", { log: keysLog, open: openSession })));
 streamDeck.actions.registerAction(new DenyKeyAction(new DecisionKeys(model, "deny", { log: keysLog, open: openSession })));
 streamDeck.actions.registerAction(new PromptKeyAction(new PromptKeys(model, { log: keysLog })));
-streamDeck.actions.registerAction(new ModeKeyAction(new ModeKeys(model, { log: keysLog })));
 streamDeck.actions.registerAction(new SessionKeyAction(new SessionKeys(model, { log: keysLog, open: openSession })));
 
 // The Session Slots (session-keys.md): which session each slot holds, saved in run/slots.json, shared by a slot's

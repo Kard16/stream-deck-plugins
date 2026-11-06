@@ -1,16 +1,16 @@
 // The fake deck: what the deck plugin knows and does, without the hardware or the Stream Deck SDK
-// (claude-code/protocol/PROTOCOL.md, v1). It takes the hooks' requests only from sessions the registry confirms,
-// holds permission requests and sorts them into kinds, answers mode checks, queues commands and hands them to long
-// polls, follows each session from the mod's hello and events, applies the release rules, and works out each
-// session's status the way the deck shows it.
+// (claude-code/protocol/PROTOCOL.md, v1). It takes the hook's requests only from sessions the registry confirms,
+// holds permission requests and sorts them into kinds, queues commands and hands them to long polls, follows each
+// session from the mod's hello and events, applies the release rules, and works out each session's status the way
+// the deck shows it.
 //
 // No I/O here: bridge.mjs feeds it HTTP requests and folder readings, and reads the registry once more when a
 // request asks for it (hookNeedsReading, helloNeedsReading). Its clocks and timers are injected, so the tests drive
 // it directly. Presses come from the control interface in place of the keys and the Session Slot dials.
 
 import {
-  ASK_INPUT_MAX, ASK_TOOLS, AT_ONCE_MS, DENY, DIAL_PLANS, FINAL_STATES, HELLO_FIRST, HOST_PATTERN, IN_FLIGHT_MS, MODE_TOOL, MODES, NOT_THIS_SESSION,
-  PRE_ALLOW, VERSION, answerBody, answerFor, approvePlanBody, fingerprint, joinLabels, summary,
+  ASK_INPUT_MAX, ASK_TOOLS, AT_ONCE_MS, DENY, DIAL_PLANS, FINAL_STATES, HELLO_FIRST, HOST_PATTERN, IN_FLIGHT_MS, NOT_THIS_SESSION,
+  VERSION, answerBody, answerFor, approvePlanBody, fingerprint, joinLabels, summary,
 } from './protocol.mjs'
 
 /** A control call, or a mod request, that can't be carried out as asked: bridge.mjs answers it with 400. */
@@ -265,7 +265,7 @@ function newSession(host) {
   }
 }
 
-const wire = (c) => (c.t === 'prompt' ? { id: c.id, t: c.t, text: c.text } : { id: c.id, t: c.t, mode: c.mode })
+const wire = (c) => ({ id: c.id, t: c.t, text: c.text })
 
 export class FakeDeck {
   #now
@@ -420,7 +420,7 @@ export class FakeDeck {
    * A hook's request from a session the registry doesn't confirm: no decision at once, and nothing held, made or
    * changed, the session's settings included. The process's own permission flow decides.
    */
-  #unconfirmed(route, b, hostHeader, responder) {
+  #unconfirmed(b, hostHeader, responder) {
     responder.send(200, answerFor('none'))
     const host = hostValue(hostHeader)
     const sid = str(b.session_id)
@@ -432,8 +432,7 @@ export class FakeDeck {
       : !sids ? `the registry doesn't list ${host}`
       : sids.size === 0 ? `the registry lists ${host} without a sessionId`
       : `the registry lists ${host} under another sessionId`
-    const what = route === 'pretool' ? 'mode check' : 'permission request'
-    this.#log({ kind: 'unconfirmed', route, host, sid, tool, why, say: `${what} for ${display(tool)} from ${host ?? '(no host)'}: {} at once, nothing held: ${why}` })
+    this.#log({ kind: 'unconfirmed', route: 'permission', host, sid, tool, why, say: `permission request for ${display(tool)} from ${host ?? '(no host)'}: {} at once, nothing held: ${why}` })
     return { kind: 'unconfirmed' }
   }
 
@@ -837,17 +836,16 @@ export class FakeDeck {
 
   /**
    * A PermissionRequest (PROTOCOL.md, "Permission requests"), taken only from a session the registry confirms
-   * ("Desktop sessions only"): any other gets no decision at once. A confirmed one is sorted into its kind: a `mode`
-   * request is allowed at once, and `ask` and `tool` requests are held. `responder` is `{open, send(status, json)}`.
-   * An `ask` request keeps its tool_input, up to ASK_INPUT_MAX of JSON, for its session's dial (PROTOCOL.md, "Held
-   * requests", as amended on 2026-11-04 for session keys); `inputScrubbed` says the bridge took a run of the token out
-   * of the tool_input before the deck read it, so it isn't kept: it can't go back as it came. Returns `{kind, id}` for
-   * a held request, `{kind: 'mode', cmd}` for one allowed, `{kind: 'unconfirmed'}`.
+   * ("Desktop sessions only"): any other gets no decision at once. A confirmed one is sorted into its kind, `ask` or
+   * `tool`, and held. `responder` is `{open, send(status, json)}`. An `ask` request keeps its tool_input, up to
+   * ASK_INPUT_MAX of JSON, for its session's dial (PROTOCOL.md, "Held requests", as amended on 2026-11-04 for session
+   * keys); `inputScrubbed` says the bridge took a run of the token out of the tool_input before the deck read it, so
+   * it isn't kept: it can't go back as it came. Returns `{kind, id}` for a held request, `{kind: 'unconfirmed'}`.
    */
   permission({ body, hostHeader, responder, inputScrubbed = false }) {
     const b = isObject(body) ? body : {}
     const host = this.#confirmed(hostHeader, b.session_id)
-    if (!host) return this.#unconfirmed('permission', b, hostHeader, responder)
+    if (!host) return this.#unconfirmed(b, hostHeader, responder)
     const tool = typeof b.tool_name === 'string' ? b.tool_name : ''
     const input = b.tool_input
     const sid = b.session_id
@@ -858,19 +856,6 @@ export class FakeDeck {
     if (isObject(b.effort)) this.#take(s, 'effort', b.effort.level, 'permission')
     const fp = fingerprint(tool, input)
     const sum = summary(tool, input)
-
-    if (tool === MODE_TOOL && isObject(input) && input.session_id === 'self') {
-      const cmd = this.#modeInFlight(host, input.mode, 'allowedRequest')
-      if (cmd) {
-        // One press, one allowance: the request this command raised. A second one is an ordinary request. The mode
-        // check's own allowance is counted apart (pretool).
-        cmd.allowedRequest = true
-        responder.send(200, answerFor('allow'))
-        this.#log({ kind: 'mode-allowed', host, cmd: cmd.id, mode: input.mode, fp, say: `${host}: mode ${input.mode} allowed at once (${cmd.id} in flight)` })
-        return { kind: 'mode', cmd: cmd.id }
-      }
-    }
-
     const kind = ASK_TOOLS.includes(tool) ? 'ask' : 'tool'
     // What its session's dial shows for it, and for an ask request the input it echoes back. A tool request's input
     // isn't kept: its dial sends the keys' Allow or Deny, and a Write can carry a whole file.
@@ -886,51 +871,6 @@ export class FakeDeck {
     this.#log({ kind: 'held', id: h.id, host, sid, tool, requestKind: kind, summary: sum, fp, dial: screen.screen, say: `${h.id} HELD ${kind} ${host} ${tool}: ${sum} fp ${fp}${dial}` })
     this.#fpFromHeld(h, s)
     return { kind, id: h.id }
-  }
-
-  // ---- POST /v1/pretool ----------------------------------------------------------------------------------
-
-  /**
-   * A mode check (PROTOCOL.md, "Mode checks"): the mode hook's PreToolUse for the app's mode tool, answered at once
-   * and never held. From a session the registry confirms ("Desktop sessions only"), it's allowed when the session has
-   * a mode command in flight for the mode the call asks, for `self`: the first such check per command only, counted
-   * apart from kind mode's PermissionRequest, which the same command may still raise. Every other request gets no
-   * decision, and the session's own permission check decides, the auto-mode classifier included. It changes nothing
-   * else: a mode check isn't one of the session's PermissionRequests, whose mode and effort the deck shows.
-   * Returns `{kind: 'allow', cmd}`, `{kind: 'none'}` or `{kind: 'unconfirmed'}`.
-   */
-  pretool({ body, hostHeader, responder }) {
-    const b = isObject(body) ? body : {}
-    const host = this.#confirmed(hostHeader, b.session_id)
-    if (!host) return this.#unconfirmed('pretool', b, hostHeader, responder)
-    const tool = typeof b.tool_name === 'string' ? b.tool_name : ''
-    const input = b.tool_input
-    const mine = tool === MODE_TOOL && isObject(input) && input.session_id === 'self'
-    const cmd = mine ? this.#modeInFlight(host, input.mode, 'allowedCheck') : null
-    if (cmd) {
-      cmd.allowedCheck = true
-      responder.send(200, PRE_ALLOW)
-      this.#log({ kind: 'mode-check', host, allowed: true, cmd: cmd.id, mode: input.mode, say: `${host}: mode check for ${input.mode} allowed at once (${cmd.id} in flight)` })
-      return { kind: 'allow', cmd: cmd.id }
-    }
-    responder.send(200, answerFor('none'))
-    const why =
-      tool !== MODE_TOOL ? `${display(tool)} isn't the mode tool`
-      : !mine ? 'the call isn\'t for self'
-      : `no mode command for ${display(input.mode)} in flight whose check hasn't been allowed`
-    this.#log({ kind: 'mode-check', host, allowed: false, tool, mode: mine ? asString(input.mode) : null, why, say: `${host}: mode check: no decision, ${why}` })
-    return { kind: 'none' }
-  }
-
-  /**
-   * The session's mode command in flight (delivered, or a stray waiting) for `mode` that hasn't had `allowance` yet:
-   * `allowedRequest` for kind mode's PermissionRequest, `allowedCheck` for the mode check. Each is one per command.
-   */
-  #modeInFlight(host, mode, allowance) {
-    for (const c of this.#commands.values()) {
-      if (c.host === host && c.t === 'mode' && IN_FLIGHT.has(c.state) && c.mode === mode && !c[allowance]) return c
-    }
-    return null
   }
 
   /** Release rule 5: the client closed the connection. */
@@ -1134,7 +1074,7 @@ export class FakeDeck {
    * IN_FLIGHT_MS with no poll open and none sent stops counting, and that's all. The deck keeps the rest: which
    * instances have said hello, settings and where each came from, held requests, commands, the seqs it has seen, and
    * the main loop's turn, so how it ended still shows and the polls after its end are still answered at once. With no
-   * current instance, a prompt or mode press on the session alerts (#cannotSend), while Approve and Deny still answer
+   * current instance, a prompt press on the session alerts (#cannotSend), while Approve and Deny still answer
    * its held requests (press), as in the real deck. Its mods' polls get 409 hello first (poll), and the first hello
    * after, from any instance, makes that one current, with no restart (hello). From then on the others don't count
    * again: a live predecessor's later hello, after one of its fetches rejects say, changes nothing, where forgetting
@@ -1163,12 +1103,11 @@ export class FakeDeck {
     }
   }
 
-  #finish(c, state, { error = null, detail = null } = {}) {
+  #finish(c, state, { error = null } = {}) {
     this.#clearTimer(c.timer)
     c.timer = null
     c.state = state
     c.error = error
-    c.detail = detail
     c.finishedAt = this.#now()
     this.#log({ kind: 'command', id: c.id, host: c.host, state, error, say: `${c.id} ${state}${error ? `: ${error}` : ''}` })
   }
@@ -1176,8 +1115,7 @@ export class FakeDeck {
   /**
    * How a command went (PROTOCOL.md, "Commands"). One for an unknown or finished command, from another session, or
    * from an inst other than the one its command was delivered to is ignored: a result with no inst included, as it
-   * can't be from that inst. A prompt's `waiting` stops its 60 s clock (see #armPollGap); a mode command keeps it
-   * even after a stray one, which bounds how long the mode rule can allow a change.
+   * can't be from that inst. A prompt's `waiting` stops its 60 s clock (see #armPollGap).
    */
   result(body) {
     const b = isObject(body) ? body : {}
@@ -1193,16 +1131,14 @@ export class FakeDeck {
     if (str(b.inst) === null || b.inst !== c.inst) return ignore(`it came from inst ${b.inst === undefined ? '(none)' : display(b.inst)}, and was delivered to ${c.inst}`)
     if (b.state === 'waiting') {
       c.state = 'waiting'
-      if (c.t === 'prompt') {
-        this.#clearTimer(c.timer)
-        c.timer = null
-      }
+      this.#clearTimer(c.timer)
+      c.timer = null
       this.#log({ kind: 'command', id: c.id, host: c.host, state: 'waiting', say: `${c.id} waiting` })
       this.#armPollGap(s)
       return
     }
     if (!FINAL.has(b.state)) return ignore(`unknown state ${display(b.state)}`)
-    this.#finish(c, b.state, { error: asString(b.error), detail: asString(b.detail) })
+    this.#finish(c, b.state, { error: asString(b.error) })
     this.#armPollGap(s)
   }
 
@@ -1220,8 +1156,8 @@ export class FakeDeck {
    * Approve or Deny (PROTOCOL.md, "Held requests"): acts on the oldest held request across sessions. `shown`
    * is the request the key showed when pressed: undefined skips the check, null means it showed none. A
    * `tool` request gets Allow or Deny; on an `ask` request either press jumps and answers nothing. Whether the
-   * request's session has a current instance doesn't matter, as in the real deck: only a prompt or mode press needs
-   * one (#cannotSend).
+   * request's session has a current instance doesn't matter, as in the real deck: only a prompt press needs one
+   * (#cannotSend).
    */
   press(key, { shown } = {}) {
     if (key !== 'approve' && key !== 'deny') throw new BadRequest(`no key ${key}`)
@@ -1341,29 +1277,17 @@ export class FakeDeck {
     return this.#pressed({ key: 'prompt', session: host, cmd: c.id })
   }
 
-  /** The Mode dial or key: queues a mode change for `host`. */
-  mode({ host, mode }) {
-    if (typeof host !== 'string' || host === '') throw new BadRequest('host must be a session host (local_…)')
-    if (!MODES.includes(mode)) throw new BadRequest(`mode must be one of ${MODES.join(', ')}`)
-    const why = this.#cannotSend(host)
-    if (why) return this.#pressed({ key: 'mode', session: host, alert: true, error: why })
-    const c = this.#queue(host, { t: 'mode', mode })
-    return this.#pressed({ key: 'mode', session: host, cmd: c.id })
-  }
-
   #queue(host, fields) {
     const c = {
       id: `${this.#cmdPrefix}${++this.#cmdSeq}`, host, ...fields, state: 'queued', queuedAt: this.#now(),
-      deliveredAt: null, finishedAt: null, inst: null, error: null, detail: null,
-      // A mode command's two allowances, one each, counted apart: its mode check's and its raise's PermissionRequest's.
-      allowedCheck: false, allowedRequest: false, timer: null,
+      deliveredAt: null, finishedAt: null, inst: null, error: null, timer: null,
     }
     this.#commands.set(c.id, c)
     // PROTOCOL.md, "Commands": one that no poll takes in time fails, so a key waiting on it can't stay locked.
     c.timer = this.#setTimer(() => {
       if (c.state === 'queued') this.#finish(c, 'failed', { error: 'not delivered' })
     }, this.#inFlightMs)
-    this.#log({ kind: 'command', id: c.id, host, state: 'queued', t: c.t, say: `${c.id} queued for ${host}: ${c.t} ${c.t === 'prompt' ? JSON.stringify(c.text) : c.mode}` })
+    this.#log({ kind: 'command', id: c.id, host, state: 'queued', t: c.t, say: `${c.id} queued for ${host}: ${c.t} ${JSON.stringify(c.text)}` })
     const s = this.#sessions.get(host)
     if (s?.poll && s.poll.responder.open) {
       this.#deliver([c], s)

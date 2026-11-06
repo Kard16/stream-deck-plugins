@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { ALLOW_DECISION, DENY_DECISION, isPlanMode, NO_DECISION, PRETOOL_ALLOW, ROUTES } from "../../src/protocol/wire.js";
+import { ALLOW_DECISION, DENY_DECISION, isPlanMode, NO_DECISION, ROUTES } from "../../src/protocol/wire.js";
 import { fixturesDir } from "./paths.js";
 
 export type Obj = Record<string, unknown>;
@@ -76,12 +76,10 @@ export function mismatches(want: unknown, got: unknown, at = "$"): string[] {
 
 /**
  * The answers Claude Code reads, by route, from the deck's own wire module: PROTOCOL.md's five to a PermissionRequest
- * (Allow, Deny and `{}` exactly, and an Answer or an Approve plan by their shape, updatedAllowKind), and its two to a
- * mode check.
+ * (Allow, Deny and `{}` exactly, and an Answer or an Approve plan by their shape, updatedAllowKind).
  */
 const HOOK_ANSWERS: Readonly<Record<string, { bodies: readonly unknown[]; updated: boolean; names: string }>> = {
 	[ROUTES.permission]: { bodies: [ALLOW_DECISION, DENY_DECISION, NO_DECISION], updated: true, names: "Allow, Deny, {}, an Answer or an Approve plan" },
-	[ROUTES.pretool]: { bodies: [PRETOOL_ALLOW, NO_DECISION], updated: false, names: "the mode check's allow or {}" },
 };
 
 function plain(v: unknown): v is Obj {
@@ -119,11 +117,11 @@ export function updatedAllowKind(body: unknown): "answer" | "approve plan" | nul
 
 /**
  * What a `reply` line finds wrong with an answer, or an empty list; `want` is undefined when the line gives no
- * body. A 2xx from a hook's route, `/v1/permission` or `/v1/pretool`, is held to more than PROTOCOL.md's general
- * matching, whatever the line expects: it must be one of the bodies its route allows (Allow, Deny or `{}` exactly, or
- * an Answer or an Approve plan by its shape, for a PermissionRequest; the allow or `{}` for a mode check). An expected
- * body that's one of those exactly (Allow, Deny, `{}`, the mode check's allow, an Answer, an Approve plan) must be
- * equal exactly, `updatedInput` included, and an expected `{}` means no decision, so no `hookSpecificOutput`. By the
+ * body. A 2xx from the hook's route, `/v1/permission`, is held to more than PROTOCOL.md's general matching,
+ * whatever the line expects: it must be one of the bodies the route allows (Allow, Deny or `{}` exactly, or an Answer
+ * or an Approve plan by its shape). An expected body that's one of those exactly (Allow, Deny, `{}`, an Answer, an
+ * Approve plan) must be equal exactly, `updatedInput` included, and an expected `{}` means no decision, so no
+ * `hookSpecificOutput`. By the
  * general rule alone, `{}` matches any answer, an Allow included, and extra fields such as `updatedPermissions` or an
  * Answer's `updatedInput` pass where a plain Allow is expected. Any other status, from any route, must carry
  * `{"error": "<reason>"}` (Transport).
@@ -147,7 +145,7 @@ export function replyMismatches(route: string, status: number, want: unknown, go
 /**
  * What's wrong with the answer to a request no `reply` line checks, or an empty list. It must be 200 or 204
  * (PROTOCOL.md, Fixtures), and a 2xx from a hook's route must still be exactly one of the bodies the route allows
- * (replyMismatches), so a mode check the fixture doesn't follow up can't slip through with an odd allow.
+ * (replyMismatches).
  */
 export function unrepliedMismatches(route: string, status: number, body: string): string[] {
 	if (status !== 200 && status !== 204) return [`$: expected 200 or 204, got ${status} ${body}`];

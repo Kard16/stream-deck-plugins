@@ -54,7 +54,7 @@ const reversed = (v) =>
   Array.isArray(v) ? v.map(reversed) : typeof v === 'object' && v !== null ? Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reversed(x)])) : v
 
 /** A hook of the kind the checks keep out: a tool call waits up to 600 s on the deck, and is blocked while it's down. */
-const BLOCKING = { type: 'http', url: 'http://127.0.0.1:47600/v1/pretool', timeout: 600, onFailure: 'block' }
+const BLOCKING = { type: 'http', url: 'http://127.0.0.1:47600/v1/permission', timeout: 600, onFailure: 'block' }
 
 test('the files as they are pass all four checks', (t) => {
   const r = check(copy(t))
@@ -75,16 +75,9 @@ test("hooks.json may be laid out any way, its keys in any order: it's the hooks 
 })
 
 test("hooks.json other than PROTOCOL.md's block fails, saying where", async (t) => {
-  const mode = (h) => h.hooks.PreToolUse[0]
   const permission = (h) => h.hooks.PermissionRequest[0]
   const cases = [
-    ["the mode hook's matcher dropped", (h) => delete mode(h).matcher, 'hooks.PreToolUse[0].matcher'],
-    ["the mode hook's matcher widened to every tool", (h) => (mode(h).matcher = '*'), 'hooks.PreToolUse[0].matcher'],
-    ["the mode hook's matcher widened to its server's tools", (h) => (mode(h).matcher = 'mcp__ccd_session_mgmt__.*'), 'hooks.PreToolUse[0].matcher'],
-    ['the mode hook given 600 s', (h) => (mode(h).hooks[0].timeout = 600), 'hooks.PreToolUse[0].hooks[0].timeout'],
-    ['the mode hook blocking while the bridge is down', (h) => (mode(h).hooks[0].onFailure = 'block'), 'hooks.PreToolUse[0].hooks[0].onFailure'],
     ['the permission hook blocking while the bridge is down', (h) => (permission(h).hooks[0].onFailure = 'block'), 'hooks.PermissionRequest[0].hooks[0].onFailure'],
-    ['the mode hook pointed at /v1/permission', (h) => (mode(h).hooks[0].url = 'http://127.0.0.1:47600/v1/permission'), 'hooks.PreToolUse[0].hooks[0].url'],
     ['a hook added', (h) => (h.hooks.PostToolUse = [{ hooks: [BLOCKING] }]), 'hooks.PostToolUse'],
   ]
   for (const [name, change, at] of cases) {

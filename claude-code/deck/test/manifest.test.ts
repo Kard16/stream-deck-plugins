@@ -13,7 +13,7 @@ describe("the plugin's version", () => {
 		const manifest = read("com.karimdhanji.claude.sdPlugin/manifest.json");
 		const pkg = read("package.json");
 		const lock = read("package-lock.json") as { version?: unknown; packages?: Record<string, { version?: unknown }> };
-		assert.equal(manifest.Version, "0.4.0.0");
+		assert.equal(manifest.Version, "0.5.0.0");
 		assert.equal(manifest.Version, `${String(pkg.version)}.0`);
 		assert.deepEqual([lock.version, lock.packages?.[""]?.version], [pkg.version, pkg.version]);
 	});

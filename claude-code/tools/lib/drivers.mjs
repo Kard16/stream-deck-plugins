@@ -7,12 +7,12 @@
 //   Slot dial presses, and registry lines are skipped (the real deck reads the real registry, which nothing here
 //   writes). An Approve or Deny press with nothing of fake-claude's held is skipped, and so is a dial press with nothing
 //   of fake-claude's held for its session, so the person never presses on another session's request: a deck that takes
-//   the hooks' requests only from sessions its registry confirms answers the fixture's {} at once (PROTOCOL.md,
-//   "Desktop sessions only"), and puts none of the fixture's sessions on a slot. Saved Prompt and Mode presses are
-//   always skipped: they go to the session picked on the Sessions dial, and no real deck lists a fixture's session, so
-//   the dial would be on one of the user's own, and the press would send it the fixture's prompt or mode change. Expect
-//   lines are always skipped too: they are the fixture's deck's state, and nothing of a fixture's session shows on a
-//   real deck. Each skip is reported.
+//   the hook's requests only from sessions its registry confirms answers the fixture's {} at once (PROTOCOL.md,
+//   "Desktop sessions only"), and puts none of the fixture's sessions on a slot. Saved Prompt presses are always
+//   skipped: they go to the session picked on the Sessions dial, and no real deck lists a fixture's session, so the
+//   dial would be on one of the user's own, and the press would send it the fixture's prompt. Expect lines are always
+//   skipped too: they are the fixture's deck's state, and nothing of a fixture's session shows on a real deck. Each
+//   skip is reported.
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -195,7 +195,6 @@ export function againstFake({ url, token, expectMs = 1000, takenMs = 2000 }) {
       // the line's session names the dial.
       const r =
         key === 'prompt' ? await call('POST', '/control/prompt', { host: p.session, text: p.text })
-        : key === 'mode' ? await call('POST', '/control/mode', { host: p.session, mode: p.mode })
         : key === 'dial' ? await call('POST', '/control/dial', { host: p.session, picks: p.picks, decision: p.decision, plan: p.plan })
         : await call('POST', `/control/${key}`, {})
       if (r.cmd) ctx.created.push(r.cmd)
@@ -282,7 +281,7 @@ function describeDial(d) {
 
 /**
  * What a person should press, in words: Approve or Deny, or a Session Slot dial, the only presses the interactive
- * driver asks for. Saved Prompt and Mode presses are skipped, never described (interactive's press). `open` is what
+ * driver asks for. Saved Prompt presses are skipped, never described (interactive's press). `open` is what
  * fake-claude sent that the deck holds, oldest first; for a dial, its session's.
  */
 export function describePress(press, open) {
@@ -303,11 +302,11 @@ export function describePress(press, open) {
 /**
  * Why the interactive driver skips every expect line. An expect line is the fixture's deck's state, and a real deck
  * shows nothing of a fixture's session: it lists only its registry's sessions, which never include a fixture's, it
- * holds none of the fixture's requests, as it answers their hooks {} at once, and no Saved Prompt or Mode press
- * queues a command of the fixture's. So its sessions, statuses, settings, held requests, commands and keys are
- * about what the deck doesn't show, and a person asked to check them could only report the deck's own sessions.
+ * holds none of the fixture's requests, as it answers their hook requests {} at once, and no Saved Prompt press
+ * queues a command of the fixture's. So its sessions, statuses, settings, held requests, commands and keys are about
+ * what the deck doesn't show, and a person asked to check them could only report the deck's own sessions.
  */
-export const EXPECT_SKIPPED = "a real deck shows nothing of a fixture's session: it lists only its registry's sessions, holds none of the fixture's requests, and has no command of the fixture's, since no Saved Prompt or Mode press is made"
+export const EXPECT_SKIPPED = "a real deck shows nothing of a fixture's session: it lists only its registry's sessions, holds none of the fixture's requests, and has no command of the fixture's, since no Saved Prompt press is made"
 
 /** Plays fixtures with a person at the real deck. */
 export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}) {
@@ -335,12 +334,11 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
 
     async press(line, ctx) {
       const [key] = Object.keys(line.value)
-      if (key === 'prompt' || key === 'mode') {
-        // A person is never asked to send a fixture's prompt or mode change: no real deck lists the fixture's
-        // session, so the Sessions dial could only be on one of the user's own.
-        const what = key === 'prompt' ? 'prompt' : 'mode change'
-        ctx.skip({ line: line.n, press: key, why: `a ${key === 'prompt' ? 'Saved Prompt' : 'Mode'} press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session, so it would send the fixture's ${what} to one of your own sessions` })
-        ui.show(`skip: press ${key}: it would send the fixture's ${what} to whichever of your own sessions the dial is on`)
+      if (key === 'prompt') {
+        // A person is never asked to send a fixture's prompt: no real deck lists the fixture's session, so the
+        // Sessions dial could only be on one of the user's own.
+        ctx.skip({ line: line.n, press: key, why: "a Saved Prompt press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session, so it would send the fixture's prompt to one of your own sessions" })
+        ui.show("skip: press prompt: it would send the fixture's prompt to whichever of your own sessions the dial is on")
         return
       }
       // What fake-claude sent that the deck holds: no answer within HOOK_AT_ONCE_MS of sending it, by fake-claude's own

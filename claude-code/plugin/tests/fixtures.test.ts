@@ -3,13 +3,13 @@
 //
 // Beneath the mod, the runner answers `$.session.*` and `$.env.get` from the fixture's setup, as a desktop session
 // of its own (PROTOCOL.md, "Desktop sessions only"): CLAUDE_CODE_ENTRYPOINT is claude-desktop, and CLAUDECODE,
-// CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_TAGS are unset. It answers `$.prompt.submit` and `$.mcp.call` from the
-// fixture's `engine` lines (checking their arguments), and each engine event with the `mod` line's result. It
-// stands for the bridge too: hello answers {"v": 1, "ok": true}, events and results 204, and a poll nothing, unless
-// a `reply` line says otherwise. Each request the mod sends must be the fixture's next `plugin` line (polls in order
-// among themselves), with the token in its Authorization header, and the mod may send nothing more. Lines about
-// /v1/permission and /v1/pretool, which Claude Code's hooks send, not the mod, and lines about other sessions,
-// presses, the registry and the deck's state are the deck side's.
+// CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_TAGS are unset. It answers `$.prompt.submit` from the fixture's `engine`
+// lines (checking their arguments), and each engine event with the `mod` line's result. It stands for the bridge
+// too: hello answers {"v": 1, "ok": true}, events and results 204, and a poll nothing, unless a `reply` line says
+// otherwise. Each request the mod sends must be the fixture's next `plugin` line (polls in order among themselves),
+// with the token in its Authorization header, and the mod may send nothing more. Lines about /v1/permission, which
+// Claude Code's hook sends, not the mod, and lines about other sessions, presses, the registry and the deck's state
+// are the deck side's.
 //
 // The mod's clock moves only when a line waits on it: by POLL_MIN_MS for a poll after an early empty answer, and by
 // RETRY_MS for a hello after a rejected fetch or a poll answered 409 hello first. The mod logs nothing in any fixture.
@@ -188,15 +188,6 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
     match(x.args, { text: e.text, asUser: e.origin?.kind === 'plugin' && e.origin.asUser === true ? true : undefined }, '$.prompt.submit')
     return x.returns
   })
-  on('mcp.call', (_$, e) => {
-    const x = take('mcp.call')
-    if (x === undefined) {
-      problems.push(`the mod called $.mcp.call(${JSON.stringify(e)}), which the fixture doesn't`)
-      return { deny: 'not in the fixture' }
-    }
-    match(x.args, { server: e.server, tool: e.tool, args: e.args }, '$.mcp.call')
-    return { value: x.returns }
-  })
   on('http.fetch', (_$, e) => {
     const init = e.init ?? {}
     const url = new URL(e.url)
@@ -252,9 +243,9 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
     } else if ('plugin' in line) {
       const p = line.plugin
       const { route, query } = parsePath(p.path)
-      // The hooks' requests: their reply lines are skipped with them.
-      const hooks = route === '/v1/permission' || route === '/v1/pretool'
-      if (hooks || !ours(p)) {
+      // The hook's requests: their reply lines are skipped with them.
+      const hook = route === '/v1/permission'
+      if (hook || !ours(p)) {
         if (p.as !== undefined) labels.set(p.as, null)
         continue
       }

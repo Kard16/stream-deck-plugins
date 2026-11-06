@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 // The fake bridge: the deck plugin's side of the bridge protocol (claude-code/protocol/PROTOCOL.md, v1),
 // without the deck, to run the real Claude Code plugin against (ladder step 4 in docs/claude-code/plan.md).
-// It takes the hooks' requests only from sessions the registry confirms, holds permission requests until told
-// otherwise (only the mode rules answer on their own: a mode check and a raise's PermissionRequest for a mode
-// command in flight), queues commands for the mod's long poll, asks a session no instance has said hello for to say
-// one (409 hello first), follows sessions and events, applies the release rules, and logs every request and answer
-// to its run folder. The same file is a small CLI for its token-checked
-// /control/ routes. README.md has the walkthrough. Node 24, no dependencies.
+// It takes the hook's requests only from sessions the registry confirms, holds permission requests until told
+// otherwise, queues commands for the mod's long poll, asks a session no instance has said hello for to say one (409
+// hello first), follows sessions and events, applies the release rules, and logs every request and answer to its run
+// folder. The same file is a small CLI for its token-checked /control/ routes. README.md has the walkthrough.
+// Node 24, no dependencies.
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +14,7 @@ import { parseArgs } from 'node:util'
 import { DEFAULTS, readToken, startFakeBridge } from './lib/bridge.mjs'
 import { controlClient, ControlError } from './lib/client.mjs'
 import { REPO } from './lib/fixtures.mjs'
-import { DIAL_PLANS, MODES } from './lib/protocol.mjs'
+import { DIAL_PLANS } from './lib/protocol.mjs'
 
 const rel = (p) => {
   const r = path.relative(REPO, p)
@@ -64,8 +63,6 @@ Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}
                                  still queued, delivered or waiting, and for a session whose mod
                                  has no current instance: none has said hello, or its last one
                                  went 60 s without a poll
-  mode <host> <mode>             the Mode dial: ${MODES.join(', ')}. Its mode check, and the
-                                 PermissionRequest a raise brings, are allowed at once, once each
   rescan                         reads the registry and records now
   reset                          forgets everything: held requests get {}, and open polls are
                                  cut off with no answer, so their mods say hello again; a mod
@@ -142,9 +139,6 @@ function controlCall(cmd, args) {
     case 'prompt':
       want(2, '<host> <text> (quote the text)')
       return ['POST', '/control/prompt', { host: args[0], text: args[1] }]
-    case 'mode':
-      want(2, `<host> <mode>, the mode one of ${MODES.join(', ')}`)
-      return ['POST', '/control/mode', { host: args[0], mode: args[1] }]
     case 'dial':
       return ['POST', '/control/dial', dialPress(args)]
     default:

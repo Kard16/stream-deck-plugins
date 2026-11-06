@@ -25,7 +25,7 @@ import { redact } from './redact'
 export const BRIDGE_URL = 'http://127.0.0.1:47600'
 export const PROTOCOL_VERSION = 1
 /** The plugin's version for the hello, kept in step with .claude-plugin/plugin.json: `$.plugin` has none. */
-export const PLUGIN_VERSION = '0.2.1'
+export const PLUGIN_VERSION = '0.3.0'
 export const BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10_000, 30_000]
 /** How long the bridge may hold a poll (PROTOCOL.md, "Rates"). */
 export const POLL_WAIT_S = 20
@@ -104,7 +104,7 @@ export type BridgeHost = {
 }
 
 export type ResultState = 'waiting' | 'done' | 'refused' | 'failed'
-export type ResultExtra = { error?: string; detail?: string }
+export type ResultExtra = { error?: string }
 export type Command = Record<string, unknown> & { id: string }
 
 export type Bridge = {
@@ -119,8 +119,6 @@ export type Bridge = {
   result: (id: string, state: ResultState, extra?: ResultExtra) => void
   /** Sends the settings in `seen` that differ from what the deck was last told. */
   observe: (seen: Settings) => void
-  /** A mode command is done: the deck hears the new mode, changed or not. */
-  modeSet: (mode: string) => void
   /** Reads the model, as after each turn, and sends it if it changed. */
   checkModel: () => void
   /** Reads the session id again: /clear and resume go on under a new one. */
@@ -613,12 +611,6 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     if (diff !== undefined) emit({ t: 'settings', at: Date.now(), ...diff })
   }
 
-  function modeSet(mode: string): void {
-    if (silent()) return
-    known.mode = mode
-    emit({ t: 'settings', at: Date.now(), mode })
-  }
-
   function checkModel(): void {
     if (silent()) return
     void quiet(host.model).then(model => {
@@ -630,5 +622,5 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     if (!silent()) void refreshSid()
   }
 
-  return { start, emit, result, observe, modeSet, checkModel, sidMayHaveChanged }
+  return { start, emit, result, observe, checkModel, sidMayHaveChanged }
 }

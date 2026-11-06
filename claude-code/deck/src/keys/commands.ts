@@ -1,14 +1,12 @@
 import { type Command, type CommandSpec, FINAL_STATES } from "../bridge/commands.js";
-import { modeName } from "../model/format.js";
 import type { QueueResult, SessionView } from "../model/sessions.js";
-import { isMode, type Mode } from "../protocol/wire.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { type Log, nullLog, quote } from "../util/log.js";
 import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
-import { type ModeKeyLook, modeKeySvg, type PromptLook, promptKeySvg } from "./art.js";
+import { type PromptLook, promptKeySvg } from "./art.js";
 import type { KeySurface } from "./decision.js";
 
-/** What the Saved Prompt and Mode keys need from the session model. */
+/** What the Saved Prompt keys need from the session model. */
 export interface CommandModel {
 	readonly online: boolean;
 	readonly commands: { get(id: string): Command | null };
@@ -19,9 +17,6 @@ export interface CommandModel {
 
 /** Settings from the Saved Prompt key's Property Inspector. */
 export type PromptSettings = { text?: string; label?: string };
-
-/** Settings from the Mode key's Property Inspector: one of PROTOCOL.md's modes. */
-export type ModeKeySettings = { mode?: string };
 
 /** How long a Saved Prompt key shows sent, and refused, before it goes back to its label. */
 export const SENT_SHOW_MS = 3000;
@@ -180,112 +175,5 @@ export class PromptKeys {
 			);
 		}
 		key.painter.update(promptKeySvg(this.#look(key)), null);
-	}
-}
-
-type ModeKey = {
-	surface: KeySurface;
-	painter: KeyPainter<null>;
-	settings: ModeKeySettings;
-	/** The last press's command, until its outcome has been shown. */
-	cmd: string | null;
-};
-
-/**
- * The Mode keys, without the SDK. Each holds one mode, set in its Property Inspector, and shows it, blue
- * while it's the target's mode. A press asks the target to change to it; the key shows ok when the change
- * is done, and alerts when it's refused or fails.
- */
-export class ModeKeys {
-	readonly #model: CommandModel;
-	readonly #log: Log;
-	readonly #clock: Clock | undefined;
-	readonly #paintIntervalMs: number;
-	readonly #keys = new Map<string, ModeKey>();
-
-	constructor(model: CommandModel, opts: { log?: Log; clock?: Clock; paintIntervalMs?: number } = {}) {
-		this.#model = model;
-		this.#log = opts.log ?? nullLog;
-		this.#clock = opts.clock;
-		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
-		model.onChange(() => this.repaintAll());
-	}
-
-	add(id: string, surface: KeySurface, settings: ModeKeySettings): void {
-		this.remove(id);
-		const painter = new KeyPainter<null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs });
-		const key: ModeKey = { surface, painter, settings, cmd: null };
-		this.#keys.set(id, key);
-		this.#paint(key);
-	}
-
-	setSettings(id: string, settings: ModeKeySettings): void {
-		const key = this.#keys.get(id);
-		if (!key) return;
-		key.settings = settings;
-		this.#paint(key);
-	}
-
-	remove(id: string): void {
-		this.#keys.get(id)?.painter.dispose();
-		this.#keys.delete(id);
-	}
-
-	press(id: string, settings?: ModeKeySettings): void {
-		const key = this.#keys.get(id);
-		if (!key) return;
-		if (settings) key.settings = settings;
-		const mode = key.settings.mode;
-		if (!isMode(mode)) {
-			this.#log.info("Mode key: no mode set; set it in the key's settings");
-			key.surface.showAlert();
-			return;
-		}
-		const cmd = queueForTarget(this.#model, this.#log, `Mode key ${mode}`, { t: "mode", mode });
-		if (!cmd) {
-			key.surface.showAlert();
-			return;
-		}
-		key.cmd = cmd.id;
-		this.#paint(key);
-	}
-
-	repaintAll(): void {
-		for (const key of this.#keys.values()) this.#paint(key);
-	}
-
-	painted(id: string): string | null {
-		return this.#keys.get(id)?.painter.svg ?? null;
-	}
-
-	look(id: string): ModeKeyLook | null {
-		const key = this.#keys.get(id);
-		return key ? this.#look(key) : null;
-	}
-
-	#look(key: ModeKey): ModeKeyLook {
-		const mode: Mode | null = isMode(key.settings.mode) ? key.settings.mode : null;
-		const target = this.#model.target();
-		const cmd = key.cmd === null ? null : this.#model.commands.get(key.cmd);
-		return {
-			mode: mode === null ? null : modeName(mode),
-			active: mode !== null && target?.listed === true && target.mode === mode,
-			pending: cmd !== null && !FINAL_STATES.has(cmd.state),
-			target: targetName(target),
-			online: this.#model.online,
-		};
-	}
-
-	#paint(key: ModeKey): void {
-		const cmd = key.cmd === null ? null : this.#model.commands.get(key.cmd);
-		if (key.cmd !== null && (!cmd || FINAL_STATES.has(cmd.state))) {
-			key.cmd = null;
-			if (cmd?.state === "done") key.surface.showOk();
-			else {
-				this.#log.info(`Mode key ${cmd?.id ?? "?"}: ${cmd?.state ?? "forgotten"}${cmd?.error ? `: ${quote(cmd.error, 120)}` : ""}`);
-				key.surface.showAlert();
-			}
-		}
-		key.painter.update(modeKeySvg(this.#look(key)), null);
 	}
 }

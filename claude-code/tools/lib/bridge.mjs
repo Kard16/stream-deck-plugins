@@ -1,4 +1,4 @@
-// The fake bridge's HTTP side (claude-code/protocol/PROTOCOL.md, v1): the six /v1/ routes on 127.0.0.1,
+// The fake bridge's HTTP side (claude-code/protocol/PROTOCOL.md, v1): the five /v1/ routes on 127.0.0.1,
 // the control routes beside them, the registry and records readings, and a JSONL log of every request and
 // answer in the run folder. The token is checked like the deck checks it and never written anywhere. The
 // deck's logic lives in deck.mjs; this file only adapts HTTP and the folders to it, and reads the registry once
@@ -36,7 +36,6 @@ export const CONTROL_ROUTES = Object.freeze({
   '/control/deny': 'POST',
   '/control/dial': 'POST',
   '/control/prompt': 'POST',
-  '/control/mode': 'POST',
   '/control/rescan': 'POST',
   '/control/reset': 'POST',
 })
@@ -578,16 +577,15 @@ export async function startFakeBridge(options = {}) {
    */
   function dispatch(route, url, req, body, responder, watchClose, inputScrubbed) {
     switch (route) {
-      case ROUTES.permission:
-      case ROUTES.pretool: {
+      case ROUTES.permission: {
         const hostHeader = req.headers['x-deck-host']
         const take = () => {
-          const r = route === ROUTES.permission ? deck.permission({ body, hostHeader, responder, inputScrubbed }) : deck.pretool({ body, hostHeader, responder })
+          const r = deck.permission({ body, hostHeader, responder, inputScrubbed })
           if (r.id) watchClose(() => deck.clientClosed(r.id))
         }
         // A hook's request from a session the latest reading doesn't confirm: the registry is read once more, and the
         // deck then takes it or answers {} at once. Its client may have gone meanwhile, as the real deck allows for:
-        // then nothing is answered or held, and a mode command's allowance can't go to a request nobody hears.
+        // then nothing is answered or held.
         if (deck.hookNeedsReading(hostHeader, body)) {
           return rescan().then(() => {
             if (responder.open) {
@@ -595,11 +593,10 @@ export async function startFakeBridge(options = {}) {
               return
             }
             const host = typeof hostHeader === 'string' && HOST_PATTERN.test(hostHeader) ? hostHeader : null
-            const what = route === ROUTES.permission ? 'permission request' : 'mode check'
             log({
               kind: 'client-gone', route: route.slice('/v1/'.length), host, sid: typeof body.session_id === 'string' ? body.session_id : null,
               why: 'its client went away while the registry was read once more',
-              say: `${what} from ${host ?? '(no host)'}: its client went away while the registry was read once more, so it isn't taken`,
+              say: `permission request from ${host ?? '(no host)'}: its client went away while the registry was read once more, so it isn't taken`,
             })
           })
         }
@@ -658,9 +655,6 @@ export async function startFakeBridge(options = {}) {
           return
         case '/control/prompt':
           send(200, deck.prompt({ host: b.host, text: b.text }))
-          return
-        case '/control/mode':
-          send(200, deck.mode({ host: b.host, mode: b.mode }))
           return
         case '/control/rescan':
           await rescan()

@@ -14,7 +14,7 @@ import { EXPECT_SKIPPED, againstFake, interactive } from '../lib/drivers.mjs'
 import { fixtureFiles, parseFixture, readFixture } from '../lib/fixtures.mjs'
 import * as P from '../lib/play.mjs'
 import { play } from '../lib/play.mjs'
-import { ALLOW, DENY, MODE_TOOL, PRE_ALLOW, ROUTES, answerBody, approvePlanBody, joinLabels } from '../lib/protocol.mjs'
+import { ALLOW, DENY, ROUTES, answerBody, approvePlanBody, joinLabels } from '../lib/protocol.mjs'
 import { TOOLS, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const NAMES = fixtureFiles().map((f) => readFixture(f).name)
@@ -27,8 +27,8 @@ async function playAgainstFake(t, fx, env = tempEnv(t)) {
   return { r, steps, bridge, env }
 }
 
-test('play: there are 26 fixtures to play', () => {
-  assert.equal(NAMES.length, 26)
+test('play: there are 23 fixtures to play', () => {
+  assert.equal(NAMES.length, 23)
 })
 
 for (const name of NAMES) {
@@ -45,7 +45,7 @@ for (const name of NAMES) {
   })
 }
 
-test('play: all 26 in a row against one fake bridge, reset between fixtures', async (t) => {
+test('play: all 23 in a row against one fake bridge, reset between fixtures', async (t) => {
   const env = tempEnv(t)
   const bridge = await startBridge(t, env)
   const driver = againstFake({ url: bridge.url, token: env.token })
@@ -55,16 +55,13 @@ test('play: all 26 in a row against one fake bridge, reset between fixtures', as
   // The deck's command ids aren't the fixtures' c1, c2…: binding is what made the command fixtures pass.
   const log = runLog(env)
   const ids = log.filter((e) => e.kind === 'command' && e.state === 'queued').map((e) => e.id)
-  assert.deepEqual(ids, ['cmd-1', 'cmd-2', 'cmd-3', 'cmd-4', 'cmd-5', 'cmd-6'], 'hello-again, mode-from-auto, mode-raise, prompt, prompt-refused and stray-instance')
+  assert.deepEqual(ids, ['cmd-1', 'cmd-2', 'cmd-3', 'cmd-4'], 'hello-again, prompt-refused, prompt and stray-instance')
   // hello-again's poll after its registry file went and came back, the one poll the fixtures answer 409 hello first.
   assert.deepEqual(log.filter((e) => e.kind === 'poll-hello-first').map((e) => e.host), ['local_test-a'])
-  // The mode checks the fixtures make: the two allowed, mode-from-auto's and mode-raise's, each for its own command.
-  assert.deepEqual(log.filter((e) => e.kind === 'mode-check' && e.allowed).map((e) => e.cmd), ['cmd-2', 'cmd-3'])
-  // not-desktop's three hook requests from processes that aren't a desktop session of their own.
+  // not-desktop's two hook requests from processes that aren't a desktop session of their own.
   assert.deepEqual(log.filter((e) => e.kind === 'unconfirmed').map((e) => [e.route, e.why]), [
     ['permission', 'no host: X-Deck-Host is missing or not a local_ id'],
     ['permission', 'the registry lists local_test-a under another sessionId'],
-    ['pretool', 'the registry lists local_test-a under another sessionId'],
   ])
 })
 
@@ -72,7 +69,7 @@ test('play: all 26 in a row against one fake bridge, reset between fixtures', as
 // on how its own clock compares with them, or the fixtures would pass or fail by the date.
 const T0 = 1793600000000
 for (const [label, offset] of [['a week after', 7 * 86_400_000], ['a week before', -7 * 86_400_000]]) {
-  test(`play: all 26 pass with the bridge's clock ${label} the fixtures' times`, async (t) => {
+  test(`play: all 23 pass with the bridge's clock ${label} the fixtures' times`, async (t) => {
     const env = tempEnv(t)
     const started = Date.now()
     const bridge = await startBridge(t, env, { now: () => T0 + offset + (Date.now() - started) })
@@ -155,15 +152,14 @@ const mainEvents = (body) => (Array.isArray(body?.events) ? body.events : []).fi
 
 /**
  * A deck that answers presses its own way, for answers the fake bridge never gives: hello is ok, events and
- * results get 204, a press answers the oldest held permission request with `answer(key, its body, the press line's
- * value)`, and a mode
- * check gets `pretool(its body)`, `[status, json]`, at once. Polls go as PROTOCOL.md's "Commands" has them as far as
- * these fixtures need: held, the open one answered with none when the mod reports that the main loop's turn ended,
- * and those after it answered at once while the registry says busy and until a main-loop turn.start. It plays
- * nothing else of a deck: registry lines only set the status its polls go by, of the one session these fixtures
- * have, and expect lines go unchecked, so a fixture through it checks only the replies.
+ * results get 204, and a press answers the oldest held permission request with `answer(key, its body, the press
+ * line's value)`. Polls go as PROTOCOL.md's "Commands" has them as far as these fixtures need: held, the open one
+ * answered with none when the mod reports that the main loop's turn ended, and those after it answered at once while
+ * the registry says busy and until a main-loop turn.start. It plays nothing else of a deck: registry lines only set
+ * the status its polls go by, of the one session these fixtures have, and expect lines go unchecked, so a fixture
+ * through it checks only the replies.
  */
-async function stubDeck(t, answer, { pretool = () => [200, {}] } = {}) {
+async function stubDeck(t, answer) {
   const held = []
   const polls = []
   let taken = 0
@@ -181,7 +177,6 @@ async function stubDeck(t, answer, { pretool = () => [200, {}] } = {}) {
       const route = new URL(req.url, 'http://stub').pathname
       const body = () => JSON.parse(Buffer.concat(chunks).toString('utf8'))
       if (route === ROUTES.permission) held.push({ body: body(), reply })
-      else if (route === ROUTES.pretool) reply(...pretool(body()))
       else if (route === ROUTES.hello) reply(200, { v: 1, ok: true })
       else if (route === ROUTES.next) {
         if (turnEnded && status === 'busy') reply(200, { cmds: [] })
@@ -333,43 +328,6 @@ function fixtureOf(name, lines, registry = []) {
   return parseFixture([setup, ...lines].map((l) => JSON.stringify(l)).join('\n'), `${name}.jsonl`)
 }
 
-/** A mode check from A, as the mode hook sends it, for the app's mode tool. */
-const modeCheck = (as, extra = {}) => ({
-  plugin: {
-    ...(as ? { as } : {}), method: 'POST', path: '/v1/pretool', headers: { 'X-Deck-Host': HOST_A },
-    body: { session_id: SID_A, hook_event_name: 'PreToolUse', tool_name: MODE_TOOL, tool_input: { session_id: 'self', mode: 'plan' }, tool_use_id: 'toolu_plugin_0001', ...extra },
-  },
-})
-
-test("play: an answer to a mode check is held to PROTOCOL.md's two bodies, when it comes and at its reply, whatever the line expects", async (t) => {
-  const allowed = (expected) => fixtureOf('pretool', [modeCheck('q1'), { reply: { to: 'q1', status: 200, body: expected } }])
-  const inside = (extra) => ({ hookSpecificOutput: { ...PRE_ALLOW.hookSpecificOutput, ...extra } })
-  // The stub is sound: answering as PROTOCOL.md writes it, the line passes.
-  let { url, driver } = await stubDeck(t, () => ({}), { pretool: () => [200, PRE_ALLOW] })
-  let r = await play(allowed(PRE_ALLOW), { url, token: 'stub', driver })
-  assert.deepEqual([r.ok, r.checked, r.error], [true, 1, undefined])
-
-  const cases = [
-    // At the request's own line, before any reply line, though the line's body is all in it.
-    [PRE_ALLOW, [200, { ...PRE_ALLOW, note: 'x' }], /^line 2 \(plugin\): POST \/v1\/pretool: body\.note: not in any of PROTOCOL\.md's answers, got "x" \(an answer is the mode check's allow or \{\} exactly\)$/],
-    [PRE_ALLOW, [200, inside({ updatedInput: { session_id: 'self', mode: 'bypassPermissions' } })], /^line 2 \(plugin\): POST \/v1\/pretool: body\.hookSpecificOutput\.updatedInput: the deck never sends updatedInput/],
-    [{}, [200, inside({ permissionDecision: 'deny', permissionDecisionReason: 'No.' })], /^line 2 \(plugin\): POST \/v1\/pretool: body\.hookSpecificOutput\.permissionDecision: expected "allow", got "deny"/],
-    [{}, [204, undefined], /^line 2 \(plugin\): POST \/v1\/pretool: body: expected the mode check's allow or \{\}, got nothing$/],
-    // At the reply: an expected {} is no decision.
-    [{}, [200, PRE_ALLOW], /^line 3 \(reply\): q1: body: expected no decision \(\{\}\), got \{"hookSpecificOutput"/],
-  ]
-  for (const [expected, answer, why] of cases) {
-    ;({ url, driver } = await stubDeck(t, () => ({}), { pretool: () => answer }))
-    r = await play(allowed(expected), { url, token: 'stub', driver })
-    assert.equal(r.ok, false, `${JSON.stringify(answer)} should fail with ${why}`)
-    assert.match(r.error, why)
-  }
-  // A mode check with no reply line is held to them too: Claude Code acts on its answer all the same.
-  ;({ url, driver } = await stubDeck(t, () => ({}), { pretool: () => [200, { ...PRE_ALLOW, systemMessage: 'Allowed.' }] }))
-  r = await play(fixtureOf('unreplied', [modeCheck()]), { url, token: 'stub', driver })
-  assert.match(r.error ?? 'passed', /^line 2 \(plugin\): POST \/v1\/pretool: body\.systemMessage: Claude Code acts on it/)
-})
-
 /**
  * What README.md's ladder step 5 says a fixture still checks against a real deck, from its list "By what each fixture
  * still checks against such a deck": the text after the clause that names it, `` `a`, `b` and `c`: what they check. ``,
@@ -469,17 +427,18 @@ test('play: the interactive driver, with a scripted person pressing on a fake br
   assert.deepEqual(runLog(env).filter((e) => e.kind === 'command'), [], 'and nothing queued')
   assert.deepEqual(asked, [], 'and still nothing asked')
 
-  // Claude Code's requests are sent as they are: only the mod's carry its inst, bound to a fresh one per play.
+  // Claude Code's requests are sent as they are: only the mod's carry its inst, bound to a fresh one per play. This
+  // one is from a `claude` started inside the session, which the deck doesn't confirm, so it gets {} at once.
   const fx = fixtureOf('insts', [
     { plugin: { as: 'h', method: 'POST', path: '/v1/hello', body: { v: 1, sid: SID_A, host: HOST_A, inst: 'ia', cwd: '/s', model: 'm', plugin: '*', cc: '*' } } },
     { reply: { to: 'h', status: 200, body: { v: 1, ok: true } } },
-    modeCheck('q1', { inst: 'ia' }),
-    { reply: { to: 'q1', status: 200, body: {} } },
+    { plugin: { as: 'p1', method: 'POST', path: '/v1/permission', headers: { 'X-Deck-Host': HOST_A }, body: { session_id: 'sid-child', hook_event_name: 'PermissionRequest', tool_name: 'Read', tool_input: { file_path: '/s/a.md' }, inst: 'ia' } } },
+    { reply: { to: 'p1', status: 200, body: {} } },
   ])
   r = await play(fx, { url: bridge.url, token: env.token, driver, say })
   assert.equal(r.ok, true, r.error)
-  const sent = runLog(env).filter((e) => e.kind === 'request' && (e.path === '/v1/hello' || e.path === '/v1/pretool')).slice(-2)
-  assert.deepEqual(sent.map((e) => e.path), ['/v1/hello', '/v1/pretool'])
+  const sent = runLog(env).filter((e) => e.kind === 'request' && (e.path === '/v1/hello' || e.path === '/v1/permission')).slice(-2)
+  assert.deepEqual(sent.map((e) => e.path), ['/v1/hello', '/v1/permission'])
   assert.match(sent[0].body.inst, /^ia-[a-z0-9]+$/, "the mod's")
   assert.equal(sent[1].body.inst, 'ia', "Claude Code's, untouched")
 })
@@ -578,7 +537,7 @@ test('play: the interactive driver against a deck whose registry doesn\'t list t
   r = await play(readFixture('not-desktop'), { url: bridge.url, token: env.token, driver, say })
   assert.equal(r.ok, true, r.error)
   assert.deepEqual(repliesAndPresses(r).map((s) => [s.reply, s.why]), [['h1', "the deck refuses a hello only from a host its registry lists under another sessionId, and this mode skips registry lines: no registry it reads lists the fixture's host"]])
-  assert.equal(r.checked, 4, 'p1, p2, q1 and h2')
+  assert.equal(r.checked, 3, 'p1, p2 and h2')
   // A reply after a registry line is skipped, as README.md says of session-gone's p1.
   r = await play(readFixture('session-gone'), { url: bridge.url, token: env.token, driver, say })
   assert.equal(r.ok, true, r.error)
@@ -634,9 +593,9 @@ test('play: with registry lines skipped, only the reply to a poll answered at on
   assert.deepEqual(r.skipped.map((s) => [s.line, s.reply]), [[12, 'n3']])
 })
 
-test('play: the interactive driver skips and reports every Saved Prompt and Mode press, and the replies that expect its command, so no person sends a fixture\'s prompt or mode change', async (t) => {
+test('play: the interactive driver skips and reports every Saved Prompt press, and the replies that expect its command, so no person sends a fixture\'s prompt', async (t) => {
   // No real deck lists a fixture's session, so its Sessions dial is on one of the user's own: a press would send the
-  // fixture's prompt or mode change there. The fake bridge here reads an empty registry, as no real deck's lists them.
+  // fixture's prompt there. The fake bridge here reads an empty registry, as no real deck's lists them.
   const env = tempEnv(t)
   const bridge = await startBridge(t, env)
   const shown = []
@@ -647,8 +606,6 @@ test('play: the interactive driver skips and reports every Saved Prompt and Mode
     // [fixture, what's skipped in order, how many replies are checked]
     ['prompt', ['prompt', 'n1'], 1],
     ['prompt-refused', ['n2', 'prompt', 'n3'], 2],
-    ['mode-raise', ['mode', 'n1', 'q1', 'p1'], 1],
-    ['mode-from-auto', ['mode', 'n1', 'q2'], 4],
     ['stray-instance', ['prompt', 'n1'], 2],
     ['hello-again', ['n1', 'n2', 'prompt', 'n3'], 2],
   ]
@@ -657,9 +614,9 @@ test('play: the interactive driver skips and reports every Saved Prompt and Mode
     const r = await play(readFixture(name), { url: bridge.url, token: env.token, driver, say: (s) => shown.push(s) })
     assert.equal(r.ok, true, `${name}: ${r.error}\n${shown.join('\n')}`)
     assert.deepEqual([repliesAndPresses(r).map((s) => s.reply ?? s.press), r.checked], [skipped, checked], name)
-    for (const s of r.skipped.filter((x) => x.press)) assert.match(s.why, /^a (Saved Prompt|Mode) press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session/, name)
+    for (const s of r.skipped.filter((x) => x.press)) assert.match(s.why, /^a Saved Prompt press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session/, name)
     const cmd = r.skipped.find((x) => x.reply && /command/.test(x.why))
-    assert.equal(cmd?.why, 'it expects a command that only a Saved Prompt or Mode press queues, and the press was skipped', name)
+    assert.equal(cmd?.why, 'it expects a command that only a Saved Prompt press queues, and the press was skipped', name)
     // A skipped press gives no reply after it a person's time: nothing here waits on one.
     assert.ok(Date.now() - started < 4000, `${name} took ${Date.now() - started} ms`)
   }
@@ -672,7 +629,7 @@ test('play: the interactive driver skips and reports every Saved Prompt and Mode
 
 test('play: the interactive driver skips and reports every expect line of every fixture, and asks a person nothing, as against a real deck', async (t) => {
   // A real deck shows nothing of a fixture's session: it lists only its registry's sessions, holds none of the
-  // fixture's requests, and has no command of the fixture's, since Saved Prompt and Mode presses are skipped. So an
+  // fixture's requests, and has no command of the fixture's, since Saved Prompt presses are skipped. So an
   // expect line, the fixture's deck's state, is about what it doesn't show, and a person asked to check one could
   // only report the deck's own sessions. Played as against a real deck: a bridge whose registry lists none of the
   // fixtures' sessions, never reset between fixtures.
@@ -741,7 +698,6 @@ test("play: the interactive driver skips a hook's reply only when it expects a d
     { plugin: { as: 'p1', method: 'POST', path: '/v1/permission', headers: { 'X-Deck-Host': HOST_A }, body: { session_id: SID_A, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } } } },
     { reply: { to: 'p1', status: 200, body: expected } },
   ])
-  const check = (expected) => fixtureOf('pretool', [modeCheck('q1'), { reply: { to: 'q1', status: 200, body: expected } }])
   const hello = (status, body) => fixtureOf('hello409', [
     { plugin: { as: 'h', method: 'POST', path: '/v1/hello', body: { v: 1, sid: SID_A, host: HOST_A, inst: 'ia', cwd: '/s', model: 'm', plugin: '*', cc: '*' } } },
     { reply: { to: 'h', status, body } },
@@ -757,8 +713,6 @@ test("play: the interactive driver skips a hook's reply only when it expects a d
     ['an error at once, not {}', permission(ALLOW), ROUTES.permission, [500, { error: 'x' }, 0], [[], 0, false], /p1: status: expected 200, got 500/],
     ['Allow at once', permission(ALLOW), ROUTES.permission, [200, ALLOW, 0], [[], 1, true]],
     ['{} at once, which the line expects', permission({}), ROUTES.permission, [200, {}, 0], [[], 1, true]],
-    ['a mode check\'s {} at once', check(PRE_ALLOW), ROUTES.pretool, [200, {}, 0], skippedOnce('q1')],
-    ['a mode check\'s {} after 700 ms', check(PRE_ALLOW), ROUTES.pretool, [200, {}, 700], [[], 0, false], /^line 3 \(reply\): q1: body\.hookSpecificOutput: missing/],
     ['a hello\'s ok, where the line expects 409', hello(409, { error: 'not this session' }), ROUTES.hello, [200, { v: 1, ok: true }, 0], skippedOnce('h')],
     ['a hello\'s 409, as the line expects', hello(409, { error: 'not this session' }), ROUTES.hello, [409, { error: 'not this session' }, 0], [[], 1, true]],
     ['a hello\'s version refusal, where the line expects 409', hello(409, { error: 'not this session' }), ROUTES.hello, [200, { v: 2, ok: false, error: 'version' }, 0], [[], 0, false], /h: status: expected 409, got 200/],

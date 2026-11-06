@@ -78,7 +78,6 @@ const DECK = 'claude-code/deck/src'
 const REGISTRY_TS = `${DECK}/registry/registry.ts`
 const RECORDS_TS = `${DECK}/records/records.ts`
 const PROTOCOL = 'claude-code/protocol/PROTOCOL.md'
-const COMMANDS_TS = 'claude-code/plugin/hooks/commands.ts'
 const DESKTOP_TS = 'claude-code/plugin/hooks/desktop.ts'
 const STATUS_TS = `${DECK}/model/status.ts`
 /** The deck's "seen" check, whose two answers check 7 reads as it does. */
@@ -179,7 +178,7 @@ export const RECORD_FIELDS = Object.freeze([
   },
   {
     field: 'permissionMode', expect: 'mode name', values: MODE_NAMES, need: 'required', presence: 'always', reads: [RECORDS_TS, 'permissionMode: str(o.permissionMode, 40)'],
-    why: "The Sessions and Mode strips show it for a session whose mod hasn't reported a mode (names in format.ts).",
+    why: "A Session Slot's strip shows it for a session whose mod hasn't reported a mode (names in format.ts).",
     check: (v) => aNonEmptyString(v) ?? (MODE_NAMES.includes(v) ? null : 'mode the deck has no name for'),
   },
   {
@@ -251,7 +250,7 @@ export const LOADER_SPAN = 2048
 
 /**
  * What the deck and the mod use from the app's code, as strings in app.asar. Each needle says how bad its absence is:
- * `fail` for the deck's own route or tool, `warn` where the absence alone doesn't prove a change. A `looser` needle
+ * `fail` for one the deck or the mod needs, `warn` where the absence alone doesn't prove a change. A `looser` needle
  * found in place of a missing one turns its fail into a warn: the thing is there, changed. A needle with `after`
  * counts only where it lies wholly in the `within` bytes after an occurrence of the first of `after.texts` that the
  * bundle has, and so does its looser one: the same words elsewhere are another piece of code. `sources` are where the
@@ -285,17 +284,6 @@ export const BUNDLE_CHECKS = Object.freeze([
     needles: [{ text: HOST_PATTERN.source, ifMissing: 'fail', looser: '^local_', sources: [[`${DECK}/protocol/wire.ts`, 'export const HOST_PATTERN'], [PLAN, "An id that doesn't match `^local_"]] }],
   },
   {
-    id: 'mode-tool', name: 'mode tool',
-    why: "The Mode dial and key change a session's mode through the mod's $.mcp.call to this server and tool.",
-    needles: [
-      // The deck's MODE_TOOL is mcp__ccd_session_mgmt__set_session_permission_mode, the name the app's tool has in a
-      // PermissionRequest (S4 finished); the mod calls $.mcp.call('ccd_session_mgmt', 'set_session_permission_mode', …)
-      // (claude-code/plugin/hooks/register.ts:40).
-      { text: 'ccd_session_mgmt', ifMissing: 'fail', sources: [[`${DECK}/protocol/wire.ts`, 'export const MODE_TOOL'], [PLAN, 'tool_name: mcp__ccd_session_mgmt__set_session_permission_mode']] },
-      { text: 'set_session_permission_mode', ifMissing: 'fail', sources: [[`${DECK}/protocol/wire.ts`, 'export const MODE_TOOL'], [PLAN, 'tool_name: mcp__ccd_session_mgmt__set_session_permission_mode']] },
-    ],
-  },
-  {
     id: 'summary-loader', name: 'summary loader',
     why: "Status rule 6 reads a record's postTurnSummary only as the app's loader keeps it: these seven fields each missing or a string, and is_noteworthy missing or a boolean (PROTOCOL.md, status rule 6).",
     needles: [
@@ -322,27 +310,6 @@ export const BUNDLE_CHECKS = Object.freeze([
       // And `d.CLAUDE_CODE_HOST_SESSION_ID=n` in the same environment.
       { text: '.CLAUDE_CODE_HOST_SESSION_ID=', ifMissing: 'fail', looser: 'CLAUDE_CODE_HOST_SESSION_ID', sources: [[DESKTOP_TS, 'const host = env.CLAUDE_CODE_HOST_SESSION_ID']] },
     ],
-  },
-])
-
-/**
- * What the mod reads from the engine's own words, in the newest bundled Claude Code's binary, which embeds its
- * JavaScript. 2.1.309 refuses a `$.mcp.call` with `${s.plugin}: $.mcp.call(${e}, ${n}) refused: ${q.deny}`, the server
- * and the tool between the parentheses; the mod finds `$.mcp.call(ccd_session_mgmt, set_session_permission_mode)
- * refused: ` in a rejection's message to report a mode change the engine refused as `refused`, with its reason
- * (refusalOf, claude-code/plugin/hooks/commands.ts; PROTOCOL.md, Commands). Worded otherwise, the mod reports it
- * `failed`, with the whole message, which the deck shows as it shows `refused`: so a change only warns. `template` is
- * the shape found after each `text`, in at most `within` bytes.
- */
-export const ENGINE_CHECKS = Object.freeze([
-  {
-    id: 'mcp-refused', name: 'refused $.mcp.call',
-    why: "The mod reports a mode change the engine refuses as refused, with the engine's reason, by finding these words in the rejection (refusalOf in claude-code/plugin/hooks/commands.ts); worded otherwise, it reports failed, with the whole message.",
-    text: '$.mcp.call(',
-    template: /^\$\.mcp\.call\(\$\{[\w$.]{1,40}\}, \$\{[\w$.]{1,40}\}\) refused: \$\{/,
-    refused: ') refused: ',
-    within: 120,
-    sources: [[COMMANDS_TS, 'const MODE_CALL_REFUSED = '], [PROTOCOL, '`$.mcp.call(<server>, <tool>) refused: <reason>` in 2.1.309']],
   },
 ])
 
@@ -1006,23 +973,7 @@ export async function checkModsApi({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, r
   }
 }
 
-// ---- 6. the engine's words
-
-/**
- * How often `spec.text` occurs in `buf`, and what follows it, read as Latin-1, in at most `spec.within` bytes:
- * `template`, the engine's own shape; `near`, `spec.refused` in another shape; and `all` of them.
- */
-export function engineHits(buf, spec) {
-  const needle = Buffer.from(spec.text, 'utf8')
-  const hits = { all: 0, template: 0, near: 0 }
-  for (let i = buf.indexOf(needle); i !== -1; i = buf.indexOf(needle, i + needle.length)) {
-    hits.all++
-    const after = buf.subarray(i, i + spec.within).toString('latin1')
-    if (spec.template.test(after)) hits.template++
-    else if (after.includes(spec.refused)) hits.near++
-  }
-  return hits
-}
+// ---- 6. the engine
 
 /**
  * The files of a file table check 6 searches: all but those packed (`.zst`), native addons (`.node`) and assets
@@ -1031,9 +982,9 @@ export function engineHits(buf, spec) {
 export const isSearched = (f) => !/\.(zst|node|asset)$/.test(f.name)
 
 /**
- * Check 6: the newest bundled Claude Code's binary, which embeds the engine's JavaScript, scanned for the words the
- * mod reads (ENGINE_CHECKS); then its file table, read by refresh.mjs's reader, for ENGINE_JS_CHECKS. When the table
- * can't be read, or has no file to search, one row says so in their place. Read only, and fast: no process is run.
+ * Check 6: the newest bundled Claude Code's binary, which embeds the engine's JavaScript: its file table, read by
+ * refresh.mjs's reader, searched for ENGINE_JS_CHECKS. When the table can't be read, or has no file to search, one row
+ * says so in their place. Read only, and fast: no process is run.
  */
 export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs: fsys = nodeFs, binaries = binaryCache(fsys) } = {}) {
   const G = 'engine'
@@ -1048,20 +999,6 @@ export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs
     return [row(G, 'engine', 'engine', 'fail', `can't read ${tilde(cc.binary)}: ${errCode(err)}`)]
   }
   const rows = [row(G, 'engine', 'engine', 'ok', `Claude Code ${cc.newest}, ${(buf.length / 1e6).toFixed(1)} MB`, { version: cc.newest, binary: cc.binary, bytes: buf.length })]
-  for (const spec of ENGINE_CHECKS) {
-    const hits = engineHits(buf, spec)
-    const shape = `${spec.text}<server>, <tool>${spec.refused}<reason>`
-    let status = 'ok'
-    let reason = `${shape} ×${hits.template}, as the mod reads it`
-    if (!hits.template) {
-      status = 'warn'
-      reason = hits.near
-        ? `${shape} not found, though ${spec.text}…${spec.refused.trim()} is (×${hits.near}), so it changed. ${spec.why}`
-        : `${shape} not found${hits.all ? ` (found: ${spec.text} ×${hits.all})` : ''}. ${spec.why}`
-    }
-    rows.push(row(G, `engine.${spec.id}`, `engine: ${spec.name}`, status, reason, { version: cc.newest, text: spec.text, template: spec.template.source, ...hits, sources: spec.sources.map(cite) }))
-  }
-
   const checks = ENGINE_JS_CHECKS.map((c) => c.name).join(' and ')
   let table
   try {
@@ -1312,18 +1249,16 @@ hold (docs/claude-code/plan.md, Phase 6): one row per check, ok, warn or fail, w
      statuses they have. A field no entry has fails when the deck needs it; one some lack warns.
   3. The app's session records: the same, a summary the app's loader drops counting as none, and
      whether each running session's record is found by its host, as the deck finds it.
-  4. The app bundle, app.asar: the jump and needs-input routes, the local_ id pattern, the mode tool,
-     the record loader's summary fields with its is_noteworthy check within 2048 bytes after them
-     (status rule 6), and the body of the app's mapper to the entrypoint the mod's gate reads, with
-     the host id's assignment. A string found only in another form warns; one the deck needs, gone,
-     fails.
+  4. The app bundle, app.asar: the jump and needs-input routes, the local_ id pattern, the record
+     loader's summary fields with its is_noteworthy check within 2048 bytes after them (status rule
+     6), and the body of the app's mapper to the entrypoint the mod's gate reads, with the host id's
+     assignment. A string found only in another form warns; one the deck needs, gone, fails.
   5. The mods API: the newest bundled Claude Code's \`plugin validate\` and \`plugin test\` on
      ${PLUGIN_PATH} as committed (git HEAD), with a fresh CLAUDE_CONFIG_DIR and HOME. About 5 s.
-  6. The engine, the newest bundled Claude Code: in its binary, the words of a refused $.mcp.call,
-     which the mod reads (a change warns); in every file of its table but packed ones, native addons
-     and assets, read with refresh.mjs's reader, where it sets the registry's statuses (a change
-     warns) and its own desktop session test, which the mod's gate copies (its entrypoints gone
-     fails). A table it can't read fails.
+  6. The engine, the newest bundled Claude Code: in every file of its table but packed ones, native
+     addons and assets, read with refresh.mjs's reader, where it sets the registry's statuses (a
+     change warns) and its own desktop session test, which the mod's gate copies (its entrypoints
+     gone fails). A table it can't read fails.
   7. Seen: runs ${DEFAULTS.lsappinfo} front, then info -only bundleid, as the deck's seen check does, and
      reads both as front.ts does: another shape fails, no app in front warns, and it never prints
      another app's name or bundle id. Then Claude.app's bundle id, against the one the deck compares

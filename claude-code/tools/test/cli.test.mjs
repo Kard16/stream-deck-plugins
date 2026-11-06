@@ -95,6 +95,8 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
     [['state', 'x'], /state takes no arguments/],
     [['prompt', 'local_x'], /prompt takes <host> <text>/],
     [['bogus'], /unknown command bogus/],
+    // The Mode dial went in Phase 8 (PROTOCOL.md, as amended on 2026-11-06).
+    [['mode', 'local_x', 'plan'], /unknown command mode/],
     [['state', '--url', 'not a url'], /--url not a url isn't a URL/],
     [['state', '--port', 'x'], /--port must be a whole number/],
     // The dial's presses: a host, then allow or deny, plan and its choice, or picks and its JSON, and at most an id.
@@ -118,14 +120,14 @@ test('cli: usage errors exit 2, before any token is read', async (t) => {
   }
 })
 
-test('cli: fake-claude --against-fake plays all 26 fixtures against the fake bridge\'s own CLI', async (t) => {
+test('cli: fake-claude --against-fake plays all 23 fixtures against the fake bridge\'s own CLI', async (t) => {
   const env = tempEnv(t)
   const home = { HOME: env.root }
   const { url } = await serve(env, ['--token-file', env.tokenFile, '--run-dir', env.runDir, '--registry-dir', env.registryDir, '--records-dir', env.recordsDir, '--quiet'], home)
   const r = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile], { env: home })
   assert.equal(r.code, 0, `${r.out}${r.err}`)
-  assert.match(r.out, /26 passed, 0 failed \(against-fake\)/)
-  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 26)
+  assert.match(r.out, /23 passed, 0 failed \(against-fake\)/)
+  assert.equal((r.out.match(/^ok {2}/gm) ?? []).length, 23)
 
   const one = await run(CLAUDE, ['--against-fake', '--url', url, '--token-file', env.tokenFile, '--verbose', 'two-held'], { env: home })
   assert.equal(one.code, 0, one.out)
@@ -217,9 +219,6 @@ test('cli: the control commands', async (t) => {
   r = await ctl('prompt', 'local_seven', 'List the files.')
   assert.equal(r.code, 1, 'no plugin in that session')
   assert.match(JSON.parse(r.out).error, /has no plugin/)
-  r = await ctl('mode', 'local_seven', 'bypassPermissions')
-  assert.equal(r.code, 1)
-  assert.match(JSON.parse(r.out).error, /mode must be one of/)
   r = await ctl('answer', 'p1', 'allow')
   assert.equal(r.code, 1)
   assert.match(JSON.parse(r.out).error, /no request p1/)

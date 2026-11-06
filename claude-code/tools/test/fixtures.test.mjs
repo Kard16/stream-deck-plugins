@@ -4,9 +4,9 @@ import test from 'node:test'
 
 import { FIXTURES_DIR, FixtureError, fixtureFiles, parseFixture, readFixture, resolveFixture } from '../lib/fixtures.mjs'
 
-test('fixtures: all 26 parse, each with a setup, and every reply checks an earlier labeled request', () => {
+test('fixtures: all 23 parse, each with a setup, and every reply checks an earlier labeled request', () => {
   const files = fixtureFiles()
-  assert.equal(files.length, 26)
+  assert.equal(files.length, 23)
   for (const file of files) {
     const fx = readFixture(file)
     assert.ok(fx.setup.session?.host, `${fx.name} has a setup session`)
@@ -34,6 +34,8 @@ test('fixtures: a malformed fixture fails with its file and line', () => {
     [`{"plugin":{"method":"GET","path":"/"}}\n${setup}`, /x\.jsonl:1: plugin before the setup line/],
     [`${setup}\n${setup}`, /x\.jsonl:2: a second setup line/],
     [`${setup}\n{"press":{"approve":{},"deny":{}}}`, /x\.jsonl:2: press has one key/],
+    // The Mode dial and key went in Phase 8 (PROTOCOL.md, "Fixtures", as amended on 2026-11-06).
+    [`${setup}\n{"press":{"mode":{"session":"local_x","mode":"plan"}}}`, /x\.jsonl:2: press has one key, one of approve, deny, prompt, dial$/],
     [`${setup}\n{"plugin":{"as":"a","method":"GET","path":"/"}}\n{"plugin":{"as":"a","method":"GET","path":"/"}}`, /x\.jsonl:3: label a used twice/],
     [`${setup}\n{"shout":{}}`, /x\.jsonl:2: a line has one key/],
     [`${setup}\nnot json`, /x\.jsonl:2: not JSON/],

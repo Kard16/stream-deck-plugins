@@ -15,23 +15,6 @@
           }
         ]
       }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "mcp__ccd_session_mgmt__set_session_permission_mode",
-        "hooks": [
-          {
-            "type": "http",
-            "url": "http://127.0.0.1:47600/v1/pretool",
-            "timeout": 5,
-            "headers": {
-              "Authorization": "Bearer $DECK_TOKEN",
-              "X-Deck-Host": "$CLAUDE_CODE_HOST_SESSION_ID"
-            },
-            "allowedEnvVars": ["DECK_TOKEN", "CLAUDE_CODE_HOST_SESSION_ID"]
-          }
-        ]
-      }
     ]
   },
   "modules": ["./register.ts"]

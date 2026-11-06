@@ -112,19 +112,16 @@ write("plugin/icon.png", png(256, rasterIcon(256)));
 write("plugin/icon@2x.png", png(512, rasterIcon(512)));
 // Category icon (28 px) and action-list icons (20 px): monochrome white SVG.
 write("plugin/category-icon.svg", `${art.categoryIconSvg(28)}\n`);
-for (const kind of ["sessions", "mode", "approve", "deny", "prompt", "mode-key", "session", "slot", "others"]) {
+for (const kind of ["sessions", "approve", "deny", "prompt", "session", "slot", "others"]) {
 	write(`actions/${kind}/icon.svg`, `${art.actionIconSvg(kind)}\n`);
 }
 // State images and the dials' encoder icons (72 px). Each key's is its look with the bridge up and nothing to
 // show; the plugin replaces it with live images once the key appears.
 write("actions/sessions/key.svg", `${art.sessionsKeySvg(72)}\n`);
 write("actions/sessions/encoder.svg", `${art.sessionsEncoderSvg(72)}\n`);
-write("actions/mode/key.svg", `${art.modeDialKeySvg(72)}\n`);
-write("actions/mode/encoder.svg", `${art.modeEncoderSvg(72)}\n`);
 write("actions/approve/key.svg", `${art.decisionKeySvg({ decision: "allow", online: true, count: 0, oldest: null }, 72)}\n`);
 write("actions/deny/key.svg", `${art.decisionKeySvg({ decision: "deny", online: true, count: 0, oldest: null }, 72)}\n`);
 write("actions/prompt/key.svg", `${art.promptKeySvg({ label: null, target: null, state: "idle", online: true }, 72)}\n`);
-write("actions/mode-key/key.svg", `${art.modeKeySvg({ mode: null, active: false, pending: false, target: null, online: true }, 72)}\n`);
 write("actions/session/key.svg", `${art.sessionKeySvg({ title: null, status: "", statusColor: "#6A707A" }, 72)}\n`);
 // The Session Slot's key image is an empty slot's face, and its dial's encoder icon the slot glyph; Other Sessions'
 // is its dim face with no other sessions.

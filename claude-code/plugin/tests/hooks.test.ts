@@ -21,7 +21,7 @@ test('hello goes first, with the ids, cwd, model and versions; then one poll, wi
     inst: expect.any(String),
     cwd: '/sandbox',
     model: MODEL,
-    plugin: '0.2.1',
+    plugin: '0.3.0',
     cc: '2.1.309',
   })
   expect(poll?.method).toBe('GET')
@@ -293,7 +293,7 @@ test('a prompt reports waiting, then done; one the engine drops is refused with 
   expect(w.to('/v1/next')).toHaveLength(2)
 })
 
-test('commands the mod won\'t run fail with the reason; one without an id is skipped; an id delivered twice runs once', async ($, on) => {
+test('commands the mod won\'t run fail with the reason, a mode command among them; one without an id is skipped; an id delivered twice runs once', async ($, on) => {
   const submitted: string[] = []
   const w = world(on, {
     submit: text => {
@@ -307,7 +307,8 @@ test('commands the mod won\'t run fail with the reason; one without an id is ski
     { id: 'c1', t: 'prompt', text: '   ' },
     { id: 'c2', t: 'model', model: 'opus' },
     { t: 'prompt', text: 'no id' },
-    { id: 'c3', t: 'mode', mode: 'bypassPermissions' },
+    // There are no mode commands since plugin 0.3.0 (PROTOCOL.md, "Commands"): one is a type the mod doesn't know.
+    { id: 'c3', t: 'mode', mode: 'acceptEdits' },
     { id: 'c4', t: 'prompt', text: 'Only once.' },
   ])
   await w.settle()
@@ -317,7 +318,9 @@ test('commands the mod won\'t run fail with the reason; one without an id is ski
   const results = w.results()
   expect(results.filter(r => r.id === 'c1')).toEqual([{ id: 'c1', state: 'failed', error: 'the prompt has no text' }])
   expect(results.filter(r => r.id === 'c2')).toEqual([{ id: 'c2', state: 'failed', error: expect.stringMatching(/no command of type "model"/) }])
-  expect(results.filter(r => r.id === 'c3')).toEqual([{ id: 'c3', state: 'failed', error: expect.stringMatching(/not "bypassPermissions"/) }])
+  expect(results.filter(r => r.id === 'c3')).toEqual([{ id: 'c3', state: 'failed', error: expect.stringMatching(/no command of type "mode"/) }])
+  // Nor does it tell the deck of a mode it didn't see.
+  expect(w.settings()).toEqual([])
   expect(results.filter(r => r.id === 'c4')).toEqual([{ id: 'c4', state: 'waiting' }, { id: 'c4', state: 'done' }])
   expect(results).toHaveLength(5)
 })
@@ -341,70 +344,22 @@ test('a command whose id is the empty string still has a string id: it runs and 
   ])
 })
 
-test("a mode command calls the app's own tool for this session: done with its text, then settings; refused with the tool's text; failed when the call throws", async ($, on) => {
-  const calls: unknown[] = []
-  const w = world(on, {
-    mcp: e => {
-      calls.push(e)
-      if (e.args.mode === 'plan') {
-        return { value: { content: [{ type: 'text', text: 'Refused: this session is waiting for the user to answer a request.' }], isError: true } }
-      }
-      // The kit words this as 2.1.309 words a call to a tool the session hasn't got: `<plugin>: $.mcp.call: <reason>`.
-      if (e.args.mode === 'auto') return { deny: 'no connected MCP tool "set_session_permission_mode" on a server named "ccd_session_mgmt"' }
-      return { value: { content: [{ type: 'text', text: 'This session now runs in Accept edits mode.' }], isError: false } }
-    },
-  })
-  await $.session.start(START)
-  await w.settle()
-  w.deliver([{ id: 'c1', t: 'mode', mode: 'acceptEdits' }])
-  await w.settle()
-  w.deliver([{ id: 'c2', t: 'mode', mode: 'plan' }])
-  await w.settle()
-  w.deliver([{ id: 'c3', t: 'mode', mode: 'auto' }])
-  await w.settle()
-  expect(calls).toEqual([
-    { server: 'ccd_session_mgmt', tool: 'set_session_permission_mode', args: { session_id: 'self', mode: 'acceptEdits' } },
-    { server: 'ccd_session_mgmt', tool: 'set_session_permission_mode', args: { session_id: 'self', mode: 'plan' } },
-    { server: 'ccd_session_mgmt', tool: 'set_session_permission_mode', args: { session_id: 'self', mode: 'auto' } },
-  ])
-  expect(w.results()).toEqual([
-    { id: 'c1', state: 'done', detail: 'This session now runs in Accept edits mode.' },
-    { id: 'c2', state: 'refused', error: 'Refused: this session is waiting for the user to answer a request.' },
-    { id: 'c3', state: 'failed', error: expect.stringMatching(/no connected MCP tool "set_session_permission_mode"/) },
-  ])
-  // Mode commands skip waiting; a done one is followed by the new mode.
-  expect(w.settings()).toEqual([{ mode: 'acceptEdits' }])
-  const order = w.sent.filter(r => r.route !== '/v1/next').map(r => (r.route === '/v1/events' ? r.body.events[0].t : r.body.state ?? r.route))
-  expect(order).toEqual(['/v1/hello', 'done', 'settings', 'refused', 'failed'])
-})
-
-test("a mode change the engine refuses, as the auto-mode classifier did from Auto in Phase 4, is refused with the engine's reason and brings no settings; the call's other errors are failed", async () => {
-  // The kit answers `$.mcp.call` from the test's own hook, whose `{ deny }` reads like any other failed call, so the
-  // engine's refusal is played here in 2.1.309's own words, as register.ts's adapter hands them on.
-  const reason = 'The server-side auto mode classifier judged this action dangerous (it gave no explanation)'
-  const refused = (why: string) => `streamdeck-bridge: $.mcp.call(ccd_session_mgmt, set_session_permission_mode) refused: ${why}`
+test("a prompt whose call throws is failed, after its waiting, with the error's message, or a reason of the mod's when it threw no error", async () => {
   const run = async (err: unknown): Promise<unknown[]> => {
     const reported: unknown[] = []
     const host: CommandHost = {
-      submit: async () => ({}),
-      setMode: async () => {
+      submit: async () => {
         throw err
       },
     }
-    await runCommand({ id: 'c1', t: 'mode', mode: 'default' }, host, {
+    await runCommand({ id: 'c1', t: 'prompt', text: 'Carry on.' }, host, {
       result: (id, state, extra) => reported.push({ id, state, ...extra }),
-      modeSet: mode => reported.push({ modeSet: mode }),
     })
     return reported
   }
-  expect(await run(new Error(refused(reason)))).toEqual([{ id: 'c1', state: 'refused', error: reason }])
-  expect(await run(refused(reason))).toEqual([{ id: 'c1', state: 'refused', error: reason }])
-  expect(await run(new Error(refused(' ')))).toEqual([{ id: 'c1', state: 'refused', error: 'the engine refused the mode change' }])
-  for (const other of [
-    'streamdeck-bridge: $.mcp.call: no connected MCP tool "set_session_permission_mode" on a server named "ccd_session_mgmt"',
-    'streamdeck-bridge: $.tool.call(mcp__ccd_session_mgmt__set_session_permission_mode) produced no result (aborted)',
-  ]) {
-    expect(await run(new Error(other))).toEqual([{ id: 'c1', state: 'failed', error: other }])
-  }
-  expect(await run({ why: 'not an error' })).toEqual([{ id: 'c1', state: 'failed', error: 'the call failed without a reason' }])
+  const waiting = { id: 'c1', state: 'waiting' }
+  const why = 'streamdeck-bridge: $.prompt.submit: the engine took no prompt'
+  expect(await run(new Error(why))).toEqual([waiting, { id: 'c1', state: 'failed', error: why }])
+  expect(await run(why)).toEqual([waiting, { id: 'c1', state: 'failed', error: why }])
+  expect(await run({ why: 'not an error' })).toEqual([waiting, { id: 'c1', state: 'failed', error: 'the call failed without a reason' }])
 })
