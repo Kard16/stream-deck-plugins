@@ -7,10 +7,8 @@ import { COALESCE_MS, type DialSurface } from "../sessions/dials.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import { type Feedback, PAINT_INTERVAL_MS, StripPainter } from "../util/painter.js";
-import { Ticker } from "../util/ticker.js";
 import type { SlotId } from "./ids.js";
 import { type JumpModel, jumpTo } from "./jump.js";
-import { TICK_MS } from "./keys.js";
 import type { Slots } from "./slots.js";
 
 /** How many info pages the strip has while its session needs nothing: Now, Context, Setup (session-keys.md, The strip). */
@@ -151,7 +149,6 @@ export type SlotDialsOptions = {
 	/** PICK_SETTLE_MS; the fixture runner turns it off with 0. */
 	pickSettleMs?: number;
 	goneMs?: number;
-	tickMs?: number;
 	/** How long a turn's repaint waits for more ticks, COALESCE_MS; 0 repaints at once (the fixture runner). */
 	coalesceMs?: number;
 };
@@ -241,6 +238,9 @@ type Current =
  *
  * **Starting over:** when the session's oldest held request changes, or the slot's session does, the screen starts over.
  *
+ * **Repainting:** whenever the slots change, which they also do when a `since` the strips show next reads differently
+ * (Slots' repaint tick, hardening.md B6), and with every change to the dial's own state.
+ *
  * The SDK wrapper calls `add` on willAppear with the dial's slot (dialSlotId of its device, the device's rows and its
  * column), `remove` on willDisappear, and `rotate`, `down`, `up` and `tap` on its events. `add` and `remove` tell the
  * slots the slot is showing or not.
@@ -260,7 +260,6 @@ export class SlotDials {
 	readonly #coalesceMs: number;
 	readonly #dials = new Map<string, Dial>();
 	readonly #listeners = new Set<(id: string, screen: SlotScreen) => void>();
-	readonly #ticker: Ticker;
 
 	constructor(slots: Slots, model: SlotDialsModel, opts: SlotDialsOptions) {
 		this.#slots = slots;
@@ -275,7 +274,6 @@ export class SlotDials {
 		this.#pickSettleMs = opts.pickSettleMs ?? PICK_SETTLE_MS;
 		this.#goneMs = opts.goneMs ?? GONE_MS;
 		this.#coalesceMs = opts.coalesceMs ?? COALESCE_MS;
-		this.#ticker = new Ticker(this.#clock, opts.tickMs ?? TICK_MS, () => this.#paintAll(), { log: this.#log, what: "the slot dials' repaint tick" });
 		slots.onChange(() => this.refresh());
 	}
 
@@ -357,7 +355,6 @@ export class SlotDials {
 		// The app forgot the strip: the layout and every key go again.
 		dial.layout = null;
 		dial.painter.forget();
-		this.#ticker.start();
 		this.#slots.appear(slot, id);
 		this.#sync(dial);
 		this.#paint(dial);
@@ -369,7 +366,6 @@ export class SlotDials {
 		if (dial.repaintTimer !== null) this.#clock.clearTimeout(dial.repaintTimer);
 		dial.painter.dispose();
 		this.#dials.delete(id);
-		if (this.#dials.size === 0) this.#ticker.stop();
 		this.#slots.disappear(dial.slot, id);
 	}
 
@@ -780,10 +776,6 @@ export class SlotDials {
 	}
 
 	// ---- paint ----
-
-	#paintAll(): void {
-		for (const dial of this.#dials.values()) this.#paint(dial);
-	}
 
 	#paint(dial: Dial): void {
 		const screen = this.#screen(dial);

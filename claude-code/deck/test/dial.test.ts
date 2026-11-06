@@ -52,6 +52,24 @@ const shown = (dials: SessionsDials): unknown => {
 };
 
 describe("Sessions dial", () => {
+	test("with no dial on the deck, a change to the model costs it nothing: it reads no sessions; the first dial to appear reads them afresh (B2)", () => {
+		const model = new SessionModel({ clock: new FakeClock(), wallNow: () => 5000 });
+		model.setRegistry(list("1", "2"));
+		let reads = 0;
+		const counting = { sessions: () => (reads++, model.sessions()), target: () => model.target(), pick: (key: string) => model.pick(key), onChange: (fn: () => void) => model.onChange(fn) };
+		const dials = new SessionsDials(counting, { clock: new FakeClock(), paintIntervalMs: 0 });
+		model.setRegistry(list("1", "2", "3"));
+		model.setBridgeState("listening");
+		assert.equal(reads, 0);
+		dials.add("d1", { setFeedback: () => {}, showAlert: () => {} });
+		assert.deepEqual([reads, (dials.painted("d1")?.pos as { value?: unknown } | undefined)?.value], [1, "1/3"]);
+		model.setRegistry(list("1", "2", "3", "4"));
+		assert.deepEqual([reads, (dials.painted("d1")?.pos as { value?: unknown } | undefined)?.value], [2, "1/4"]);
+		dials.remove("d1");
+		model.setRegistry(list("1"));
+		assert.equal(reads, 2, "gone: nothing again");
+	});
+
 	test("shows one session in the layout's own keys: title, status, context, model and effort, position", () => {
 		const { clock, model, dials, sent } = setup([session("1", { name: "Fix the build", status: "busy" }), session("2")]);
 		model.hello({ v: 1, sid: "uuid-1", host: "local_1", inst: "i", model: "claude-haiku-5-5", effort: "low" });

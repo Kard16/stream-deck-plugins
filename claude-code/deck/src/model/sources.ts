@@ -36,10 +36,10 @@ export function connectSources(opts: {
 	const records = new RecordsWatcher(new RecordsReader(opts.recordsDir, { log: recordsLog }), { log: recordsLog });
 	registry.onChange((sessions) => {
 		model.setRegistry(sessions);
-		records.setHosts(model.hosts());
+		void records.setHosts(model.hosts());
 	});
 	// The slotted hosts change with the slots, not the registry. setHosts does nothing while the list is the same.
-	model.onChange(() => records.setHosts(model.hosts()));
+	model.onChange(() => void records.setHosts(model.hosts()));
 	records.onChange((recs, missing) => model.setRecords(recs, missing));
 	return { registry, records, model };
 }

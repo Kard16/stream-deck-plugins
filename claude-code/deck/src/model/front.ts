@@ -18,8 +18,21 @@ export const LSAPPINFO = "/usr/bin/lsappinfo";
 /** How long each `lsappinfo` call may take before it counts as a failure. It takes under a millisecond (2026-11-04). */
 export const FRONT_TIMEOUT_MS = 1000;
 
-/** How often the deck asks, while something needs it. */
+/** How often the deck asks while something needs it, at first. */
 export const FRONT_CHECK_MS = 1000;
+
+/**
+ * How long the deck waits between asks, by how long the check has been wanted since it was last wanted anew or reset
+ * (FrontWatcher's `reset`: an attach, a detach, a press on the deck, a wake): every second for the first 30 s, every 5 s
+ * until 2 minutes, every 15 s until 10 minutes, then once a minute (hardening.md, B5; the user's choice, 2026-11-06).
+ * While the user is in another app, the check can be wanted for hours; it's two lsappinfo spawns an ask.
+ */
+export function frontIntervalMs(wantedMs: number): number {
+	if (wantedMs < 30_000) return FRONT_CHECK_MS;
+	if (wantedMs < 120_000) return 5000;
+	if (wantedMs < 600_000) return 15_000;
+	return 60_000;
+}
 
 /**
  * How long a check may go unanswered before the watcher gives up on it, logs a warn line and asks again: well past its
@@ -93,21 +106,23 @@ export function lsappinfoCheck(opts: { execFile?: ExecFile; timeoutMs?: number; 
 }
 
 /**
- * Asks the front-app check once a second, and only while `wanted` says something needs it: some session whose last
- * turn ended unseen is on screen in the app, and something on the deck shows `seen` (SessionModel calls `want` on
- * every change). The first ask comes as soon as it's wanted, unless one came less than a second before; never two at
- * once, except that a check still unanswered after FRONT_STUCK_MS is given up on: a warn line (the first time; debug
- * after), and the next ask goes, while that check's late answer, if any, counts for nothing. When Claude is in front,
- * `onFront` runs, which marks those sessions seen.
+ * Asks the front-app check only while `wanted` says something needs it: some session whose last turn ended unseen is on
+ * screen in the app, and something on the deck shows `seen` (SessionModel calls `want` on every change). It asks every
+ * second at first, then less often the longer it stays wanted (frontIntervalMs), and every second again from a `reset`
+ * or when it becomes wanted anew. The first ask comes as soon as it's wanted, unless one came less than a second before;
+ * never two at once, except that a check still unanswered after FRONT_STUCK_MS is given up on: a warn line (the first
+ * time; debug after), and the next ask goes, while that check's late answer, if any, counts for nothing. When Claude is
+ * in front, `onFront` runs, which marks those sessions seen.
  */
 export class FrontWatcher {
 	readonly #check: FrontCheck;
 	readonly #clock: Clock;
-	readonly #intervalMs: number;
 	readonly #stuckMs: number;
 	readonly #log: Log;
 	readonly #onFront: () => void;
 	#wanted = false;
+	/** On the clock, when it became wanted anew or was last reset: the back-off counts from then. Null while not wanted. */
+	#since: number | null = null;
 	#timer: TimerHandle | null = null;
 	#stuckTimer: TimerHandle | null = null;
 	#inFlight = false;
@@ -118,11 +133,10 @@ export class FrontWatcher {
 	#disposed = false;
 	#asked = 0;
 
-	constructor(check: FrontCheck, onFront: () => void, opts: { clock?: Clock; intervalMs?: number; stuckMs?: number; log?: Log } = {}) {
+	constructor(check: FrontCheck, onFront: () => void, opts: { clock?: Clock; stuckMs?: number; log?: Log } = {}) {
 		this.#check = check;
 		this.#onFront = onFront;
 		this.#clock = opts.clock ?? realClock;
-		this.#intervalMs = opts.intervalMs ?? FRONT_CHECK_MS;
 		this.#stuckMs = opts.stuckMs ?? FRONT_STUCK_MS;
 		this.#log = opts.log ?? nullLog;
 	}
@@ -132,17 +146,33 @@ export class FrontWatcher {
 		return this.#asked;
 	}
 
-	/** Whether something needs the check now. */
+	/** Whether something needs the check now. Wanted anew, it asks every second again. */
 	want(wanted: boolean): void {
 		if (this.#disposed) return;
+		if (wanted && !this.#wanted) this.#since = this.#clock.now();
 		this.#wanted = wanted;
 		if (!wanted) {
+			this.#since = null;
 			if (this.#timer !== null) this.#clock.clearTimeout(this.#timer);
 			this.#timer = null;
 			return;
 		}
 		this.#schedule();
 	}
+
+	/**
+	 * Something says the user may look at the app soon (an attach, a detach, a press on the deck, a wake): while wanted,
+	 * it asks every second again, the next ask a second after the last, or at once if that has passed.
+	 */
+	reset(): void {
+		if (this.#disposed || !this.#wanted) return;
+		this.#since = this.#clock.now();
+		if (this.#timer === null) return;
+		this.#clock.clearTimeout(this.#timer);
+		this.#timer = null;
+		this.#schedule();
+	}
+
 
 	dispose(): void {
 		this.#disposed = true;
@@ -155,7 +185,7 @@ export class FrontWatcher {
 
 	#schedule(): void {
 		if (this.#disposed || !this.#wanted || this.#timer !== null || this.#inFlight) return;
-		const wait = this.#lastAt + this.#intervalMs - this.#clock.now();
+		const wait = this.#lastAt + frontIntervalMs(this.#clock.now() - (this.#since ?? this.#clock.now())) - this.#clock.now();
 		if (wait <= 0) {
 			this.#ask();
 			return;

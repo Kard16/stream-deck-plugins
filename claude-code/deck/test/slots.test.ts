@@ -10,10 +10,14 @@ import { SessionModel } from "../src/model/sessions.js";
 import type { AppRecord } from "../src/records/records.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { compareSlots, dialSlotId, parseSlotId, slotId } from "../src/slots/ids.js";
+import { othersArt, slotFace, slotKeyArt } from "../src/slots/art.js";
+import { SlotDials } from "../src/slots/dials.js";
 import { HOLD_MS, type SlotKeyLook, SlotKeys } from "../src/slots/keys.js";
 import { type OthersLook, OthersKeys, othersLook } from "../src/slots/others.js";
 import { FILL_DELAY_MS, Slots } from "../src/slots/slots.js";
 import { MemorySlotStore, nodeSlotFs, parseSlots, SlotFile, type SlotFs, slotsText } from "../src/slots/store.js";
+import { slotStrip } from "../src/slots/strip.js";
+import { TICK_SLACK_MS } from "../src/util/ticker.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -209,12 +213,14 @@ describe("the slots (session-keys.md, Slots)", () => {
 		slots.appear(BOTTOM[1] ?? "", "k1");
 		model.setRegistry([reg(1, A), reg(2, B), reg(3, C, { status: "busy" })]);
 		assert.equal(slots.host(BOTTOM[1] ?? ""), A, "a change to the model fills at once");
-		assert.equal(slotClock.pendingTimers, 0, "and the timer goes");
+		// The fill's timer goes; the one left is the slots' repaint tick, for the sinces their sessions show.
+		assert.deepEqual([slotClock.pendingTimers, slots.nextTick === null], [1, false], "and the timer goes");
 		// A slot that appears with its session already there doesn't wait.
 		slots.disappear(BOTTOM[1] ?? "", "k1");
 		slots.appear(BOTTOM[1] ?? "", "k1");
-		assert.equal(slotClock.pendingTimers, 0);
+		assert.equal(slotClock.pendingTimers, 1);
 		slots.dispose();
+		assert.equal(slotClock.pendingTimers, 0, "dispose stops the tick too");
 	});
 
 	test("a session that needs you comes first, the one waiting longest", () => {
@@ -474,7 +480,8 @@ describe("Session Slot keys (src/slots/keys.ts)", () => {
 		const k = new SlotKeys(s.slots, s.model, { art, clock, log, paintIntervalMs: 0, open: (h) => jumps.push(h) });
 		k.add("k0", BOTTOM[0] ?? "", { setImage: () => {}, showOk: () => {}, showAlert: () => feedback.push("alert") });
 		s.slotClock.advance(FILL_DELAY_MS);
-		clock.advance(3000);
+		// The slots' repaint tick, when A's since next reads differently: the face throws again, and nothing escapes it.
+		s.slotClock.advance(1000 + TICK_SLACK_MS);
 		assert.equal(k.painted("k0"), null);
 		assert.ok(log.at("error").length >= 3, log.at("error").join("\n"));
 		assert.ok(log.at("error").every((l) => l.includes("drawing its face threw: Error: bad art")));
@@ -482,8 +489,8 @@ describe("Session Slot keys (src/slots/keys.ts)", () => {
 		k.up("k0");
 		assert.deepEqual([jumps, feedback], [[], ["alert"]], "nothing shown yet: no jump");
 		fail = false;
-		clock.advance(1000);
-		assert.equal(k.painted("k0"), A);
+		s.slotClock.advance(1000 + TICK_SLACK_MS);
+		assert.equal(k.painted("k0"), A, "the next tick draws it");
 		k.down("k0");
 		k.up("k0");
 		assert.deepEqual(jumps, [A]);
@@ -515,7 +522,7 @@ describe("Session Slot keys (src/slots/keys.ts)", () => {
 		assert.equal(asks, 0, "nothing on the deck shows seen");
 		const slots = new Slots(model, { store: new MemorySlotStore(), clock, fillDelayMs: 0 });
 		const surface = { setImage: () => {}, showOk: () => {}, showAlert: () => {} };
-		const k = new SlotKeys(slots, model, { art: () => "", clock, paintIntervalMs: 0, tickMs: 0 });
+		const k = new SlotKeys(slots, model, { art: () => "", clock, paintIntervalMs: 0 });
 		k.add("m", null, surface);
 		await settle();
 		assert.equal(asks, 0, "a slot key in a multi-action shows nothing");
@@ -526,7 +533,7 @@ describe("Session Slot keys (src/slots/keys.ts)", () => {
 		clock.advance(5000);
 		await settle();
 		assert.equal(asks, 1, "gone: the check stops");
-		const others = new OthersKeys(slots, model, { art: () => "", clock, paintIntervalMs: 0, tickMs: 0 });
+		const others = new OthersKeys(slots, model, { art: () => "", clock, paintIntervalMs: 0 });
 		others.add("o", surface);
 		await settle();
 		assert.equal(asks, 2, "an Others key does too");
@@ -545,18 +552,6 @@ describe("Session Slot keys (src/slots/keys.ts)", () => {
 		clock.advance(HOLD_MS);
 		k.up("m");
 		assert.deepEqual([jumps, feedback, slots.entries()], [[], [], []]);
-	});
-
-	test("it repaints once a second for since, while it has keys, and stops with the last", () => {
-		const { k, clock, addKey, looks } = keys();
-		addKey("k0", BOTTOM[0] ?? "");
-		const before = looks.length;
-		clock.advance(3000);
-		assert.equal(looks.length - before, 3);
-		k.remove("k0");
-		clock.advance(3000);
-		assert.equal(looks.length - before, 3);
-		assert.equal(clock.pendingTimers, 0);
 	});
 });
 
@@ -622,7 +617,7 @@ describe("Others (src/slots/others.ts)", () => {
 	});
 
 	test("a face that throws when drawn is logged at error, and nothing escapes add, a change or a tick", () => {
-		const { model, slots, permission } = setup([reg(1, A)]);
+		const { model, slots, permission, slotClock } = setup([reg(1, A)]);
 		const clock = new FakeClock();
 		const log = new RecordingLog();
 		const feedback: string[] = [];
@@ -636,12 +631,84 @@ describe("Others (src/slots/others.ts)", () => {
 		});
 		others.add("o", { setImage: () => {}, showOk: () => {}, showAlert: () => feedback.push("alert") });
 		permission(A);
-		clock.advance(2000);
+		// The slots' repaint tick, when A's since, the one waiting longest, next reads differently.
+		slotClock.advance(1000 + TICK_SLACK_MS);
 		assert.ok(log.at("error").length >= 3, log.at("error").join("\n"));
 		assert.ok(log.at("error").every((l) => l.includes("Others: drawing its face threw: Error: bad art")));
 		others.press("o");
 		assert.deepEqual(feedback, ["alert"], "nothing shown yet: no jump");
 		others.remove("o");
+	});
+});
+
+describe("the slots' repaint tick (hardening.md, B6)", () => {
+	const keySurface = { setImage: () => {}, showOk: () => {}, showAlert: () => {} };
+	const dialSurface = { setLayout: () => {}, setFeedback: () => {}, showAlert: () => {} };
+
+	test("one timer for the slot keys, the slot dials and Others: at the first moment a since they show next reads differently they repaint together, once; a hidden slot, a session that isn't running, and Others with no key count for nothing", () => {
+		// A wall clock that moves with the timers' clock, from 70 s. A busy since 1 s and B idle since 2 s, on the slots;
+		// C off them, waiting since 30.5 s.
+		const clock = new FakeClock();
+		const wallNow = (): number => 70_000 + (clock.now() - 1_000_000);
+		const model = new SessionModel({ clock, wallNow });
+		model.setRegistry([reg(1, A, { status: "busy" }), reg(2, B, { statusUpdatedAt: 2000 }), reg(3, C, { status: "waiting", statusUpdatedAt: 30_500 })]);
+		const slots = new Slots(model, { store: new MemorySlotStore(new Map([[BOTTOM[0] ?? "", A], [BOTTOM[1] ?? "", B]])), clock, fillDelayMs: 0 });
+		const drawn = { keys: 0, dials: 0, others: 0 };
+		const art = slotKeyArt();
+		const keys = new SlotKeys(slots, model, { art: (look) => (drawn.keys++, art(look)), clock, wallNow, paintIntervalMs: 0 });
+		const dials = new SlotDials(slots, model, { render: (screen, now) => (drawn.dials++, slotStrip(screen, now)), clock, wallNow, paintIntervalMs: 0 });
+		const others = new OthersKeys(slots, model, { art: (look) => (drawn.others++, othersArt(look)), clock, wallNow, paintIntervalMs: 0 });
+		for (const col of [0, 1]) {
+			keys.add(`k${col}`, BOTTOM[col] ?? "", keySurface);
+			dials.add(`d${col}`, dialSlotId(DEV, 2, col), dialSurface);
+		}
+		// A's "Working 1m" reads 2m at 121 s, before B's "Idle 1m" does at 122 s. C waits off the slots, with no Others key.
+		assert.equal(slots.nextTick, 121_000);
+		others.add("o", keySurface);
+		assert.equal(slots.nextTick, 70_500, "C's 39s, on the Others key now, reads 40s first");
+		const before = { ...drawn };
+		clock.advance(500 + TICK_SLACK_MS - 1);
+		assert.deepEqual(drawn, before, "nothing yet");
+		clock.advance(1);
+		assert.deepEqual([drawn.keys - before.keys, drawn.dials - before.dials, drawn.others - before.others], [2, 2, 1], "all of them, once");
+		assert.equal(slots.nextTick, 71_500, "every second while one shows seconds");
+		others.remove("o");
+		assert.equal(slots.nextTick, 121_000, "no Others key: C counts for nothing");
+		const quiet = { ...drawn };
+		clock.advance(121_000 + TICK_SLACK_MS - wallNow());
+		assert.deepEqual([drawn.keys - quiet.keys, drawn.dials - quiet.dials, drawn.others - quiet.others], [2, 2, 0], "one tick in 50 s");
+		assert.equal(slots.nextTick, 122_000, "B's next");
+		// B's slot hidden: its since counts for nothing. A not running: nor does its.
+		keys.remove("k1");
+		dials.remove("d1");
+		assert.equal(slots.nextTick, 181_000, "A's 2m becomes 3m");
+		// Its record says when it was last active, the since a not-running face doesn't show.
+		model.setRecords(new Map([[A, record(A, { lastActivityAt: 60_000 })]]));
+		model.setRegistry([reg(2, B, { statusUpdatedAt: 2000 }), reg(3, C, { status: "waiting", statusUpdatedAt: 30_500 })]);
+		assert.deepEqual([slots.host(BOTTOM[0] ?? ""), model.slotView(A)?.running, model.slotView(A)?.since], [A, false, 60_000], "A stays on its slot, not running");
+		assert.equal(slots.nextTick, null);
+		slots.dispose();
+		assert.equal(clock.pendingTimers, 0);
+	});
+
+	test("after a sleep, which the timers don't count, the wake's refresh times the tick afresh: a 2h that reads 3h 50 minutes on, after 30 minutes asleep, turns 20 minutes after the wake, not 50", () => {
+		const clock = new FakeClock();
+		const since = 1_000_000;
+		let slept = 0;
+		const wallNow = (): number => since + 2 * 3_600_000 + 10 * 60_000 + slept + (clock.now() - 1_000_000);
+		const model = new SessionModel({ clock, wallNow });
+		model.setRegistry([reg(1, A, { statusUpdatedAt: since })]);
+		const slots = new Slots(model, { store: new MemorySlotStore(new Map([[BOTTOM[0] ?? "", A]])), clock, fillDelayMs: 0 });
+		const keys = new SlotKeys(slots, model, { art: (look) => slotFace(look).since ?? "", clock, wallNow, paintIntervalMs: 0 });
+		keys.add("k0", BOTTOM[0] ?? "", keySurface);
+		assert.deepEqual([keys.painted("k0"), slots.nextTick], ["2h", since + 3 * 3_600_000]);
+		slept = 30 * 60_000;
+		slots.refresh();
+		clock.advance(20 * 60_000 + TICK_SLACK_MS - 1);
+		assert.equal(keys.painted("k0"), "2h");
+		clock.advance(1);
+		assert.equal(keys.painted("k0"), "3h", "on time by the wall clock");
+		slots.dispose();
 	});
 });
 

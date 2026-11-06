@@ -182,7 +182,7 @@ export class RegistryReader {
 			// Gone between the listing and the read: the session ended. The next scan drops it.
 			const code = (err as NodeJS.ErrnoException).code ?? describeError(err).split("\n")[0] ?? "unknown";
 			if (code !== "ENOENT") {
-				// Once until it reads again, not every second.
+				// Once until it reads again, not at every scan.
 				if (this.#fileProblems.get(key) !== code) this.#log.warn(`can't read ${file} (${code}): ${cached?.good ? "keeping its last good reading" : "leaving it out"} until it can`);
 				this.#fileProblems.set(key, code);
 			}

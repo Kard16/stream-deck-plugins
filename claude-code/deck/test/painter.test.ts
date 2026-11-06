@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { StripPainter } from "../src/util/painter.js";
-import { Ticker } from "../src/util/ticker.js";
+import { MAX_TICK_MS, RETRY_TICK_MS, TICK_SLACK_MS, Ticker } from "../src/util/ticker.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -57,45 +57,99 @@ describe("the strip painter's shown (what a press on a Session Slot dial acts on
 	});
 });
 
-describe("the ticker (the slot keys' and dials' repaint for since)", () => {
-	test("runs every interval while running, and a stop, from inside or out, holds", () => {
+describe("the ticker (the slots' repaint of their keys, dials and Others when a since changes, B6)", () => {
+	test("ticks once, at the wall-clock moment asked for and TICK_SLACK_MS after it; a new moment replaces the last; null, or a time that isn't finite, asks for none", () => {
 		const clock = new FakeClock();
+		let wall = 10_000;
 		let n = 0;
-		const ticker = new Ticker(clock, 1000, () => {
-			n++;
-			if (n === 3) ticker.stop();
-		});
-		ticker.start();
-		ticker.start();
+		const ticker = new Ticker(clock, () => n++, { wallNow: () => wall });
+		assert.equal(TICK_SLACK_MS, 10);
+		ticker.at(12_000);
+		assert.equal(ticker.next, 12_000);
+		clock.advance(2000 + TICK_SLACK_MS - 1);
+		assert.equal(n, 0);
+		clock.advance(1);
+		assert.equal(n, 1);
+		assert.equal(ticker.next, null, "once: the repaint asks for the next");
+		clock.advance(60_000);
+		assert.equal(n, 1);
+		wall = 20_000;
+		ticker.at(25_000);
+		ticker.at(21_000);
+		assert.equal(clock.pendingTimers, 1, "the later moment's timer went");
+		clock.advance(1000 + TICK_SLACK_MS);
+		assert.equal(n, 2);
+		clock.advance(10_000);
+		assert.equal([n, clock.pendingTimers].join(), "2,0", "the moment it replaced doesn't tick");
+		// Asked again, the same moment is timed afresh from the wall clock now: after a sleep, which the timers don't
+		// count, the tick comes on time. A "2h" 50 minutes before it reads "3h", then 30 minutes asleep: 20 minutes on.
+		wall = 7_200_000;
+		ticker.at(wall + 50 * 60_000);
+		wall += 30 * 60_000;
+		ticker.at(7_200_000 + 50 * 60_000);
+		assert.equal(clock.pendingTimers, 1, "one timer, the new one");
+		clock.advance(20 * 60_000 + TICK_SLACK_MS - 1);
+		assert.equal(n, 2);
+		clock.advance(1);
+		assert.equal(n, 3, "on time by the wall clock, not 30 minutes late");
+		wall += 20 * 60_000;
+		// Null, stop and NaN leave none.
+		ticker.at(null);
+		assert.deepEqual([clock.pendingTimers, ticker.next], [0, null]);
+		ticker.at(45_000);
+		ticker.stop();
+		ticker.at(Number.NaN);
+		assert.deepEqual([clock.pendingTimers, ticker.next], [0, null]);
 		clock.advance(10_000);
 		assert.equal(n, 3);
-		assert.equal(clock.pendingTimers, 0);
-		ticker.start();
-		clock.advance(1000);
+		// A moment that has passed ticks at once, after the slack.
+		ticker.at(wall - 5000);
+		clock.advance(TICK_SLACK_MS);
 		assert.equal(n, 4);
-		ticker.stop();
-		clock.advance(5000);
-		assert.equal(n, 4);
-		assert.equal(ticker.running, false);
 	});
 
-	test("a throw from a tick is logged at error, and the ticks go on: nothing escapes the timer", () => {
+	test("it waits at most MAX_TICK_MS, so the labels catch up within the hour with a wall clock that jumped", () => {
+		const clock = new FakeClock();
+		let n = 0;
+		const ticker = new Ticker(clock, () => n++, { wallNow: () => 0 });
+		ticker.at(5 * 86_400_000);
+		clock.advance(MAX_TICK_MS - 1);
+		assert.equal(n, 0);
+		clock.advance(1);
+		assert.equal(n, 1);
+	});
+
+	test("a throw from a tick is logged at error, and unless the tick asked for its next first, it ticks again RETRY_TICK_MS later: nothing escapes the timer", () => {
 		const clock = new FakeClock();
 		const log = new RecordingLog();
+		let wall = 0;
 		let n = 0;
-		const ticker = new Ticker(
+		const ticker: Ticker = new Ticker(
 			clock,
-			1000,
 			() => {
 				n++;
-				if (n === 2) throw new Error("boom");
+				if (n === 3) ticker.at(wall + 60_000);
+				if (n <= 3) throw new Error("boom");
 			},
-			{ log, what: "a test tick" },
+			{ wallNow: () => wall, log, what: "a test tick" },
 		);
-		ticker.start();
-		clock.advance(3000);
+		ticker.at(1000);
+		const step = (ms: number): void => {
+			wall += ms;
+			clock.advance(ms);
+		};
+		step(1000 + TICK_SLACK_MS);
+		assert.equal(n, 1);
+		assert.equal(ticker.next, wall + RETRY_TICK_MS);
+		step(RETRY_TICK_MS + TICK_SLACK_MS);
+		assert.equal(n, 2);
+		step(RETRY_TICK_MS + TICK_SLACK_MS);
 		assert.equal(n, 3);
-		assert.deepEqual(log.at("error").map((l) => l.split("\n")[0]), ["error a test tick threw: Error: boom"]);
+		assert.equal(ticker.next, wall + 60_000, "the moment it asked for before it threw");
+		assert.deepEqual(
+			[...new Set(log.at("error").map((l) => l.split("\n")[0]))],
+			["error a test tick threw: Error: boom"],
+		);
 		ticker.stop();
 	});
 });

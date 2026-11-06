@@ -9,6 +9,7 @@ import { fingerprint } from "../src/protocol/fingerprint.js";
 import { ALLOW_DECISION, MODE_TOOL, PRETOOL_ALLOW } from "../src/protocol/wire.js";
 import type { AppRecord } from "../src/records/records.js";
 import type { RegistrySession } from "../src/registry/registry.js";
+import { idleCounts, resetIdleCounts } from "../src/util/idle.js";
 import { QUIET_MS, QuietLog } from "../src/util/quiet-log.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { RecordingLog } from "./helpers/recording-log.js";
@@ -33,6 +34,7 @@ class FakeReply implements PollReply {
 
 const A = "local_a";
 const B = "local_b";
+const C = "local_c";
 
 function reg(pid: number, host: string | null, fields: Partial<RegistrySession> = {}): RegistrySession {
 	return { key: String(pid), name: `Session ${pid}`, status: "idle", cwd: `/p/${pid}`, hostSessionId: host, sessionId: `sid-${pid}`, statusUpdatedAt: 1000, startedAt: pid, ...fields };
@@ -2288,5 +2290,81 @@ describe("quiet logs (Phase 6)", () => {
 			"info nine",
 			"debug ten",
 		]);
+	});
+});
+
+describe("what a change costs (hardening.md, B2)", () => {
+	test("a poll changes nothing a view or a key reads, so it emits nothing: a held one, one that replaces it, a stray's, a 409, or one answered at once after a turn; the command a poll takes repaints through the queue", () => {
+		const { model, events, poll } = setup([reg(1, A, { status: "busy" }), reg(2, B)]);
+		const first = poll(A);
+		let changes = 0;
+		model.onChange(() => changes++);
+		resetIdleCounts();
+		const second = poll(A);
+		assert.deepEqual(first.answers, [NO_CMDS], "the older poll, answered with none");
+		const stray = new FakeReply();
+		model.next(new URLSearchParams({ host: A, inst: "i-old", wait: "20" }), stray);
+		assert.deepEqual(stray.answers, [NO_CMDS]);
+		const unknown = new FakeReply();
+		model.next(new URLSearchParams({ host: B, inst: "i-b", wait: "20" }), unknown);
+		assert.deepEqual(unknown.answers, [HELLO_FIRST]);
+		assert.deepEqual([changes, idleCounts().emit ?? 0, idleCounts().view ?? 0], [0, 0, 0]);
+		// The main loop's turn ends while the registry still says busy: the next poll is answered at once, quietly too.
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual(second.answers, [NO_CMDS], "the turn's end answered it");
+		changes = 0;
+		resetIdleCounts();
+		assert.deepEqual(poll(A).answers, [NO_CMDS]);
+		assert.deepEqual([changes, idleCounts()["poll.now"], idleCounts().emit ?? 0], [0, 1, 0]);
+		// A held poll takes a command: the queue's change repaints the keys.
+		model.setRegistry([reg(1, A), reg(2, B)]);
+		const open = poll(A);
+		changes = 0;
+		const queued = model.queue(A, { t: "prompt", text: "hi" });
+		assert.ok(queued.ok);
+		assert.deepEqual([open.answers.length, queued.cmd.state], [1, "delivered"]);
+		assert.ok(changes >= 1, "QUEUED and DELIVERED each repaint");
+	});
+
+	test("the views are built once per change, however many listeners and keys read them, frozen since they're shared; reading again without a change builds none", () => {
+		const { model, permission, at, events, view } = setup();
+		for (let i = 0; i < 5; i++)
+			model.onChange(() => {
+				model.sessions();
+				model.session(A);
+				model.slotView(B);
+				model.onScreen();
+				model.target();
+			});
+		resetIdleCounts();
+		permission(A, "Bash", { command: "ls" });
+		assert.deepEqual([idleCounts().emit, idleCounts().view], [1, 2], "one change, two sessions: two views");
+		assert.equal(view(A)?.status, "approval");
+		assert.ok(Object.isFrozen(view(A)));
+		assert.throws(() => {
+			(view(A) as { title: string }).title = "changed";
+		}, TypeError);
+		resetIdleCounts();
+		model.sessions();
+		view(A);
+		model.slotView(A);
+		assert.equal(idleCounts().view ?? 0, 0);
+		// Each change shows in the next reading: an event, a record, the registry, a release, a hello.
+		at(20_000);
+		events(B, { t: "attach", surface: "desktop" });
+		assert.equal(model.onScreen()?.key, B);
+		model.setRecords(new Map([[B, record(B, { title: "From the record", model: "claude-opus-5-5" })]]));
+		assert.equal(view(B)?.model, "claude-opus-5-5");
+		model.setRegistry([reg(1, A), reg(2, B, { name: "Renamed" })]);
+		assert.equal(view(B)?.title, "Renamed");
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 30_000 }), reg(2, B, { name: "Renamed" })]);
+		assert.equal(view(A)?.status, "idle", "the held request, released by rule 3");
+		model.hello({ v: 1, sid: "sid-2", host: B, inst: "ib", model: "claude-haiku-5-5" });
+		assert.deepEqual([view(B)?.plugin, model.sessions()[1]?.plugin], [true, true]);
+		// A slotted session the registry doesn't list: its view comes from its record, as it stands.
+		model.keepHosts([C]);
+		assert.equal(model.slotView(C)?.title, "Unknown session");
+		model.setRecords(new Map([[C, record(C, { title: "Asleep" })]]));
+		assert.equal(model.slotView(C)?.title, "Asleep");
 	});
 });

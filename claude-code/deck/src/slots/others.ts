@@ -3,9 +3,7 @@ import type { SessionView } from "../model/sessions.js";
 import { type Clock, realClock } from "../util/clock.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
-import { Ticker } from "../util/ticker.js";
 import { type JumpModel, jumpTo } from "./jump.js";
-import { TICK_MS } from "./keys.js";
 import type { Slots } from "./slots.js";
 
 /**
@@ -55,7 +53,9 @@ type Key = { surface: KeySurface; painter: KeyPainter<string | null> };
  * The Others keys, without the SDK (session-keys.md, Others): the running sessions on no slot. A press jumps to the
  * one that has waited longest and makes it the target (jumpTo); with none needing you, it alerts. A press acts only on
  * the session the key showed: when the longest waiting is another one now, or the key hasn't painted yet, it alerts
- * and does nothing. While it has keys, it tells the model that something shows `seen` (the unseen count).
+ * and does nothing. While it has keys, it tells the model that something shows `seen` (the unseen count), and the slots
+ * that something shows the one waiting longest, whose `since` then times their repaint tick (hardening.md, B6). It
+ * repaints whenever the slots change, that tick's included.
  */
 export class OthersKeys {
 	readonly #slots: Slots;
@@ -67,12 +67,11 @@ export class OthersKeys {
 	readonly #open: (host: string) => void;
 	readonly #paintIntervalMs: number;
 	readonly #keys = new Map<string, Key>();
-	readonly #ticker: Ticker;
 
 	constructor(
 		slots: Slots,
 		model: OthersModel,
-		opts: { art: OthersArt; clock?: Clock; wallNow?: () => number; log?: Log; open?: (host: string) => void; paintIntervalMs?: number; tickMs?: number },
+		opts: { art: OthersArt; clock?: Clock; wallNow?: () => number; log?: Log; open?: (host: string) => void; paintIntervalMs?: number },
 	) {
 		this.#slots = slots;
 		this.#model = model;
@@ -82,7 +81,6 @@ export class OthersKeys {
 		this.#log = opts.log ?? nullLog;
 		this.#open = opts.open ?? (() => {});
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
-		this.#ticker = new Ticker(this.#clock, opts.tickMs ?? TICK_MS, () => this.repaintAll(), { log: this.#log, what: "the Others keys' repaint tick" });
 		slots.onChange(() => this.repaintAll());
 	}
 
@@ -90,8 +88,8 @@ export class OthersKeys {
 		this.remove(id);
 		const key: Key = { surface, painter: new KeyPainter<string | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs }) };
 		this.#keys.set(id, key);
-		this.#ticker.start();
 		this.#model.showsSeen(this, true);
+		this.#slots.showsOthers(this, true);
 		this.#paint(key);
 	}
 
@@ -100,8 +98,8 @@ export class OthersKeys {
 		if (!key) return;
 		key.painter.dispose();
 		this.#keys.delete(id);
-		if (this.#keys.size === 0) this.#ticker.stop();
 		this.#model.showsSeen(this, this.#keys.size > 0);
+		this.#slots.showsOthers(this, this.#keys.size > 0);
 	}
 
 	press(id: string): void {

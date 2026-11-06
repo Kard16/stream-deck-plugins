@@ -247,14 +247,13 @@ export type SessionModelOptions = {
 	 */
 	rescan?: () => Promise<void>;
 	/**
-	 * Whether Claude is the app in front (front.ts's lsappinfoCheck in the plugin), for `seen`. It's asked once a
-	 * second, only while some session whose last turn ended unseen is on screen in the app, and something on the deck
-	 * shows `seen` (showsSeen). Without it, nothing asks, and a turn's end is seen only by an attach, the record's
-	 * `lastFocusedAt` or a press.
+	 * Whether Claude is the app in front (front.ts's lsappinfoCheck in the plugin), for `seen`. It's asked only while
+	 * some session whose last turn ended unseen is on screen in the app, and something on the deck shows `seen`
+	 * (showsSeen): every second at first, less often the longer that lasts (front.ts's frontIntervalMs), and every second
+	 * again after an attach, a detach, a press on the deck or a wake (userPresent). Without it, nothing asks, and a turn's
+	 * end is seen only by an attach, the record's `lastFocusedAt` or a press.
 	 */
 	front?: FrontCheck;
-	/** How often `front` is asked while needed; FRONT_CHECK_MS, 1 s. */
-	frontIntervalMs?: number;
 };
 
 /**
@@ -307,6 +306,13 @@ export class SessionModel implements BridgeRoutes {
 	/** The picked session's title as last listed, for when it has ended. */
 	#pickedTitle: string | null = null;
 	#bridgeState: BridgeState = "stopped";
+	/**
+	 * The listed sessions' views as of the latest change, built at most once per change however many listeners and keys
+	 * read them (B2): null until something asks after an emit. Nothing in a view depends on the moment it's built: its
+	 * times are when things happened, and what shows them, `since` say, takes the time itself. Every change emits, and
+	 * every emit drops them first. Each view is frozen, since they're shared.
+	 */
+	#views: { list: SessionView[]; byKey: Map<string, SessionView> } | null = null;
 	readonly #front: FrontWatcher | null;
 	/** What on the deck shows `seen` now (the slot keys, the Others keys): the front-app check runs only while one does. */
 	readonly #seenShown = new Set<object>();
@@ -321,7 +327,7 @@ export class SessionModel implements BridgeRoutes {
 		this.held = new HeldRequests({ log: this.#log });
 		this.commands = new CommandQueue({ clock: this.#clock, log: this.#log, inFlightMs: opts.inFlightMs });
 		this.#inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
-		this.#front = opts.front ? new FrontWatcher(opts.front, () => this.#claudeInFront(), { clock: this.#clock, intervalMs: opts.frontIntervalMs, log: this.#log }) : null;
+		this.#front = opts.front ? new FrontWatcher(opts.front, () => this.#claudeInFront(), { clock: this.#clock, log: this.#log }) : null;
 		this.held.onChange(() => this.#emit());
 		this.commands.onChange(() => this.#emit());
 		this.commands.onUnpolled((host) => this.#unpolled(host));
@@ -588,7 +594,9 @@ export class SessionModel implements BridgeRoutes {
 			this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
 			this.commands.poll(b.host, current, q.wait, reply);
 		}
-		this.#emit();
+		// No emit (B2): a poll changes nothing a view or a key reads. The commands it takes change state, and the queue
+		// says so itself; an instance becomes current only by its hello, which emits; and a session the deck hadn't heard
+		// from gets a record that reads as none.
 	}
 
 	result(body: Obj): RouteAnswer {
@@ -604,13 +612,12 @@ export class SessionModel implements BridgeRoutes {
 
 	/** The running sessions, oldest first. */
 	sessions(): SessionView[] {
-		return this.#ordered.map((s) => this.#view(s));
+		return [...this.#built().list];
 	}
 
 	/** A listed session by key. */
 	session(key: string): SessionView | null {
-		const s = this.#registry.get(key);
-		return s ? this.#view(s) : null;
+		return this.#built().byKey.get(key) ?? null;
 	}
 
 	/** A session's title for a held request: the registry's, the record's, the folder's; else "Unknown session". */
@@ -635,7 +642,7 @@ export class SessionModel implements BridgeRoutes {
 			return { ...notRunning(this.#picked, this.#pickedTitle ?? this.#picked), host: asHost(this.#picked), since: null };
 		}
 		const best = this.#onScreenSession();
-		return best ? this.#view(best) : null;
+		return best ? this.session(keyOf(best)) : null;
 	}
 
 	/**
@@ -645,7 +652,7 @@ export class SessionModel implements BridgeRoutes {
 	 */
 	onScreen(): SessionView | null {
 		const best = this.#onScreenSession();
-		return best ? this.#view(best) : null;
+		return best ? this.session(keyOf(best)) : null;
 	}
 
 	/**
@@ -657,8 +664,7 @@ export class SessionModel implements BridgeRoutes {
 	slotView(host: string): SessionView | null {
 		const h = asHost(host);
 		if (h === null) return null;
-		const listed = this.#registry.get(h);
-		if (listed) return this.#view(listed);
+		if (this.#registry.has(h)) return this.session(h);
 		const rec = this.#records.get(h);
 		return {
 			...notRunning(h, rec?.title ?? projectName(rec?.cwd) ?? "Unknown session"),
@@ -699,6 +705,20 @@ export class SessionModel implements BridgeRoutes {
 		if (!this.#registry.has(host)) return;
 		this.#pressedAt.set(host, this.#wallNow());
 		this.#emit();
+	}
+
+	/**
+	 * The user is likely at the Mac: a press on any of this plugin's keys or dials, or the Mac waking up (plugin.ts).
+	 * They may look at the app soon, so while the front-app check for `seen` runs, it asks every second again
+	 * (hardening.md, B5).
+	 */
+	userPresent(): void {
+		this.#front?.reset();
+	}
+
+	/** The wall clock the model's times are on (`since`, `seen`), for what reads them against now: the slots' repaint tick. */
+	wallNow(): number {
+		return this.#wallNow();
 	}
 
 	/** Whether a session was picked on the Sessions dial (rather than the target following the app). */
@@ -818,6 +838,8 @@ export class SessionModel implements BridgeRoutes {
 				if (e.t === "attach") b.onScreenAt = this.#wallNow();
 				else b.offScreenAt = this.#wallNow();
 				b.screen = e.t;
+				// The user is in the app, or was a moment ago: the front-app check asks every second again (B5).
+				this.#front?.reset();
 				return;
 			case "end":
 				this.#log.info(`END ${b.host}: ${quote(e.reason, 60)}`);
@@ -839,9 +861,10 @@ export class SessionModel implements BridgeRoutes {
 	 * less than AT_ONCE_MS ago, no main-loop `turn.start` has come since, and the registry still says `busy`. A poll
 	 * held then would keep the session `busy` until it ran out, since Claude Code waits for a moment after the turn
 	 * when the mod has no request open; the mod waits out the rest of a second after an early empty answer, which
-	 * gives it that moment (PROTOCOL.md, Commands). The deck reads the registry once a second, so after a turn shorter
-	 * than that, or while its reading still says `waiting` after a Deny, a poll can come before the reading says
-	 * `busy`: it's held, and answered with none once the reading does (`setRegistry`).
+	 * gives it that moment (PROTOCOL.md, Commands). The deck reads the registry a moment after it changes (about 50 ms
+	 * after its watch's event, B4), so after a turn shorter than that, or while its reading still says `waiting` after
+	 * a Deny, a poll can come before the reading says `busy`: it's held, and answered with none once the reading does
+	 * (`setRegistry`).
 	 */
 	#answersAtOnce(b: BridgeSession): boolean {
 		return b.pollsAtOnceUntil !== null && this.#clock.now() < b.pollsAtOnceUntil && this.#registry.get(b.host)?.status === "busy";
@@ -1164,6 +1187,15 @@ export class SessionModel implements BridgeRoutes {
 		this.#log.info(`ENDED ${host}: no registry file lists it any more`);
 	}
 
+	/** The listed sessions' views as the model stands, built now if the latest change dropped them (#views). */
+	#built(): { list: SessionView[]; byKey: Map<string, SessionView> } {
+		if (this.#views === null) {
+			const list: SessionView[] = this.#ordered.map((s) => Object.freeze(this.#view(s)));
+			this.#views = { list, byKey: new Map(list.map((v) => [v.key, v])) };
+		}
+		return this.#views;
+	}
+
 	#view(s: RegistrySession): SessionView {
 		countIdle("view");
 		const host = asHost(s.hostSessionId);
@@ -1304,6 +1336,8 @@ export class SessionModel implements BridgeRoutes {
 
 	#emit(): void {
 		countIdle("emit");
+		// Something changed: the views are built afresh, once, when next asked for.
+		this.#views = null;
 		// Only a log line and a timer: a throw here mustn't escape into a hold, a release or a route.
 		try {
 			const views = this.sessions();

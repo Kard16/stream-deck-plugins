@@ -1,32 +1,71 @@
+import type { Clock } from "../util/clock.js";
+import { FolderWatch, type WatchFn } from "../util/folder-watch.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 import type { RegistryReader, RegistrySession } from "./registry.js";
 
-/** The registry is re-read every second. Unchanged files are only stat'ed. */
-export const REGISTRY_POLL_MS = 1000;
+/** The registry's `.key` files change only with their session's `.json`, and are never read: their events set off nothing. */
+export function registryEventCounts(name: string | null): boolean {
+	return name === null || !name.endsWith(".key");
+}
+
+export type RegistryWatcherOptions = {
+	log?: Log;
+	/** The debounce's and the safety scan's timers. */
+	clock?: Clock;
+	/** Wall-clock ms, for how long after its `statusUpdatedAt` a change was read. */
+	wallNow?: () => number;
+	/** fs.watch, for tests. */
+	watch?: WatchFn;
+	/** WATCH_DEBOUNCE_MS and SAFETY_SCAN_MS, for tests. */
+	debounceMs?: number;
+	safetyMs?: number;
+};
 
 /**
- * Re-reads the registry every second and tells listeners when the list of sessions or any of their fields
- * changed. Polling rather than fs.watch: it's simpler, and a second is quick enough for the deck.
+ * Reads the registry when it changes and tells listeners when the list of sessions or any of their fields changed.
+ * Once started, it watches the folder (FolderWatch: fs.watch, FSEvents on macOS) and reads it about 50 ms after a burst
+ * of changes to it, and every 30 s whatever the watch says (hardening.md, B4). Unchanged files are only stat'ed. Each
+ * change is logged at debug with how long after its `statusUpdatedAt` the deck read it, so the lag can be measured live.
  */
 export class RegistryWatcher {
 	readonly #reader: RegistryReader;
 	readonly #log: Log;
-	readonly #pollMs: number;
+	readonly #wallNow: () => number;
+	readonly #watch: FolderWatch;
 	readonly #listeners = new Set<(sessions: RegistrySession[]) => void>();
 	#sessions: RegistrySession[] = [];
 	#json = "";
-	#timer: ReturnType<typeof setInterval> | null = null;
 	#running: Promise<void> | null = null;
 	#again = false;
+	/** A safety scan with no event before it is waiting to run: a change it finds is one the watch missed. */
+	#missedCheck = false;
 
-	constructor(reader: RegistryReader, opts: { log?: Log; pollMs?: number } = {}) {
+	constructor(reader: RegistryReader, opts: RegistryWatcherOptions = {}) {
 		this.#reader = reader;
 		this.#log = opts.log ?? nullLog;
-		this.#pollMs = opts.pollMs ?? REGISTRY_POLL_MS;
+		this.#wallNow = opts.wallNow ?? Date.now;
+		this.#watch = new FolderWatch(reader.dir, {
+			accept: registryEventCounts,
+			onScan: (why, quiet) => {
+				if (why === "safety" && quiet) this.#missedCheck = true;
+				void this.scanNow();
+			},
+			count: "reg",
+			clock: opts.clock,
+			log: this.#log,
+			watch: opts.watch,
+			debounceMs: opts.debounceMs,
+			safetyMs: opts.safetyMs,
+		});
 	}
 
 	get sessions(): RegistrySession[] {
 		return this.#sessions;
+	}
+
+	/** Whether the folder is watched now; false before start, while it doesn't exist, and after a watch failed until the next safety scan. */
+	get watching(): boolean {
+		return this.#watch.watching;
 	}
 
 	onChange(listener: (sessions: RegistrySession[]) => void): () => void {
@@ -34,15 +73,14 @@ export class RegistryWatcher {
 		return () => this.#listeners.delete(listener);
 	}
 
+	/** Watches the folder, starts the safety scans, and scans now. */
 	start(): void {
-		if (this.#timer !== null) return;
-		this.#timer = setInterval(() => void this.scanNow(), this.#pollMs);
+		this.#watch.start();
 		void this.scanNow();
 	}
 
 	stop(): void {
-		if (this.#timer !== null) clearInterval(this.#timer);
-		this.#timer = null;
+		this.#watch.stop();
 	}
 
 	/**
@@ -63,6 +101,8 @@ export class RegistryWatcher {
 	async #loop(): Promise<void> {
 		do {
 			this.#again = false;
+			const missedCheck = this.#missedCheck;
+			this.#missedCheck = false;
 			let sessions: RegistrySession[];
 			try {
 				sessions = await this.#reader.scan();
@@ -73,11 +113,14 @@ export class RegistryWatcher {
 			const json = JSON.stringify(sessions);
 			if (json === this.#json) continue;
 			const first = this.#json === "";
-			const before = this.#sessions.length;
+			const before = this.#sessions;
 			this.#sessions = sessions;
 			this.#json = json;
-			if (first || sessions.length !== before) this.#log.info(`${sessions.length} session(s) running`);
-			else this.#log.debug("a session changed");
+			// The watch may have gone quiet without an error: it's counted, and watched afresh.
+			if (missedCheck && !first) this.#watch.missed();
+			if (first || sessions.length !== before.length) this.#log.info(`${sessions.length} session(s) running`);
+			const changed = this.#changes(before, sessions);
+			if (!first && (changed !== "" || sessions.length === before.length)) this.#log.debug(`a session changed${changed === "" ? "" : `: ${changed}`}`);
 			for (const listener of [...this.#listeners]) {
 				try {
 					listener(sessions);
@@ -86,5 +129,23 @@ export class RegistryWatcher {
 				}
 			}
 		} while (this.#again);
+	}
+
+	/**
+	 * The sessions in both readings that changed, for the log: each one's pid and status, and, where its `statusUpdatedAt`
+	 * moved, how long after it this reading came: `56532 busy → idle, read 64 ms after its statusUpdatedAt`.
+	 */
+	#changes(before: readonly RegistrySession[], after: readonly RegistrySession[]): string {
+		const old = new Map(before.map((s) => [s.key, s]));
+		const now = this.#wallNow();
+		const out: string[] = [];
+		for (const s of after) {
+			const was = old.get(s.key);
+			if (!was || JSON.stringify(was) === JSON.stringify(s)) continue;
+			const status = was.status === s.status ? `${s.status ?? "no status"}` : `${was.status ?? "no status"} → ${s.status ?? "no status"}`;
+			const lag = s.statusUpdatedAt !== null && s.statusUpdatedAt !== was.statusUpdatedAt ? `, read ${Math.round(now - s.statusUpdatedAt)} ms after its statusUpdatedAt` : "";
+			out.push(`${s.key} ${status}${lag}`);
+		}
+		return out.join("; ");
 	}
 }

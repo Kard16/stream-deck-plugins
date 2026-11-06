@@ -1175,6 +1175,36 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **accepted risks:** the records' category rules, a failing `updatedInput`, hooks read at session start, `CLAUDE_CODE_TAGS`, settings `env`.
     - The mode tool's rows go with mode changes.
   - **Checks:** tools 280/280 (264 before), 23 mutations caught in the fix round, the plugin's tsc, sync `--check` and its 21 tests. CLAUDE.md's list of what may run outside the repo now names lsappinfo.
+- 2026-11-06, **the deck's idle work, cut (B2, B4, B5, B6).** Wave 1: a build, a review, a fix round. Still deck 0.4.0, live since 04:00:39Z.
+  - **B4, the two scans:**
+    - The deck watches `~/.claude/sessions` and the app's records tree with `fs.watch` (FSEvents). It scans 50 ms after the first event of a burst, and every 30 s whatever happens.
+    - A safety scan that finds a change no event announced counts as `missed`. It logs at info once, and re-watches the folder.
+    - Live, a registry change reached the deck 66 ms after its `statusUpdatedAt`. With the old polling it took up to 1 s.
+  - **B2, the emits:**
+    - A poll no longer emits: nothing a view reads changes on one.
+    - Views are built once per change and shared.
+    - The Sessions dial's listener does nothing while no Sessions dial is on the deck.
+  - **B5, the seen check:** every 1 s for 30 s, every 5 s to 2 minutes, every 15 s to 10 minutes, then once a minute. That's the user's choice on 2026-11-06, over the spec's 15 s. It starts over on an attach, a detach, a press and a wake.
+  - **B6, the ticks:** one timer for the slot keys, slot dials and Others, armed at the next moment a shown `since` changes.
+  - **The review** found no correctness bug. It found labels that ran late after a sleep, a watch that could go quiet unnoticed, and parts to cut. The fix round fixed both and cut about 130 lines.
+  - **Size:** deck source +398/−139, plus `util/folder-watch.ts` (205 lines).
+  - **The after-count:** `idle-report --live 15`, 04:01:39–04:16:39Z, the same 2 sessions, nobody at the Mac. A quiet minute, over the 14 after the first:
+
+    | A quiet minute | Baseline | Now | Target |
+    |---|---|---|---|
+    | CPU | 100–118 ms | 15–20 ms | under 25 ms |
+    | Context switches | about 830 | 96–113 | under 200 |
+    | BSD syscalls | about 3,100 | 275–352 | under 600 |
+    | Registry scans, stats | 60, 120 | 2, 4 | safety scans only |
+    | Records scans, stats | 60, 300 | 2, 10 | safety scans only |
+    | Emits | 6 | 0 | 0 |
+    | Ticks | 120 | 1 | when a label changes |
+    | Views built | about 650 | 8 | none set |
+    | Polls | 6 | 6 | 3 a session |
+
+  - **Seen** wasn't wanted in the window, so no lsappinfo ran. At its slowest step it's one check a minute, about 110 syscalls, timed apart.
+  - **Checks:** deck typecheck; 522/522, also with the clock two days ahead and a week back; build and validate; tools 280/280 with PROTOCOL.md as committed. The fix round caught 51 mutations.
+  - **For the smoke test:** the deck now sees registry flips of 50 ms to 1 s. So release rule 2 may release a held approval on a short `waiting → busy → waiting`. Watch for `RELEASED … (rule 2)` while the app's dialog is still up.
 
 ## Progress
 

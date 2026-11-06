@@ -73,7 +73,7 @@ export function sessionState(i: StatusInput): SessionState {
  * Whether the registry's status began at or before the moment the deck got the main loop's last `turn.end`, with
  * reason `aborted`: by its `statusUpdatedAt`, else by the deck's first reading of it. After a turn, Claude Code
  * keeps the session `busy` until a moment when the mod has no request open (PROTOCOL.md, Commands), and the deck
- * reads the registry once a second, while the mod's `turn.end` comes within milliseconds (Phase 4).
+ * reads the registry a moment after it changes, while the mod's `turn.end` comes within milliseconds (Phase 4).
  */
 function beganBeforeAbort(i: StatusInput): boolean {
 	const abortedAt = i.turn?.ended && i.turn.reason === "aborted" ? i.turn.endedAt : null;
@@ -85,8 +85,8 @@ function beganBeforeAbort(i: StatusInput): boolean {
  * Whether the main loop's latest `turn.start` has no `turn.end` (nor `failed`) yet, and the registry's status, an
  * `idle` here, began at or before the moment the deck got that `turn.start`: by its `statusUpdatedAt`, else by the
  * deck's first reading of it, as for the `busy` above. The plugin's `turn.start` arrives within milliseconds, while
- * the deck reads the registry once a second and Claude Code writes `busy` a moment into the turn. An `idle` that
- * began later means the turn ended unseen, and doesn't count (PROTOCOL.md, status rule 3).
+ * the deck reads the registry a moment after it changes and Claude Code writes `busy` a moment into the turn. An
+ * `idle` that began later means the turn ended unseen, and doesn't count (PROTOCOL.md, status rule 3).
  */
 function idleBeforeStart(i: StatusInput): boolean {
 	const startedAt = i.turn !== null && !i.turn.ended ? i.turn.startedAt : null;

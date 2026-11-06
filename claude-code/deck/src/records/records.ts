@@ -2,6 +2,8 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { HOST_PATTERN, isObj, type Obj } from "../protocol/wire.js";
+import type { Clock } from "../util/clock.js";
+import { FolderWatch, type WatchFn } from "../util/folder-watch.js";
 import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 
@@ -291,37 +293,76 @@ export class RecordsReader {
 	}
 }
 
-/** The records are checked every second, like the registry. Unchanged files are only stat'ed. */
-export const RECORDS_POLL_MS = 1000;
-
 /**
  * What the watcher tells its listeners: the records that exist, by host, and the hosts it looked for that have no
  * record file (RecordsReader's `missing`).
  */
 export type RecordsListener = (records: Map<string, AppRecord>, missing: ReadonlySet<string>) => void;
 
+export type RecordsWatcherOptions = {
+	log?: Log;
+	/** The debounce's and the safety scan's timers. */
+	clock?: Clock;
+	/** fs.watch, for tests. */
+	watch?: WatchFn;
+	/** WATCH_DEBOUNCE_MS and SAFETY_SCAN_MS, for tests. */
+	debounceMs?: number;
+	safetyMs?: number;
+};
+
 /**
- * Re-reads the records of the sessions the registry lists, and of the slotted ones it doesn't, at once when the list
- * changes and every second after (unchanged files are only stat'ed), and tells listeners when any record changed, or
- * which hosts have no file.
+ * Whether a watch event in the records tree, at `name` (relative to the root), can change what the deck reads: one for
+ * a wanted host's `<host>.json`, wherever it is, or for the root, an account's folder or an org's (a folder that comes
+ * or goes). The rest of the tree (other sessions' records, the app's indexes and task files) sets off nothing.
+ */
+export function recordsEventCounts(name: string | null, wanted: ReadonlySet<string>): boolean {
+	if (name === null) return true;
+	const parts = name.split(/[/\\]/).filter((p) => p !== "");
+	if (parts.length <= 2) return true;
+	const base = parts.at(-1) ?? "";
+	return base.endsWith(".json") && wanted.has(base.slice(0, -".json".length));
+}
+
+/**
+ * Reads the records of the sessions the registry lists, and of the slotted ones it doesn't, and tells listeners when
+ * any record changed, or which hosts have no file. It reads at once when that list of hosts changes; and, once started,
+ * it watches the tree from its root (FolderWatch: fs.watch, recursive, FSEvents on macOS), reading about 50 ms after a
+ * burst of changes to a wanted host's file or to a folder, and every 30 s whatever the watch says (hardening.md, B4).
+ * Each read looks in every folder for the hosts with no known file; unchanged files are only stat'ed.
  */
 export class RecordsWatcher {
 	readonly #reader: RecordsReader;
 	readonly #log: Log;
-	readonly #pollMs: number;
+	readonly #watch: FolderWatch;
 	readonly #listeners = new Set<RecordsListener>();
 	#hosts: string[] = [];
+	/** The same hosts, for the watch's events. */
+	#wanted: ReadonlySet<string> = new Set();
 	#records = new Map<string, AppRecord>();
 	#missing: ReadonlySet<string> = new Set();
 	#json = "";
-	#timer: ReturnType<typeof setInterval> | null = null;
 	#running: Promise<void> | null = null;
 	#again = false;
+	/** A safety scan with no event before it is waiting to run: a change it finds is one the watch missed. */
+	#missedCheck = false;
 
-	constructor(reader: RecordsReader, opts: { log?: Log; pollMs?: number } = {}) {
+	constructor(reader: RecordsReader, opts: RecordsWatcherOptions = {}) {
 		this.#reader = reader;
 		this.#log = opts.log ?? nullLog;
-		this.#pollMs = opts.pollMs ?? RECORDS_POLL_MS;
+		this.#watch = new FolderWatch(reader.root, {
+			recursive: true,
+			accept: (name) => recordsEventCounts(name, this.#wanted),
+			onScan: (why, quiet) => {
+				if (why === "safety" && quiet) this.#missedCheck = true;
+				void this.scanNow();
+			},
+			count: "rec",
+			clock: opts.clock,
+			log: this.#log,
+			watch: opts.watch,
+			debounceMs: opts.debounceMs,
+			safetyMs: opts.safetyMs,
+		});
 	}
 
 	get records(): Map<string, AppRecord> {
@@ -338,23 +379,28 @@ export class RecordsWatcher {
 		return () => this.#listeners.delete(listener);
 	}
 
-	/** The hosts the registry lists now. New ones are read at once. */
-	setHosts(hosts: readonly string[]): void {
-		const next = [...hosts].sort();
-		if (next.join("\n") === this.#hosts.join("\n")) return;
-		this.#hosts = next;
-		void this.scanNow();
+	/** Whether the tree is watched now; false before start, while its root doesn't exist, and after a watch failed until the next safety scan. */
+	get watching(): boolean {
+		return this.#watch.watching;
 	}
 
+	/** The hosts whose records the deck reads (the model's `hosts`). A new list is read at once; resolves once that scan is done. */
+	setHosts(hosts: readonly string[]): Promise<void> {
+		const next = [...hosts].sort();
+		if (next.join("\n") === this.#hosts.join("\n")) return Promise.resolve();
+		this.#hosts = next;
+		this.#wanted = new Set(next);
+		return this.scanNow();
+	}
+
+	/** Watches the tree, starts the safety scans, and scans now. */
 	start(): void {
-		if (this.#timer !== null) return;
-		this.#timer = setInterval(() => void this.scanNow(), this.#pollMs);
+		this.#watch.start();
 		void this.scanNow();
 	}
 
 	stop(): void {
-		if (this.#timer !== null) clearInterval(this.#timer);
-		this.#timer = null;
+		this.#watch.stop();
 	}
 
 	/**
@@ -375,6 +421,8 @@ export class RecordsWatcher {
 	async #loop(): Promise<void> {
 		do {
 			this.#again = false;
+			const missedCheck = this.#missedCheck;
+			this.#missedCheck = false;
 			let records: Map<string, AppRecord>;
 			try {
 				records = await this.#reader.scan(this.#hosts);
@@ -385,6 +433,8 @@ export class RecordsWatcher {
 			const missing = new Set(this.#reader.missing);
 			const json = JSON.stringify([[...records.entries()].sort(([a], [b]) => (a < b ? -1 : 1)), [...missing].sort()]);
 			if (json === this.#json) continue;
+			// The watch may have gone quiet without an error: it's counted, and watched afresh.
+			if (missedCheck && this.#json !== "") this.#watch.missed();
 			this.#json = json;
 			this.#records = records;
 			this.#missing = missing;

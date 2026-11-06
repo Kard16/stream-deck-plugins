@@ -91,6 +91,19 @@ export function sinceText(since: number | null, now: number): string | null {
 	return `${Math.floor(h / 24)}d`;
 }
 
+/**
+ * When sinceText(since, ·) next reads differently after `now`, in wall-clock ms: at the next whole second after `since`
+ * while it shows seconds, the next whole minute while it shows minutes, and so on; while `since` is ahead of `now`
+ * (`0s`), a second after `since`. Always later than `now`. Null when `since` is unknown, whose text never changes. The
+ * slot keys, slot dials and Others repaint then, and not before (hardening.md, B6).
+ */
+export function sinceChangesAt(since: number | null, now: number): number | null {
+	if (since === null || !Number.isFinite(since) || !Number.isFinite(now)) return null;
+	const elapsed = now - since;
+	const unit = elapsed < 60_000 ? 1000 : elapsed < 3_600_000 ? 60_000 : elapsed < 86_400_000 ? 3_600_000 : 86_400_000;
+	return since + (Math.max(0, Math.floor(elapsed / unit)) + 1) * unit;
+}
+
 /** A token count, short: 950, 1.5k, 620k, 1M, 1.2M. */
 export function tokenCount(n: number): string {
 	const v = Math.max(0, n);

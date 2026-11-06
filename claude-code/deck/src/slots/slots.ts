@@ -1,8 +1,11 @@
+import { sinceChangesAt } from "../model/format.js";
 import type { SessionView } from "../model/sessions.js";
 import { asHost } from "../protocol/wire.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
+import { Ticker } from "../util/ticker.js";
 import { compareSlots, parseSlotId, type SlotId } from "./ids.js";
+import { othersLook } from "./others.js";
 import { MemorySlotStore, type SlotStore } from "./store.js";
 
 /**
@@ -27,6 +30,8 @@ export interface SlotsModel {
 	recordMissing(host: string): boolean;
 	/** The hosts whose records, and views, the model keeps while the registry doesn't list them. */
 	keepHosts(hosts: Iterable<string>): void;
+	/** The wall clock the views' times are on: the repaint tick reads their `since`s against it. */
+	wallNow(): number;
 	onChange(listener: () => void): () => void;
 }
 
@@ -54,7 +59,11 @@ export type PlaceResult = { ok: true; host: string; from: SlotId | null; replace
  * - **Saved** through the store on every change, and loaded at start.
  *
  * `onChange` fires after every change to the slots and after every change to the model, once the slots have caught
- * up with it, so a listener always sees the slots and the sessions agree.
+ * up with it, so a listener always sees the slots and the sessions agree. It also fires on the slots' one repaint tick
+ * (hardening.md, B6), when a `since` the slot keys, the slot dials or Others show next reads differently: the earliest
+ * such moment over the running sessions on a showing slot and, while an Others key shows (`showsOthers`), the one
+ * waiting longest off the slots. Nothing else they show changes with the time, so they repaint then and at no other
+ * time.
  */
 export class Slots {
 	readonly #model: SlotsModel;
@@ -69,6 +78,10 @@ export class Slots {
 	readonly #fillDelayMs: number;
 	#fillTimer: TimerHandle | null = null;
 	#refreshing = false;
+	/** The Others keys that show now (`showsOthers`). */
+	readonly #othersShown = new Set<object>();
+	/** The repaint tick, at the next moment a `since` the slots' keys, dials or Others show reads differently. */
+	readonly #ticker: Ticker;
 
 	/** `fillDelayMs`: FILL_DELAY_MS; 0 fills a slot as it appears. */
 	constructor(model: SlotsModel, opts: { store?: SlotStore; log?: Log; clock?: Clock; fillDelayMs?: number } = {}) {
@@ -77,6 +90,7 @@ export class Slots {
 		this.#log = opts.log ?? nullLog;
 		this.#clock = opts.clock ?? realClock;
 		this.#fillDelayMs = opts.fillDelayMs ?? FILL_DELAY_MS;
+		this.#ticker = new Ticker(this.#clock, () => this.#emit(), { wallNow: () => this.#model.wallNow(), log: this.#log, what: "the slots' repaint tick" });
 		this.#hosts = this.#store.load();
 		if (this.#hosts.size > 0) this.#log.info(`SLOTS loaded: ${[...this.#hosts].map(([slot, host]) => `${slot} ${host}`).join(", ")}`);
 		this.#model.keepHosts(this.#hosts.values());
@@ -110,10 +124,24 @@ export class Slots {
 		}, this.#fillDelayMs);
 	}
 
-	/** Stops the fill's timer. */
+	/** Stops the fill's timer and the repaint tick. */
 	dispose(): void {
 		if (this.#fillTimer !== null) this.#clock.clearTimeout(this.#fillTimer);
 		this.#fillTimer = null;
+		this.#ticker.stop();
+	}
+
+	/** Whether `who` (the Others keys) shows the sessions on no slot now: their longest waiting's `since` times the tick. */
+	showsOthers(who: object, shows: boolean): void {
+		const before = this.#othersShown.size > 0;
+		if (shows) this.#othersShown.add(who);
+		else this.#othersShown.delete(who);
+		if ((this.#othersShown.size > 0) !== before) this.#schedule();
+	}
+
+	/** When the repaint tick is due, wall-clock ms; null for none: nothing the slots show changes with the time. For tests. */
+	get nextTick(): number | null {
+		return this.#ticker.next;
 	}
 
 	/** That key or dial doesn't show `slot` any more. The slot keeps its session. */
@@ -259,6 +287,33 @@ export class Slots {
 			} catch (err) {
 				this.#log.error(`a slots listener threw: ${describeError(err)}`);
 			}
+		}
+		this.#schedule();
+	}
+
+	/**
+	 * Times the repaint tick afresh: at the first moment a `since` shown next reads differently (format.ts's
+	 * sinceChangesAt), that of each running session on a showing slot, which its key and its dial show, and, while an
+	 * Others key shows, that of the one waiting longest off the slots.
+	 */
+	#schedule(): void {
+		try {
+			const now = this.#model.wallNow();
+			const sinces: (number | null)[] = [];
+			for (const [slot, host] of this.#hosts) {
+				const view = this.showing(slot) ? this.#model.slotView(host) : null;
+				if (view?.running) sinces.push(view.since);
+			}
+			if (this.#othersShown.size > 0) sinces.push(othersLook(this.#model.sessions(), this.slotted(), now).oldest?.since ?? null);
+			let first: number | null = null;
+			for (const since of sinces) {
+				const at = sinceChangesAt(since, now);
+				if (at !== null && (first === null || at < first)) first = at;
+			}
+			this.#ticker.at(first);
+		} catch (err) {
+			this.#ticker.stop();
+			this.#log.error(`timing the slots' repaint tick threw: ${describeError(err)}`);
 		}
 	}
 }

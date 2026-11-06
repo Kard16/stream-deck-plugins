@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { CLAUDE_BUNDLE_ID, type ExecFile, FRONT_CHECK_MS, FRONT_STUCK_MS, FrontWatcher, LSAPPINFO, lsappinfoCheck, parseBundleId, parseFrontAsn } from "../src/model/front.js";
+import { CLAUDE_BUNDLE_ID, type ExecFile, FRONT_CHECK_MS, FRONT_STUCK_MS, FrontWatcher, frontIntervalMs, LSAPPINFO, lsappinfoCheck, parseBundleId, parseFrontAsn } from "../src/model/front.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -189,6 +189,88 @@ describe("the front-app check's gate (FrontWatcher)", () => {
 		await settle();
 		assert.equal(asks(), 2);
 		assert.equal(fronts(), 0);
+	});
+
+	test("while it stays wanted it asks every second for the first 30 s, every 5 s until 2 minutes, every 15 s until 10 minutes, then once a minute; being told again that it's wanted doesn't start that over (B5)", async () => {
+		assert.deepEqual(
+			[0, 29_999, 30_000, 119_999, 120_000, 599_999, 600_000, 86_400_000].map(frontIntervalMs),
+			[1000, 1000, 5000, 5000, 15_000, 15_000, 60_000, 60_000],
+		);
+		const clock = new FakeClock();
+		const t0 = clock.now();
+		const at: number[] = [];
+		const watcher = new FrontWatcher(
+			async () => {
+				at.push(clock.now() - t0);
+				return false;
+			},
+			() => {},
+			{ clock },
+		);
+		watcher.want(true);
+		await settle();
+		for (let i = 0; i < 900; i++) {
+			clock.advance(1000);
+			await settle();
+			// The model says so on every change.
+			watcher.want(true);
+		}
+		const every = (from: number, to: number, step: number): number[] => Array.from({ length: (to - from) / step + 1 }, (_, i) => from + i * step);
+		assert.deepEqual(at, [...every(0, 30_000, 1000), ...every(35_000, 120_000, 5000), ...every(135_000, 600_000, 15_000), ...every(660_000, 900_000, 60_000)]);
+		watcher.dispose();
+	});
+
+	test("a reset sets it back to every second: the next ask a second after the last, or at once if that has passed; so does being wanted anew; a reset while not wanted does nothing", async () => {
+		const clock = new FakeClock();
+		const t0 = clock.now();
+		const at: number[] = [];
+		const watcher = new FrontWatcher(
+			async () => {
+				at.push(clock.now() - t0);
+				return false;
+			},
+			() => {},
+			{ clock },
+		);
+		const run = async (s: number): Promise<void> => {
+			for (let i = 0; i < s; i++) {
+				clock.advance(1000);
+				await settle();
+			}
+		};
+		watcher.want(true);
+		await settle();
+		await run(180);
+		assert.deepEqual(at.slice(-2), [165_000, 180_000], "every 15 s by now");
+		await run(5);
+		watcher.reset();
+		await settle();
+		assert.equal(at.at(-1), 185_000, "15 s after the last is far off: a second after it has passed, so at once");
+		await run(3);
+		assert.deepEqual(at.slice(-4), [185_000, 186_000, 187_000, 188_000], "every second again");
+		// Reset again within the second: the next ask still waits out the second after the last.
+		clock.advance(500);
+		watcher.reset();
+		await settle();
+		assert.equal(at.at(-1), 188_000);
+		clock.advance(500);
+		await settle();
+		assert.equal(at.at(-1), 189_000);
+		// Thirty seconds on, the 5 s step again; then not wanted, and wanted anew: every second.
+		await run(40);
+		const last = at.at(-1) ?? 0;
+		assert.equal(at.at(-2), last - 5000, "the 5 s step");
+		watcher.want(false);
+		watcher.reset();
+		clock.advance(10_000);
+		await settle();
+		assert.equal(at.at(-1), last, "not wanted: a reset asks nothing");
+		watcher.want(true);
+		await settle();
+		await run(3);
+		const now = clock.now() - t0;
+		assert.deepEqual(at.slice(-4), [now - 3000, now - 2000, now - 1000, now], "wanted anew: at once, then every second");
+		watcher.dispose();
 	});
 
 	test("a check that answers once it isn't wanted any more marks nothing; after dispose, nothing at all", async () => {

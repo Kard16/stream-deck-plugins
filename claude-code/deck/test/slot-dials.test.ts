@@ -40,7 +40,11 @@ const COLOR = { question: "Red or blue?", header: "Color", options: [{ label: "R
 const FRUIT = { question: "Which fruits?", header: "Fruit", options: [{ label: "Apple", description: "Red or green" }, { label: "Pear, ripe", description: "Soft" }, { label: "Plum", description: "Purple" }], multiSelect: true };
 const SIZE = { question: "Which size?", header: "Size", options: [{ label: "Small", description: "A little one" }, { label: "Large", description: "A big one" }], multiSelect: false };
 
-/** A on the first dial's slot and B on the second's, both shown, with the 1 s rule and the gone guard as given. */
+/**
+ * A on the first dial's slot and B on the second's, both shown, with the 1 s rule and the gone guard as given. The
+ * slots' repaint tick runs on a clock of its own that stands still, so no tick comes between a test's steps (slots.test.ts
+ * tests the tick).
+ */
 function setup(opts: Partial<SlotDialsOptions> = {}, registry: RegistrySession[] = [reg(1, A), reg(2, B)]) {
 	const clock = new FakeClock();
 	let wall = 50_000;
@@ -48,7 +52,7 @@ function setup(opts: Partial<SlotDialsOptions> = {}, registry: RegistrySession[]
 	const model = new SessionModel({ clock, log, wallNow: () => wall });
 	model.setRegistry(registry);
 	model.setBridgeState("listening");
-	const slots = new Slots(model, { store: new MemorySlotStore(new Map([[SLOT0, A], [SLOT1, B]])), clock, fillDelayMs: 0 });
+	const slots = new Slots(model, { store: new MemorySlotStore(new Map([[SLOT0, A], [SLOT1, B]])), clock: new FakeClock(), fillDelayMs: 0 });
 	const renders: { screen: SlotScreen; now: number }[] = [];
 	const events: string[] = [];
 	const alerts: string[] = [];
@@ -224,20 +228,21 @@ describe("an approval on its session's dial", () => {
 	});
 
 	test("only the request the strip showed: one the strip hasn't painted yet gets an alert, and nothing, though the same chip was picked on both", () => {
-		// A render whose since changes with the wall clock, so a tick's repaint sends and starts the painter's 100 ms.
+		// A render whose since changes with the wall clock each second, as the real strip's does, so a repaint 2 s on
+		// sends and starts the painter's 100 ms.
 		const { clock, model, dials, permission, turn, press, screen, alerts, at } = setup({
 			paintIntervalMs: 100,
 			goneMs: 0,
-			render: (s, now) => ({ layout: `layouts/slot-${s.kind}.json`, feedback: { what: { value: "request" in s ? `#${s.request}` : s.kind }, pick: { value: "pick" in s ? s.pick : null }, since: { value: now } } }),
+			render: (s, now) => ({ layout: `layouts/slot-${s.kind}.json`, feedback: { what: { value: "request" in s ? `#${s.request}` : s.kind }, pick: { value: "pick" in s ? s.pick : null }, since: { value: Math.floor(now / 1000) } } }),
 		});
 		const first = permission(A, "Bash", { command: "one" });
 		turn();
 		const second = permission(A, "Bash", { command: "two" });
-		at(51_000);
-		clock.advance(SETTLE_MS);
+		clock.advance(2 * SETTLE_MS);
+		// A change at 2 s repaints the since, as the slots' tick would; Allow on the first has been in sight since its
+		// paint at 100 ms.
 		at(52_000);
-		// The tick at 2 s repaints the since; Allow on the first has been in sight since its paint at 100 ms.
-		clock.advance(SETTLE_MS);
+		model.setRecords(new Map());
 		// The first is answered elsewhere now, so the strip's paint of the second waits out those 100 ms.
 		const key = new DecisionKeys(model, "allow", { clock, paintIntervalMs: 0, settleMs: 0 });
 		key.add("k", { setImage: () => {}, showOk: () => {}, showAlert: () => {} });
@@ -742,22 +747,21 @@ describe("starting over, painting, and the strip's layouts", () => {
 		assert.deepEqual(events, ["d0 layout layouts/slot-approval.json", "d0 feedback pick,what"]);
 	});
 
-	test("it repaints once a second for since, tells listeners each screen it paints, and stops with its last dial", () => {
-		const { clock, dials, renders, at } = setup();
-		const seen: string[] = [];
-		dials.onChange((id, s) => seen.push(`${id}:${s.kind}`));
-		const before = renders.length;
-		at(51_000);
-		clock.advance(1000);
-		assert.equal(renders.length - before, 2, "both dials");
-		assert.equal(renders.at(-1)?.now, 51_000);
-		assert.deepEqual(seen, ["d0:pages", "d1:pages"]);
-		dials.remove("d0");
-		dials.remove("d1");
-		const after = renders.length;
-		clock.advance(5000);
-		assert.equal(renders.length, after, "no dials, no repaints");
-		assert.equal(clock.pendingTimers, 0);
+	test("a strip that throws when drawn is logged at error, and nothing escapes add or a change; the next repaint draws it", () => {
+		let fail = true;
+		const { model, dials, log, permission } = setup({
+			render: (screen) => {
+				if (fail) throw new Error("bad strip");
+				return { layout: `layouts/slot-${screen.kind}.json`, feedback: { what: { value: screen.kind } } };
+			},
+		});
+		permission(B, "Bash", { command: "ls" });
+		assert.deepEqual(dials.painted("d0"), {});
+		assert.ok(log.at("error").length >= 3, log.at("error").join("\n"));
+		assert.ok(log.at("error").every((l) => l.includes("screen threw: Error: bad strip")));
+		fail = false;
+		model.setRecords(new Map());
+		assert.deepEqual([dials.painted("d0"), dials.painted("d1")], [{ what: { value: "pages" } }, { what: { value: "approval" } }]);
 	});
 
 	test("lastShown keeps the last request its strip painted after the screen moves on", () => {

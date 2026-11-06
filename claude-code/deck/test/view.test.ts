@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
-import { costText, projectName, sinceText, tokenCount, tokensText } from "../src/model/format.js";
+import { costText, projectName, sinceChangesAt, sinceText, tokenCount, tokensText } from "../src/model/format.js";
 import { SessionModel } from "../src/model/sessions.js";
 import { KEEP_INPUT_BYTES } from "../src/protocol/ask.js";
 import { ALLOW_DECISION } from "../src/protocol/wire.js";
@@ -404,6 +404,41 @@ describe("seen (session-keys.md, What each session shows)", () => {
 		assert.equal(clock.pendingTimers, 0);
 	});
 
+	test("asked every second at first, then every 5 s, then every 15 s, while it stays needed; an attach, a detach and a press on the deck or a wake (userPresent) each set it back to every second (B5)", async () => {
+		const { model, clock, at, events, asks } = ended({ front: async () => false });
+		const run = async (s: number): Promise<number> => {
+			const from = asks();
+			for (let i = 0; i < s; i++) {
+				clock.advance(1000);
+				await settle();
+			}
+			return asks() - from;
+		};
+		at(10_000);
+		events(A, { t: "attach", surface: "desktop" });
+		await settle();
+		assert.equal(asks(), 1, "asked at once");
+		assert.deepEqual([await run(30), await run(90), await run(60)], [30, 18, 4], "1 s for 30 s, 5 s to 2 minutes, then 15 s");
+		model.userPresent();
+		await settle();
+		assert.equal(await run(10), 10, "a press on the deck: every second again");
+		assert.deepEqual([await run(20), await run(90), await run(30)], [20, 18, 2]);
+		// B, on screen in the app's other window and off it again: each sets it back, while A, unseen, keeps it needed.
+		at(11_000);
+		events(B, { t: "attach", surface: "desktop" });
+		await settle();
+		assert.equal(await run(10), 10, "an attach");
+		await run(150);
+		events(B, { t: "detach", surface: "desktop" });
+		await settle();
+		assert.equal(await run(10), 10, "a detach");
+		// A phone's attach isn't the desktop app's: nothing changes.
+		await run(150);
+		events(B, { t: "attach", surface: "mobile" });
+		await settle();
+		assert.equal(await run(30), 2, "still every 15 s");
+	});
+
 	test("a failing check counts as not in front", async () => {
 		const { clock, at, events, view, asks } = ended({ front: () => Promise.reject(new Error("lsappinfo")) });
 		at(10_000);
@@ -537,6 +572,34 @@ describe("how since, tokens and cost read (format.ts)", () => {
 		assert.equal(sinceText(now - 3 * 86_400_000, now), "3d");
 		assert.equal(sinceText(now + 5000, now), "0s");
 		assert.equal(sinceText(null, now), null);
+	});
+
+	test("sinceChangesAt is the first moment after now that the since reads differently: the next second, minute, hour or day after it; a second after a since ahead of now; none for an unknown one", () => {
+		const since = 1_000_000_000;
+		const cases: [number, number][] = [
+			[0, 1000],
+			[999, 1000],
+			[1000, 2000],
+			[59_999, 60_000],
+			[60_000, 120_000],
+			[4 * 60_000 + 59_000, 5 * 60_000],
+			[3_599_999, 3_600_000],
+			[3_600_000, 7_200_000],
+			[86_399_999, 86_400_000],
+			[3 * 86_400_000 + 5, 4 * 86_400_000],
+			[-5000, 1000],
+		];
+		for (const [elapsed, change] of cases) {
+			const now = since + elapsed;
+			const at = sinceChangesAt(since, now);
+			assert.equal(at, since + change, `${elapsed} ms in`);
+			assert.ok(at !== null && at > now, `${elapsed}: later than now`);
+			// The text holds until then, and changes then.
+			assert.equal(sinceText(since, at - 1), sinceText(since, now), `${elapsed}: holds`);
+			assert.notEqual(sinceText(since, at), sinceText(since, now), `${elapsed}: changes`);
+		}
+		assert.equal(sinceChangesAt(null, since), null);
+		assert.equal(sinceChangesAt(Number.NaN, since), null);
 	});
 
 	test("tokens and cost", () => {

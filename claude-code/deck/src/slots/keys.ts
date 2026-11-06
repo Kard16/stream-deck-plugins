@@ -3,16 +3,12 @@ import type { SessionView } from "../model/sessions.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
-import { Ticker } from "../util/ticker.js";
 import type { SlotId } from "./ids.js";
 import { type JumpModel, jumpTo } from "./jump.js";
 import type { Slots } from "./slots.js";
 
 /** How long a press on a slot key must be held to put the session on screen in the app on it. */
 export const HOLD_MS = 500;
-
-/** How often the keys repaint while nothing changes, so a `since` keeps up. */
-export const TICK_MS = 1000;
 
 /**
  * What one Session Slot key shows (session-keys.md, The key face): its slot, the session on it (null: none, an empty
@@ -41,7 +37,6 @@ export type SlotKeysOptions = {
 	open?: (host: string) => void;
 	paintIntervalMs?: number;
 	holdMs?: number;
-	tickMs?: number;
 };
 
 type Key = {
@@ -62,6 +57,8 @@ type Key = {
  * does nothing. Held HOLD_MS, it puts the session on screen in the app on its slot, swapping with the slot that one was
  * on (Slots' `takeOnScreen`), and shows OK, or an alert when no session is known to be on screen; the key-up after it
  * does nothing. While it has a key with a slot, it tells the model that something shows `seen` (the key face does).
+ * It repaints whenever the slots change, which they also do when a `since` the keys show next reads differently (Slots'
+ * repaint tick, hardening.md B6).
  *
  * The SDK wrapper calls `add` on willAppear with the key's slot (slotId of its device and coordinates; null in a
  * multi-action), `remove` on willDisappear, and `down` and `up` on keyDown and keyUp. `add` and `remove` tell the slots
@@ -78,7 +75,6 @@ export class SlotKeys {
 	readonly #paintIntervalMs: number;
 	readonly #holdMs: number;
 	readonly #keys = new Map<string, Key>();
-	readonly #ticker: Ticker;
 
 	constructor(slots: Slots, model: SlotKeysModel, opts: SlotKeysOptions) {
 		this.#slots = slots;
@@ -90,7 +86,6 @@ export class SlotKeys {
 		this.#open = opts.open ?? (() => {});
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
 		this.#holdMs = opts.holdMs ?? HOLD_MS;
-		this.#ticker = new Ticker(this.#clock, opts.tickMs ?? TICK_MS, () => this.repaintAll(), { log: this.#log, what: "the slot keys' repaint tick" });
 		slots.onChange(() => this.repaintAll());
 	}
 
@@ -98,7 +93,6 @@ export class SlotKeys {
 		this.remove(id);
 		const key: Key = { slot, surface, painter: new KeyPainter<string | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs }), down: false, holdTimer: null, held: false };
 		this.#keys.set(id, key);
-		this.#ticker.start();
 		this.#showsSeen();
 		if (slot !== null) this.#slots.appear(slot, id);
 		this.#paint(key);
@@ -110,7 +104,6 @@ export class SlotKeys {
 		if (key.holdTimer !== null) this.#clock.clearTimeout(key.holdTimer);
 		key.painter.dispose();
 		this.#keys.delete(id);
-		if (this.#keys.size === 0) this.#ticker.stop();
 		this.#showsSeen();
 		if (key.slot !== null) this.#slots.disappear(key.slot, id);
 	}

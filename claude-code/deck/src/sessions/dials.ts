@@ -55,12 +55,15 @@ export class SessionsDials {
 		this.#log = opts.log ?? nullLog;
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
 		this.#open = opts.open ?? (() => {});
-		this.#sessions = model.sessions();
 		model.onChange(() => this.refresh());
 	}
 
-	/** The model changed: each dial stays on its session, or on the same position if it ended, and repaints. */
+	/**
+	 * The model changed: each dial stays on its session, or on the same position if it ended, and repaints. With no dial
+	 * on the deck there's nothing to do (B2): the first dial to appear reads the sessions afresh.
+	 */
 	refresh(): void {
+		if (this.#dials.size === 0) return;
 		this.#sessions = this.#model.sessions();
 		for (const dial of this.#dials.values()) {
 			const found = dial.selected === null ? -1 : this.#sessions.findIndex((s) => s.key === dial.selected);
@@ -71,6 +74,8 @@ export class SessionsDials {
 
 	/** A dial appeared: it starts on the first session and paints in full. */
 	add(id: string, surface: DialSurface): void {
+		// Not kept up while no dial showed them.
+		if (this.#dials.size === 0) this.#sessions = this.#model.sessions();
 		let dial = this.#dials.get(id);
 		if (!dial) {
 			dial = {

@@ -78,11 +78,12 @@ const openSession = (host: string): void => {
 	});
 };
 
-// The session model: the registry, the app's records and the bridge, merged by the app's local_ id. A hook's request
-// or a hello that the latest reading doesn't confirm has the registry read once more at once, not at the next scan.
-// The wiring is connectSources's, which the tests run too. For `seen`, it asks /usr/bin/lsappinfo whether Claude is
-// the app in front, once a second, and only while a session whose turn ended unseen is on screen in the app and a
-// Session Slot or Other Sessions key is on the deck (SessionModel.showsSeen).
+// The session model: the registry, the app's records and the bridge, merged by the app's local_ id. Both folders are
+// watched (fs.watch, FSEvents) and read about 50 ms after they change, and every 30 s whatever the watch says. A hook's
+// request or a hello that the latest reading doesn't confirm has the registry read once more at once. The wiring is
+// connectSources's, which the tests run too. For `seen`, it asks /usr/bin/lsappinfo whether Claude is the app in front,
+// only while a session whose turn ended unseen is on screen in the app and a Session Slot or Other Sessions key is on
+// the deck (SessionModel.showsSeen): every second at first, backing off to once a minute (front.ts's frontIntervalMs).
 const { registry, records, model } = connectSources({
 	registryDir: REGISTRY_DIR,
 	recordsDir: RECORDS_DIR,
@@ -116,12 +117,22 @@ const actionsLog = scope("Actions");
 streamDeck.actions.registerAction(new SessionSlotAction(new SlotActions(slotKeys, slotDials, { log: actionsLog })));
 streamDeck.actions.registerAction(new OthersKeyAction(new OthersActions(othersKeys, { log: actionsLog })));
 
-// After sleep: re-read everything at once, and listen again if the bridge had stopped.
+// A press anywhere on the deck, on any of this plugin's keys or dials: the user is there, so the front-app check for
+// `seen` asks every second again (hardening.md, B5).
+streamDeck.actions.onKeyDown(() => model.userPresent());
+streamDeck.actions.onDialDown(() => model.userPresent());
+streamDeck.actions.onTouchTap(() => model.userPresent());
+
+// After sleep: re-read everything at once, listen again if the bridge had stopped, and repaint the slots' keys, dials
+// and Others, which times their next repaint afresh: the timers don't count the sleep. The user is likely back, so the
+// front-app check asks every second again.
 streamDeck.system.onSystemDidWakeUp(() => {
 	log.info("woke up: rescanning");
 	void registry.scanNow();
 	void records.scanNow();
 	bridge?.start();
+	slots.refresh();
+	model.userPresent();
 });
 
 // The Stream Deck app stops the plugin with SIGTERM. Say so, then drop held requests (their hooks get no
