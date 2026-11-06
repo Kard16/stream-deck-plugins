@@ -1237,6 +1237,20 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Five things show only on screen, and the doc says "you see it" for them.
     - Tools 284/284 (273 before), 12 mutations caught.
   - **D1:** the routine is in CLAUDE.md (Wave 2's entry). The README's update section and recheck's help now point at the smoke test.
+- 2026-11-06, **the smoke test, live with the user** (`docs/claude-code/smoke-test.md`, 14:11–14:21Z):
+  - **Setup:** the throwaway session "Deck smoke test" (`local_c88d2512-…`), from the preset, on Haiku 5.5 at low effort. It ran plugin 0.3.0 from the dev copy, on Claude Code 2.1.317.
+  - **smoke-check: 13 ok, 1 missing,** and no warn or error line in the window:
+    - **1:** a slot key opened the user's stopped "Return tiles and frame drop fixes" in 69 ms. It said hello 1.1 s after the press, on plugin 0.3.0 from the release copy.
+    - **2 and 10:** jumps from Others and from a slot key opened T in 59 and 63 ms. The app showed it 174 and 147 ms after the press.
+    - **3 and 13:** a long press put T on bottom key 4. Two long presses then swapped it with this session and back: the swap Phase 7 never tried live.
+    - **4, 5, 6 and 8:** T's dial allowed a Bash, answered a question, approved a plan into Manual, and denied a Bash. After the Deny, the turn ended 128 ms later with no other call. The question's answer was Red, the first option: one tick of the dial, sent as the strip showed it.
+    - **9:** the first request was allowed in the app before the steps began. The deck let it go by rule 2, 1 ms after the registry left `waiting`, and the command ran 60 ms later. It was the window's only rule-2 release, and a right one.
+    - **11:** a Saved Prompt was done 36 ms after it was queued.
+    - **12:** seen, at that turn's end.
+    - **14:** T's hello said 2.1.317, the vendored reference's version, so no mark.
+    - **7, missing:** every allow and deny went through T's dial, and the Approve and Deny keys were never pressed. The keys' code hasn't changed since Phase 7's live test, and the `approve` and `deny` fixtures press them.
+  - **The skew, seen live:** this session, still on plugin 0.2.1, set T's mode. Its old mode hook got `404 POST "/v1/pretool"`, and the change went through.
+  - **The user:** "I did the tests and everything looked good", for the steps the log can't show.
 
 ## Progress
 
@@ -1287,4 +1301,5 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - 672c50e: the idle fixes, which meet the target;
     - 6282cef: mode changes removed. Deck 0.5.0 is live since 05:06:58Z. Plugin 0.3.0 is released; `status` says installed and current, and sessions load it when they next start.
     - 3b782b0: C1, the deck showing a newer Claude Code or an older plugin; C2, the smoke test and its log checker. Live since 05:33:55Z.
-  - **Still to come:** the smoke test live, the reboot (C7), a day of use, and the idle count after it.
+  - **The smoke test passed live,** 2026-11-06: 13 of 14 steps by the log, and the user saw the rest. The Approve and Deny keys weren't pressed.
+  - **Still to come:** the reboot (C7), a day of use, and the idle count after it.
