@@ -1286,5 +1286,5 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - d1121bc: recheck's gaps, its check of the vendored reference, and the refresh test;
     - 672c50e: the idle fixes, which meet the target;
     - 6282cef: mode changes removed. Deck 0.5.0 is live since 05:06:58Z. Plugin 0.3.0 is released; `status` says installed and current, and sessions load it when they next start.
-  - **Wave 3, building:** C1, the deck flagging a newer Claude Code or an older plugin; C2, the smoke test and its log checker.
+    - 3b782b0: C1, the deck showing a newer Claude Code or an older plugin; C2, the smoke test and its log checker. Live since 05:33:55Z.
   - **Still to come:** the smoke test live, the reboot (C7), a day of use, and the idle count after it.
