@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 
 /**
@@ -122,8 +123,10 @@ export class RegistryReader {
 	 * which is logged at info.
 	 */
 	async scan(): Promise<RegistrySession[]> {
+		countIdle("reg.scan");
 		let names: string[];
 		try {
+			countIdle("reg.readdir");
 			names = await this.#fs.readdir(this.#dir);
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code ?? describeError(err).split("\n")[0] ?? "unknown";
@@ -167,10 +170,14 @@ export class RegistryReader {
 		// Null when the file is unchanged since it was last read, or isn't a file: then it isn't read again.
 		let text: string | null = null;
 		try {
+			countIdle("reg.stat");
 			const st = await this.#fs.stat(file);
 			isFile = st.isFile();
 			sig = `${st.mtimeMs}:${st.size}:${st.ino}`;
-			if (isFile && cached?.sig !== sig) text = await this.#fs.readFile(file);
+			if (isFile && cached?.sig !== sig) {
+				countIdle("reg.read");
+				text = await this.#fs.readFile(file);
+			}
 		} catch (err) {
 			// Gone between the listing and the read: the session ended. The next scan drops it.
 			const code = (err as NodeJS.ErrnoException).code ?? describeError(err).split("\n")[0] ?? "unknown";

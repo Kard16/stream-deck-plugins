@@ -12,6 +12,7 @@ import {
 } from "@elgato/streamdeck";
 
 import type { ModeDials } from "../mode/dials.js";
+import { countIdle } from "../util/idle.js";
 import { fireAndForget } from "./shared.js";
 
 /** The Mode dial acts on the target session, so it has no settings. */
@@ -31,7 +32,10 @@ export class ModeDialAction extends SingletonAction<ModeDialSettings> {
 		if (!ev.action.isDial()) return;
 		const dial: DialAction<ModeDialSettings> = ev.action;
 		this.#dials.add(dial.id, {
-			setFeedback: (payload) => fireAndForget("setFeedback", () => dial.setFeedback(payload as FeedbackPayload)),
+			setFeedback: (payload) => {
+				countIdle("send.feedback");
+				fireAndForget("setFeedback", () => dial.setFeedback(payload as FeedbackPayload));
+			},
 			showAlert: () => fireAndForget("showAlert", () => dial.showAlert()),
 		});
 	}

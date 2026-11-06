@@ -1042,6 +1042,98 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - The main thread's answer named, in order of worth: idle polling from mod copies that aren't current, an emit on every poll, the two once-a-second file scans, and the "seen" spawns.
     - It named as failure points: app updates breaking undocumented internals, version skew between running sessions, a hung deck holding hooks until their timeout, and the port and token.
   - **The handover,** at the user's word: `docs/claude-code/hardening.md` is Phase 8's spec, and `docs/claude-code/hardening-kickoff.md` is its session's kickoff. CLAUDE.md names both.
+- 2026-11-05, **Phase 8 started, at the user's word** (session "Stream Deck Claude Code Phase 8", `local_2f4a7a56-…`, without `ultracode`):
+  - **A fourth goal:** the user's prompt added "make it easy to deploy on other machines" to the spec's three. The spec doesn't cover it, so it goes to the questions round.
+  - **The tree wasn't clean:** the last session's two pieces of work were uncommitted. At the user's word, after every check passed again, they went in as two commits:
+    - `af7c773`, the 2.1.317 reference;
+    - `cb4a85e`, Phase 7's close and Phase 8's plan.
+    - The checks: tsc, sync `--check`, `plugin validate`, `plugin test` 159/159, tools 256/256, install 11/11, recheck 35 ok.
+  - **Released:** `release` put out `register.ts`'s comment-only change, and `status` says installed and current.
+  - **From the deck's log, before the baseline** (debug since the deck's start at 04:08Z on 11-05):
+    - **Polls:** each session holds one 20 s poll, 3 a minute. Overnight, 05–13Z with 6 sessions open, that was 1,080 an hour.
+    - **Stray copies (B1):** 64 polls across the logs since 11-02, all in one minute of a live check on 11-03 (12:02–12:03Z). None in daily use since.
+    - **The burst after a turn (B3):** 16 "answered at once" from 04:08Z to 00:38Z.
+  - **Measuring:** `top -l … -c d -pid <deck>` gives the deck's CPU, context switches, BSD syscalls and idle wakeups without root. In 10 s with this session busy: about 200 switches, 580 syscalls, 0.01–0.03 s of CPU.
+  - **Not in the log:** scans, stats, walks, `lsappinfo` spawns, emits and sends. A debug-only `IDLE` line a minute will count them, with a read-only `tools/idle-report.mjs`. Loading it takes one restart of the deck plugin.
+- 2026-11-05, **the idle counters, and research for the questions round:**
+  - **The counters** (uncommitted):
+    - `deck/src/util/idle.ts` counts each kind of work with one Map increment where it happens. At debug it writes `Idle: IDLE {"s","userMs","sysMs","elu","rssMB","counts"}` a minute.
+    - `tools/idle-report.mjs` reports a window of the log per minute: the IDLE counts, polls by session and kind, and events. With `--live N` it adds `top`'s numbers for the deck.
+    - Checks: deck 501/501, also with the clock two days ahead and a week back; build; validate; tools 264/264. 20 of 20 deck mutations were caught, and 7 of 7 in the tool.
+    - The main thread restarted the Claude deck plugin at 01:06:41Z with nothing held. Both sessions said hello within 20 ms.
+  - **The first IDLE minute,** startup included, 2 sessions:
+    - 60 registry scans (120 stats) and 60 records scans (306 stats, 5 walks);
+    - 30 emits building 1,169 views, about 39 per emit (B2);
+    - 118 ticks; 208 ms of CPU.
+  - **B3 is longer than the spec thought.** With this session's background agents running, the registry stays `busy` after the main loop's turn. Each short turn of the main thread re-arms the 60 s window, so this session got 23–37 polls a minute answered at once (00:40–00:57Z).
+  - **Feature use,** from the deck's logs since 11-02 (an agent's read):
+    - Never pressed by the user: the Mode key, the Deny key, Saved Prompt keys (3 test presses on 11-03), the Others key.
+    - The Mode dial: only in the user's checklist on 11-03, Auto to Manual and back.
+    - Used: the Session Slots since 11-05, and before them the Sessions dial and the Session key.
+    - Phase 7's layout is under a day old, so the evidence is thin.
+  - **C5, a hung deck and the hooks.** Setup: a stand-in that accepts and never answers, a fake Messages API, scratch configs, Claude Code 2.1.317, a 15 s timeout standing in for 600 s.
+    - A timeout, or a refused connection, is no decision. The engine's default http hook timeout is also 600 s.
+    - Desktop sessions, and a terminal session's main thread: the dialog shows at once, beside the hook.
+    - `claude -p` runs, nested or not: the run waits the hook's whole timeout, then denies.
+    - A terminal session's background agents: no dialog until the hook ends.
+    - The mode hook fires only in desktop sessions, where a hung deck delays a mode change by 5 s.
+    - Restarting the deck plugin frees every waiting process at once.
+    - PROTOCOL.md's Failure and recovery says the dialog stays after a timeout, which holds only for the first kind.
+  - **Portability:** the code has no path of this Mac's in it; the setup does.
+    - The README's steps leave out developer mode.
+    - `install` refuses without `~/.claude/settings.json`.
+    - There's no one-command setup.
+    - `install --force` replaces another `CLAUDE_CODE_PLUGIN_DIRS` rather than adding to it.
+    - A packed `.streamDeckPlugin` would also need:
+      - an `.sdignore`, or the token ships inside;
+      - a token path outside the repo;
+      - `run/` out of the plugin folder, a PROTOCOL.md amendment.
+- 2026-11-06, **the idle baseline** (A1):
+  - **How:** `tools/idle-report.mjs --live 11`, 01:16:22–01:27:22Z, on deck 0.4.0 plus the counters (pid 71218). Raw output: this session's scratchpad, `baseline.txt`.
+  - **Conditions:** 2 sessions open, this one and "Claude plugin session dashboard revision", both idle. Nobody at the Mac: the front app was loginwindow.
+  - **A quiet minute,** over the 9 after this session's turn ended (01:17–01:26Z):
+    - **CPU:** 100–118 ms, 0.18% of a core. The event loop is 0.13% busy. RSS 77 MB. `ps` agrees: 1.22 s in the 11 minutes.
+    - **Kernel, from `top`:** about 830 context switches and 3,100 BSD syscalls. `top`'s idle wakeups read 0, so they're no use here.
+    - **Registry:** 60 scans, 60 readdirs, 120 stats.
+    - **Records:** 60 scans, 300 stats (5 hosts), 0 walks.
+    - **Polls:** 6, three a session, each held 20 s. Each emits (B2).
+    - **Ticks:** 120, from the slot keys' and slot dials' 1 s tickers. With the emits they build about 650 views a minute.
+    - **Sends:** one key image and one strip a minute, the `since` labels (B6).
+  - **The rest:**
+    - **The burst after this session's turn (B3):** one poll at once, one answered with none. That's two, as the spec expected with no background work.
+    - **Stray copies (B1):** none.
+    - **Seen (B5):** not wanted in the window, so no asks. Timed apart: one check costs the deck 0.79 ms of CPU and two spawns (4.6 ms wall). While it's wanted that's about 47 ms of the deck's CPU a minute, about 40% on top of its whole idle CPU, plus 120 spawns and their own CPU.
+  - **Reading:** the two 1 s scans are about 480 file operations a minute through Node's thread pool. They're likely most of the context switches and syscalls. B4's after-count will show it.
+- 2026-11-06, **the questions round, answered by the user.** They took each recommendation, except that only mode changes go in question 1:
+  1. **Features:**
+     - Mode changes go: the Mode key, the Mode dial, the PreToolUse mode hook, and the way past the auto-mode classifier.
+     - Saved Prompts stay, so the command channel and the mod's long poll stay.
+     - The Session key, the Sessions dial and the Others key stay for a week of use to decide. They're cheap and not fragile.
+     - The plan dial's "approve into a mode" is part of the approval's answer, not a mode change, and stays.
+  2. **The idle target, "near zero":**
+     - A quiet minute has no file scans beyond a safety scan every 30 s, no `lsappinfo` after 30 s of waiting, no emits, and ticks only when a label changes.
+     - Under 25 ms of CPU, 200 context switches and 600 BSD syscalls, measured as the baseline was, with 2 sessions open.
+     - Polls stay at 3 a session.
+  3. **Deploy, to the user's other Macs, from a clone:**
+     - a one-command `deck-install.mjs setup`;
+     - a complete README section, with a check that it worked;
+     - `settings.json` made when it's missing;
+     - `CLAUDE_CODE_PLUGIN_DIRS` added to, not replaced.
+     - No packed plugin file, and nobody else's Macs.
+  4. **The hook's timeout stays 600 s.** PROTOCOL.md gets the `-p` and background-agent case, and the restart that ends it.
+  5. **A newer Claude Code:** one log line per new version, and the session's version on its strip's Setup page, marked when it's newer than the vendored reference's.
+  6. **The brief "needs you" stays.**
+- 2026-11-06, **the plan from here** (the spec's order, with the user's answers):
+  - **Wave 1, in parallel:**
+    - the deck's idle fixes, B2, B4, B5 and B6, then the idle count again;
+    - recheck's gaps (C3), its check of the vendored reference (C4), and the refresh test (D2);
+    - the deploy work, in `install/` and the README's Setup;
+    - in this thread: the PROTOCOL.md amendment for the prune, C5's case and C6's risk, with fixtures.
+  - **Wave 2:** the prune on both sides, then a plugin release.
+  - **Wave 3:** C1, the smoke test (C2) and the routine after an update (D1).
+  - **Left as they are:**
+    - **B1:** no stray copy polled in daily use.
+    - **B3:** its window must outlast Claude Code's own `busy` after an Esc, 8.2 s in Phase 4. It costs at most about 60 polls per main-loop turn end, and B2 makes each cheap.
 
 ## Progress
 
@@ -1082,5 +1174,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Committed (00c7622) and released, 2026-11-04. Only `tests/fixtures.gen.ts` changed in the release copy, and `status` says installed and current.
   - The app's cards close when the dial answers, seen by the user. T5, T6 and T7 archived, 2026-11-05.
   - Left for Phase 8's smoke test: a swap between two slots, tried live.
-- [ ] Phase 8: efficiency and update resilience. Planned 2026-11-05: the spec is `docs/claude-code/hardening.md`, and its session starts from `docs/claude-code/hardening-kickoff.md`.
-  - Still to come: the build, its checks, and the live run with the user. The plugin's code is unchanged.
+- [ ] Phase 8: efficiency and update resilience. Started 2026-11-05; the spec is `docs/claude-code/hardening.md`, and the Log's last entries say where it stands.
+  - The idle counters are built and live, and the baseline is measured (A1), 2026-11-06.
+  - The questions round is answered. A fourth goal, deploying to the user's other Macs, is in.
+  - Still to come: waves 1–3 and their checks, the smoke test live, the reboot (C7), and a day of use.

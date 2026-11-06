@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { HOST_PATTERN, isObj, type Obj } from "../protocol/wire.js";
+import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 
 /**
@@ -193,6 +194,7 @@ export class RecordsReader {
 
 	/** The records of `hosts` that exist now. */
 	async scan(hosts: readonly string[]): Promise<Map<string, AppRecord>> {
+		countIdle("rec.scan");
 		const wanted = new Set(hosts.filter((h) => HOST_PATTERN.test(h)));
 		for (const host of [...this.#known.keys()]) if (!wanted.has(host)) this.#known.delete(host);
 
@@ -224,6 +226,7 @@ export class RecordsReader {
 	async #folders(): Promise<{ folders: string[]; complete: boolean }> {
 		let accounts: string[];
 		try {
+			countIdle("rec.readdir");
 			accounts = await this.#fs.readdir(this.#root);
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code ?? describeError(err);
@@ -240,7 +243,9 @@ export class RecordsReader {
 			const dir = path.join(this.#root, account);
 			let orgs: string[];
 			try {
+				countIdle("rec.stat");
 				if (!(await this.#fs.stat(dir)).isDirectory()) continue;
+				countIdle("rec.readdir");
 				orgs = await this.#fs.readdir(dir);
 			} catch {
 				complete = false;
@@ -252,6 +257,8 @@ export class RecordsReader {
 	}
 
 	async #find(host: string, folders: string[]): Promise<Known | null> {
+		// A walk of every folder, set off by a wanted host with no known record file.
+		countIdle("rec.walk");
 		for (const folder of folders) {
 			const file = path.join(folder, `${host}.json`);
 			const known: Known = { file, sig: "", record: null };
@@ -264,10 +271,12 @@ export class RecordsReader {
 	async #refresh(host: string, known: Known): Promise<boolean> {
 		let text: string;
 		try {
+			countIdle("rec.stat");
 			const st = await this.#fs.stat(known.file);
 			if (!st.isFile()) return false;
 			const sig = `${st.mtimeMs}:${st.size}:${st.ino}`;
 			if (sig === known.sig) return true;
+			countIdle("rec.read");
 			text = await this.#fs.readFile(known.file);
 			known.sig = sig;
 		} catch (err) {

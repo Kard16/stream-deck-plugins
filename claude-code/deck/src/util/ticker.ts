@@ -1,4 +1,5 @@
 import type { Clock, TimerHandle } from "./clock.js";
+import { countIdle } from "./idle.js";
 import { describeError, type Log, nullLog } from "./log.js";
 
 /**
@@ -46,6 +47,7 @@ export class Ticker {
 		this.#timer = this.#clock.setTimeout(() => {
 			this.#timer = null;
 			if (!this.#running) return;
+			countIdle("tick");
 			try {
 				this.#fn();
 			} catch (err) {

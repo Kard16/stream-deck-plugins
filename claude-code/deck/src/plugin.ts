@@ -31,6 +31,7 @@ import { OthersActions, SlotActions } from "./slots/sdk.js";
 import { Slots } from "./slots/slots.js";
 import { SlotFile } from "./slots/store.js";
 import { slotStrip } from "./slots/strip.js";
+import { startIdleLog } from "./util/idle.js";
 import { loadLogLevelFile, LOG_LEVEL_FILE } from "./util/log-level.js";
 import { describeError, type Log, redacting, Scrubber } from "./util/log.js";
 
@@ -139,6 +140,10 @@ process.once("SIGTERM", () => {
 		setTimeout(exit, 1000).unref();
 	}
 });
+
+// The idle count (docs/claude-code/hardening.md, A1): at debug or trace, one IDLE line a minute with the CPU time,
+// the event loop's use, the memory, and the counts of scans, spawns, emits, polls, sends and ticks since the last.
+startIdleLog(scope("Idle"), { level: streamDeck.logger.level });
 
 streamDeck.connect().catch((err: unknown) => log.error(`couldn't connect to the Stream Deck app: ${describeError(err)}`));
 registry.start();

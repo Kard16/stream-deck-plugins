@@ -7,6 +7,7 @@ Tools for testing the two Claude Code side plugins against fakes, ladder steps 4
 | `fake-bridge.mjs` | The deck plugin's side of the protocol, without the deck: a fake deck to run the real Claude Code plugin against (step 4). Also the CLI for its control routes. |
 | `fake-claude.mjs` | Plays the plugin side of the fixtures against a bridge, standing in for Claude Code's hooks and the mod at once: `--against-fake` or `--interactive` (step 5). |
 | `recheck.mjs` | After a Claude app update: whether the undocumented internals the deck and the plugin rely on still hold (Phase 6), the app's and the bundled engine's. Read only. |
+| `idle-report.mjs` | What the Claude deck did while idle, from its log, per minute and in total, and with `--live` from `top` too (Phase 8, A1). Read only. |
 | `lib/protocol.mjs` | The protocol's constants and answers, which routes are Claude Code's and which the mod's, and its fingerprint and summary: the reference implementation's own, imported from `claude-code/protocol/make-fixtures.mjs`. |
 | `lib/fixtures.mjs` | Reads and checks the fixtures and `vectors.json`. |
 | `lib/match.mjs` | PROTOCOL.md's matching rules: partial objects, `*`, arrays, query parameters, `at` ignored, the exact match an Answer or an Approve plan needs, and binding of command ids and insts. |
@@ -172,6 +173,30 @@ It re-checks what the plan's Log found in S0–S5 and the deck relies on, one ro
 - **The engine's words:** in the newest bundled Claude Code's binary, the shape of its refusal of a `$.mcp.call`, `$.mcp.call(<server>, <tool>) refused: <reason>`, which the mod reads to report a mode change the engine refused as `refused` (`refusalOf` in `claude-code/plugin/hooks/commands.ts`). Worded otherwise, the mod reports it `failed`, which the deck shows alike, so a change warns.
 
 It's read only. It never opens the registry's `.key` files or a transcript, never reads the deck's token, and prints field names and counts, never a value from the registry or the records. The bundle and engine checks find strings, not behaviour: after an update, still try one jump and one mode change on the deck.
+
+## Measuring the deck's idle work: idle-report.mjs
+
+```sh
+mise exec -- node claude-code/tools/idle-report.mjs --last 10          # the last 10 minutes of the deck's log
+mise exec -- node claude-code/tools/idle-report.mjs --live 10          # 10 minutes from now, with top beside the log
+mise exec -- node claude-code/tools/idle-report.mjs --since 2026-11-06T00:30:00Z --json
+```
+
+It reports what the Claude deck did, per minute and in total, for `docs/claude-code/hardening.md`'s idle baseline (A1) and the measurement after each fix. The deck has to log at debug: `debug` in `com.karimdhanji.claude.sdPlugin/log-level.txt`, read when the deck starts.
+- **The IDLE lines.** At debug the deck logs one a minute, `IDLE {"s":60,"userMs":…,"sysMs":…,"elu":…,"rssMB":…,"counts":{…}}` (`claude-code/deck/src/util/idle.ts`): the seconds it covers, the CPU time the process took, the event loop's utilization, the resident memory, and the counts since the last line. An IDLE line covers the minute before it, so it counts in the report's minute that holds the middle of that span. The total gives each count a minute too.
+- **The counts,** by kind:
+  - `reg.scan`, `reg.readdir`, `reg.stat`, `reg.read`: the registry scans and their file calls.
+  - `rec.scan`, `rec.readdir`, `rec.stat`, `rec.read`: the records scans and theirs; `rec.walk`, a walk of every account and org folder for a wanted host with no known record file.
+  - `front.ask` and `lsappinfo`: the "seen" check's asks, and the processes they start.
+  - `emit` and `view`: the model's changes, and the session views built.
+  - `poll.held`, `poll.now`, `poll.stray`, `poll.hello`: polls held, answered at once after a turn, answered at once for a mod instance that isn't the current one, and answered 409 for a hello.
+  - `send.image`, `send.feedback`, `send.layout`: images, strip feedback and strip layouts sent to the Stream Deck app.
+  - `tick`: the slot keys', slot dials' and Others' 1 s tickers.
+- **The POLL lines** per session, by how each was answered: `wait` (held), `at once`, `stray` (not the current instance) and `none` (a held poll answered at a turn's end). **The EVENT lines** per session. **The other lines** by scope and kind.
+- **`--live N`** finds the deck's node process (its command line runs `com.karimdhanji.claude.sdPlugin/bin/plugin.js`) and runs `top -l N+1 -s 60 -c d -pid <pid> -stats pid,time,csw,sysbsd,idlew,power`, which needs no root and takes N minutes. Then it reports those N minutes, with each minute's CPU seconds (from TIME, which is cumulative), context switches, BSD syscalls, idle wakeups and power beside the log's. top's first sample counts from the process's start, so it's left out.
+- **The window:** `--since` runs to the log's last line, `--last N` is the N minutes before now, and with neither the whole log is reported. The log's times, and the report's, are UTC.
+
+It's read only: it reads the log, runs `ps` and `top`, and writes nothing. It exits 0 when it reported, 1 when the log can't be read or `--live` finds no deck, and 2 for a usage error.
 
 ## The fake bridge's control routes
 

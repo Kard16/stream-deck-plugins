@@ -33,6 +33,7 @@ import {
 import type { AppRecord } from "../records/records.js";
 import { compareSessions, type RegistrySession } from "../registry/registry.js";
 import { type Clock, realClock } from "../util/clock.js";
+import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import { QuietLog } from "../util/quiet-log.js";
 import { projectName } from "./format.js";
@@ -564,6 +565,7 @@ export class SessionModel implements BridgeRoutes {
 		// No instance is current, so none takes commands: whatever the poll's inst, a missing one included, the deck
 		// asks for a hello, which makes the mod's instance current (#noHello).
 		if (current === null) {
+			countIdle("poll.hello");
 			reply.send(409, JSON.stringify(HELLO_FIRST));
 			this.#noHello(b, q.inst, "polls");
 			return;
@@ -572,14 +574,17 @@ export class SessionModel implements BridgeRoutes {
 		// answered at once with none, so it neither displaces the current one's poll nor takes its commands, and
 		// doesn't count as the session's mod polling (PROTOCOL.md, Identity).
 		if (q.inst !== current) {
+			countIdle("poll.stray");
 			this.#log.debug(`POLL ${b.host} from mod instance ${quote(q.inst, 40)}, not the current one: answered with none`);
 			reply.send(200, JSON.stringify({ cmds: [] }));
 			return;
 		}
 		if (this.#answersAtOnce(b)) {
+			countIdle("poll.now");
 			this.#log.debug(`POLL ${b.host} answered at once: the turn ended and the registry still says busy`);
 			this.commands.poll(b.host, current, 0, reply);
 		} else {
+			countIdle("poll.held");
 			this.#log.debug(`POLL ${b.host} wait ${q.wait} s`);
 			this.commands.poll(b.host, current, q.wait, reply);
 		}
@@ -1160,6 +1165,7 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	#view(s: RegistrySession): SessionView {
+		countIdle("view");
 		const host = asHost(s.hostSessionId);
 		const b = host === null ? undefined : this.#bridge.get(host);
 		const rec = host === null ? undefined : this.#records.get(host);
@@ -1297,6 +1303,7 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	#emit(): void {
+		countIdle("emit");
 		// Only a log line and a timer: a throw here mustn't escape into a hold, a release or a route.
 		try {
 			const views = this.sessions();
@@ -1322,6 +1329,7 @@ export function keyOf(s: RegistrySession): string {
 
 /** A view of a session the registry doesn't list, with nothing known but its key and title. */
 function notRunning(key: string, title: string): SessionView {
+	countIdle("view");
 	return {
 		key,
 		host: key,

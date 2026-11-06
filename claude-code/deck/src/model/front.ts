@@ -1,6 +1,7 @@
 import { execFile as nodeExecFile } from "node:child_process";
 
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
+import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
 
 /**
@@ -70,6 +71,7 @@ export function lsappinfoCheck(opts: { execFile?: ExecFile; timeoutMs?: number; 
 	};
 	const run = (args: readonly string[]): Promise<string> =>
 		new Promise((resolve, reject) => {
+			countIdle("lsappinfo");
 			exec(LSAPPINFO, args, { timeout, killSignal: "SIGKILL", encoding: "utf8" }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
 		});
 	return async () => {
@@ -170,6 +172,7 @@ export class FrontWatcher {
 		this.#inFlight = true;
 		this.#lastAt = this.#clock.now();
 		this.#asked++;
+		countIdle("front.ask");
 		this.#stuckTimer = this.#clock.setTimeout(() => {
 			this.#stuckTimer = null;
 			if (ask !== this.#current || !this.#inFlight) return;

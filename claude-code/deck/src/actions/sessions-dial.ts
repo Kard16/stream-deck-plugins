@@ -12,6 +12,7 @@ import {
 } from "@elgato/streamdeck";
 
 import type { SessionsDials } from "../sessions/dials.js";
+import { countIdle } from "../util/idle.js";
 import { fireAndForget } from "./shared.js";
 
 /** The dial lists every running session, so it has no settings. */
@@ -31,7 +32,10 @@ export class SessionsDialAction extends SingletonAction<SessionsSettings> {
 		if (!ev.action.isDial()) return;
 		const dial: DialAction<SessionsSettings> = ev.action;
 		this.#dials.add(dial.id, {
-			setFeedback: (payload) => fireAndForget("setFeedback", () => dial.setFeedback(payload as FeedbackPayload)),
+			setFeedback: (payload) => {
+				countIdle("send.feedback");
+				fireAndForget("setFeedback", () => dial.setFeedback(payload as FeedbackPayload));
+			},
 			showAlert: () => fireAndForget("showAlert", () => dial.showAlert()),
 		});
 	}

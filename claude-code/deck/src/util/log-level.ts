@@ -7,7 +7,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 /**
  * Normal use logs at info: startup, the bridge's state, refused requests, each mod instance's first hello, held
  * requests and how each ended, commands and how each ended, jumps, and problems. Debug adds every event and poll,
- * a hello said again, a command's delivery and its `waiting`, registry and record rescans, and dial scrolling.
+ * a hello said again, a command's delivery and its `waiting`, registry and record rescans, dial scrolling, and the
+ * IDLE line once a minute (idle.ts).
  */
 export const DEFAULT_LOG_LEVEL: LogLevel = "info";
 
