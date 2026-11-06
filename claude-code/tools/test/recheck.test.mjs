@@ -1,8 +1,10 @@
 // recheck.mjs against fixtures each test makes in a temp folder: a fake registry with .key files beside it, fake
-// records, a small file standing in for app.asar, an Info.plist, a Claude Code root whose binary is a shell script,
-// and a git repository holding a plugin. Nothing here reads the real ~/.claude/, the app's folders or the app
-// bundle. What it reads of this repository: the deck's sources, for the drift test and the JSON's citations, and
-// HEAD's claude-code/plugin for one run of check 5 with the default repository, both read only.
+// records, a small file standing in for app.asar, an Info.plist, a Claude Code root whose binary is a shell script
+// with a small Bun file table after it, a vendored mods API made from that table, a stand-in for lsappinfo, and a git
+// repository holding a plugin. Nothing here reads the real ~/.claude/, the app's folders, the app bundle or the
+// bundled binaries, and nothing runs the real lsappinfo. What it reads of this repository: the deck's and the mod's
+// sources and the plugin's type-check files, for the drift test and the JSON's citations, and HEAD's claude-code/plugin
+// for one run of check 5 with the default repository, all read only.
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
@@ -12,8 +14,10 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import * as F from '../../vendor/refresh.mjs'
 import { SUMMARY_FIELDS, validSummary } from '../lib/registry.mjs'
 import * as R from '../recheck.mjs'
+import { bunSection, modsApiFiles } from './bun-table.mjs'
 
 const TOOLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SCRIPT = path.join(TOOLS, 'recheck.mjs')
@@ -54,6 +58,9 @@ const PARTS = Object.freeze({
   noteworthy: 'if(t.is_noteworthy!==void 0){if(typeof t.is_noteworthy!="boolean")return;n.is_noteworthy=t.is_noteworthy}',
   // The app's other summary validator, 14 MB on in 4.4212.0: the same check, which isn't the loader's.
   otherValidator: `${' '.repeat(16_384)}e.needs_action!==void 0&&typeof e.needs_action!="string"||e.is_noteworthy!==void 0&&typeof e.is_noteworthy!="boolean"||e.summarizes_uuid!==void 0&&typeof e.summarizes_uuid!="string")`,
+  // App 4.23118.0's session environment: its entrypoint, and its host id.
+  desktopEntrypoint: 'var ILa=["claude-desktop","claude-desktop-3p"];function LLa(e){return e==="3p"?"claude-desktop-3p":"claude-desktop"}',
+  desktopHost: 'return d.CLAUDE_CODE_HOST_SESSION_ID=n,delete d[m.s],{env:d,secrets:f}',
 })
 const asarWith = (over = {}) => Buffer.concat([Buffer.alloc(2048, 0), Buffer.from(Object.values({ ...PARTS, ...over }).join('\n')), Buffer.alloc(2048, 0)])
 
@@ -105,13 +112,29 @@ const ENGINE_WORDS = Object.freeze({
   none: 'throw new He(`${s.plugin}: the call was denied: ${q.deny}`)',
 })
 
+/** The engine's JS check 6 looks for, as 2.1.317's has it, each in a file of its own. A test blanks or changes one. */
+const ENGINE_JS = Object.freeze({
+  registry: 'function LEe(h){let x=Bqo(h);if(x!==void 0)return{status:"waiting",waitingFor:x,working:!1};return{status:h.isLoading||h.delegatedActive?"busy":"idle",waitingFor:void 0,working:h.isQueryActive}}',
+  desktop: 'var Stn=new Set(["claude-desktop","claude-desktop-3p"]);function eHe(){let e=cp();return e!==void 0&&Stn.has(e)&&!n().childSession}function p$(){return eHe()&&!_P()}',
+  children: 'function Qot(e){let n={CLAUDECODE:"1",CLAUDE_CODE_SESSION_ID:e.sessionId,CLAUDE_CODE_CHILD_SESSION:"1",CLAUDE_PID:String(process.pid)};return n}',
+  shell: 'Qxr(e,["-c","-l",Z],{env:{...Wo(),SHELL:e,GIT_EDITOR:"true",CLAUDECODE:"1"}})',
+})
+
+/** The fake binary's file table: the mods API's files, then ENGINE_JS's files, `js` over them, and `files` besides. */
+function engineFiles({ js = {}, dts, mods = {}, files: more = {} } = {}) {
+  const files = modsApiFiles({ dts, ...mods })
+  for (const [part, text] of Object.entries({ ...ENGINE_JS, ...js })) if (text !== null) files[`chunk-${part}.js`] = text
+  return Object.assign(files, more)
+}
+
 /**
  * A stand-in for Claude Code's binary at `<root>/<version>/<hash>/claude.app/Contents/MacOS/claude`. It says what it was
  * given, refuses to go on with what it mustn't get (DECK_TOKEN, the real HOME, a config folder that isn't fresh, no
  * plugin), then answers as told. `sleep` makes validate hang, for the timeout. `engine` is which of ENGINE_WORDS its
- * comment carries.
+ * comment carries. After its last line comes a Bun file table of `table` (engineFiles()), laid out with `tableOpts`
+ * (bun-table.mjs), which the shell never reads, or nothing when `table` is null.
  */
-function fakeClaude(f, version, { validate = VALIDATE_OK, test: tests = TEST_OK, sleep = false, hash = 'abc123def456', engine = 'template' } = {}) {
+function fakeClaude(f, version, { validate = VALIDATE_OK, test: tests = TEST_OK, sleep = false, hash = 'abc123def456', engine = 'template', table = engineFiles(), tableOpts = {} } = {}) {
   const bin = path.join(f.claudeCodeRoot, version, hash, 'claude.app', 'Contents', 'MacOS', 'claude')
   fs.mkdirSync(path.dirname(bin), { recursive: true })
   fs.writeFileSync(bin, `#!/bin/sh
@@ -138,7 +161,20 @@ exit ${tests.code};;
 esac
 echo "error: unexpected arguments"; exit 2
 `, { mode: 0o755 })
+  if (table !== null) fs.appendFileSync(bin, bunSection(table, tableOpts))
   return bin
+}
+
+/** A stand-in for lsappinfo: `front` prints `front`, `info -only bundleid <that ASN>` prints `info`; `code` is how both exit. */
+function fakeLsappinfo(f, { front = 'ASN:0x0-0x2002:', info = '"CFBundleIdentifier"="com.apple.loginwindow"', code = 0, sleep = false } = {}) {
+  fs.writeFileSync(f.lsappinfo, `#!/bin/sh
+${sleep ? 'exec sleep 30' : ''}
+case "$1" in
+front) printf '%s\\n' ${JSON.stringify(front)}; exit ${code};;
+info) if [ "$2 $3 $4" = ${JSON.stringify(`-only bundleid ${front.trim()}`)} ]; then printf '%s\\n' ${JSON.stringify(info)}; exit ${code}; fi;;
+esac
+echo "error: unexpected arguments: $*"; exit 2
+`, { mode: 0o755 })
 }
 
 function git(cwd, ...args) {
@@ -186,7 +222,9 @@ function fixture(t, { sessions = 3, version = '4.4212.0', cc = ['2.1.309'] } = {
     asar: path.join(root, 'app.asar'),
     infoPlist: path.join(root, 'Info.plist'),
     claudeCodeRoot: path.join(root, 'cc'),
-    vendored: path.join(root, 'vendored.d.ts'),
+    vendoredDir: path.join(root, 'mods-api'),
+    vendored: path.join(root, 'mods-api', 'claude-code.d.ts'),
+    lsappinfo: path.join(root, 'lsappinfo'),
     tmp: path.join(root, 'tmp'),
   }
   for (const d of [f.sessions, f.orgDir, f.claudeCodeRoot, f.tmp]) fs.mkdirSync(d, { recursive: true })
@@ -197,13 +235,24 @@ function fixture(t, { sessions = 3, version = '4.4212.0', cc = ['2.1.309'] } = {
   }
   fs.writeFileSync(f.asar, asarWith())
   fs.writeFileSync(f.infoPlist, plist(version))
-  fs.writeFileSync(f.vendored, '// Written by Claude Code 2.1.309.\n// Claude Code function hooks\n')
   for (const v of cc) fakeClaude(f, v)
+  writeVendored(f, '2.1.309')
+  fakeLsappinfo(f)
   return f
 }
 
-const paths = (f) => ({ sessions: f.sessions, records: f.records, asar: f.asar, infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot })
-const flags = (f) => ['--sessions', f.sessions, '--records', f.records, '--asar', f.asar, '--info-plist', f.infoPlist, '--claude-code-root', f.claudeCodeRoot, '--vendored', f.vendored]
+/** claude-code/vendor/mods-api/ as refresh.mjs makes it for `version` from the default fake binary's table. */
+function writeVendored(f, version) {
+  fs.rmSync(f.vendoredDir, { recursive: true, force: true })
+  const section = bunSection(engineFiles())
+  for (const [rel, text] of Object.entries(F.modsApi(F.readFileTable(section, { offset: 0, size: section.length }), version))) {
+    fs.mkdirSync(path.dirname(path.join(f.vendoredDir, rel)), { recursive: true })
+    fs.writeFileSync(path.join(f.vendoredDir, rel), text)
+  }
+}
+
+const paths = (f) => ({ sessions: f.sessions, records: f.records, asar: f.asar, infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, vendored: f.vendored, lsappinfo: f.lsappinfo })
+const flags = (f) => ['--sessions', f.sessions, '--records', f.records, '--asar', f.asar, '--info-plist', f.infoPlist, '--claude-code-root', f.claudeCodeRoot, '--vendored', f.vendored, '--lsappinfo', f.lsappinfo]
 const byId = (rows, id) => rows.find((r) => r.id === id) ?? assert.fail(`no row ${id} in ${rows.map((r) => r.id).join(', ')}`)
 const statuses = (rows) => Object.fromEntries(rows.map((r) => [r.id, r.status]))
 const tailOf = (row) => row.details.tail.join('\n')
@@ -288,10 +337,6 @@ test('recheck: the checked version is the one the vendored d.ts names on its fir
   const rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: null })
   assert.equal(byId(rows, 'versions.claude-code').status, 'fail')
   assert.match(byId(rows, 'versions.claude-code').reason, /^2\.1\.309 bundled, but claude-code\/vendor\/mods-api\/claude-code\.d\.ts is missing or its first line names no version: run claude-code\/vendor\/refresh\.mjs$/)
-})
-
-test('recheck: versions sort by number, not by text', () => {
-  assert.deepEqual(['2.10.0', '2.1.309', '2.1.40', '2.1.312', '10.0.0'].sort(R.compareVersions), ['2.1.40', '2.1.309', '2.1.312', '2.10.0', '10.0.0'])
 })
 
 // ---- 2. the registry
@@ -502,7 +547,8 @@ test('recheck: a needed record field missing from every record fails, as do no r
 test('recheck: the bundle is ok with every string, warns when only a corroborating one or a looser pattern is left, and fails when a route or the tool is gone', async (t) => {
   const f = fixture(t)
   let rows = await R.checkBundle(f.asar)
-  assert.deepEqual(statuses(rows), { bundle: 'ok', 'bundle.jump': 'ok', 'bundle.needs-input': 'ok', 'bundle.local-id': 'ok', 'bundle.mode-tool': 'ok', 'bundle.summary-loader': 'ok' })
+  assert.deepEqual(statuses(rows), { bundle: 'ok', 'bundle.jump': 'ok', 'bundle.needs-input': 'ok', 'bundle.local-id': 'ok', 'bundle.mode-tool': 'ok', 'bundle.summary-loader': 'ok', 'bundle.desktop-env': 'ok' })
+  assert.equal(byId(rows, 'bundle.desktop-env').reason, '?"claude-desktop-3p":"claude-desktop" ×1, .CLAUDE_CODE_HOST_SESSION_ID= ×1')
   assert.equal(byId(rows, 'bundle.jump').reason, 'claude://code/continue?session= ×1, "/continue" ×1')
   assert.equal(byId(rows, 'bundle.local-id').reason, '^local_[A-Za-z0-9-]{1,64}$ ×1')
   // The validator's is_noteworthy check, far from the list, doesn't count.
@@ -536,6 +582,12 @@ test('recheck: the bundle is ok with every string, warns when only a corroborati
     [{ noteworthy: '' }, 'bundle.summary-loader', 'fail', /^is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×1\) \(found: \["title",/],
     // Its check moved away from the list: the check can't tell it's still the loader's, so it fails, for a look.
     [{ noteworthy: `${' '.repeat(2048)}${PARTS.noteworthy}` }, 'bundle.summary-loader', 'fail', /^is_noteworthy!="boolean" not found within 2048 bytes after the field list, only elsewhere in the bundle \(×2\) \(found: \["title",/],
+    // The app gives its sessions their entrypoint another way: the name is still there, so it changed. Or a new name.
+    [{ desktopEntrypoint: 'var ILa=new Map([["3p","claude-desktop-3p"]]);function LLa(e){return ILa.get(e)??"claude-desktop"}' }, 'bundle.desktop-env', 'warn', /^\?"claude-desktop-3p":"claude-desktop" not found, though "claude-desktop-3p" is \(×1\), so it changed \(found: \.CLAUDE_CODE_HOST_SESSION_ID= ×1\)\. The mod talks to the bridge only from a desktop session/],
+    [{ desktopEntrypoint: 'function LLa(e){return e==="3p"?"claude-app-3p":"claude-app"}' }, 'bundle.desktop-env', 'fail', /^\?"claude-desktop-3p":"claude-desktop" not found \(found: \.CLAUDE_CODE_HOST_SESSION_ID= ×1\)\. /],
+    // The host id set in an object instead, or not at all.
+    [{ desktopHost: 'return{...d,CLAUDE_CODE_HOST_SESSION_ID:n}' }, 'bundle.desktop-env', 'warn', /^\.CLAUDE_CODE_HOST_SESSION_ID= not found, though CLAUDE_CODE_HOST_SESSION_ID is \(×1\), so it changed/],
+    [{ desktopHost: 'return{...d}' }, 'bundle.desktop-env', 'fail', /^\.CLAUDE_CODE_HOST_SESSION_ID= not found \(found: \?"claude-desktop-3p":"claude-desktop" ×1\)\. /],
   ]
   for (const [over, id, status, reason] of cases) {
     fs.writeFileSync(f.asar, asarWith(over))
@@ -662,12 +714,15 @@ test('recheck: check 5 fails without a version, a binary, a plugin at HEAD or in
 
 // ---- 6. the engine's words
 
+/** Check 6's rows from the file table, as the default fake binary has it. */
+const TABLE_ROWS = { 'engine.registry-status': 'ok', 'engine.desktop-gate': 'ok' }
+
 test('recheck: check 6 finds the engine\'s words for a refused $.mcp.call in the newest bundled Claude Code: ok, warn when worded otherwise or gone, and fail with no binary', async (t) => {
   // The older version keeps the words; only the newest is read.
   const f = fixture(t, { cc: ['2.1.300', '2.1.309'] })
   const run = (claudeCodeRoot = f.claudeCodeRoot) => R.checkEngine({ claudeCodeRoot })
   let rows = await run()
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok' })
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok', ...TABLE_ROWS })
   assert.match(byId(rows, 'engine').reason, /^Claude Code 2\.1\.309, 0\.0 MB$/)
   assert.equal(byId(rows, 'engine.mcp-refused').reason, '$.mcp.call(<server>, <tool>) refused: <reason> ×1, as the mod reads it')
   assert.deepEqual(byId(rows, 'engine.mcp-refused').details.sources, [
@@ -677,11 +732,11 @@ test('recheck: check 6 finds the engine\'s words for a refused $.mcp.call in the
 
   fakeClaude(f, '2.1.309', { engine: 'otherwise' })
   rows = await run()
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn' })
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn', ...TABLE_ROWS })
   assert.match(byId(rows, 'engine.mcp-refused').reason, /^\$\.mcp\.call\(<server>, <tool>\) refused: <reason> not found, though \$\.mcp\.call\(…\) refused: is \(×1\), so it changed\. The mod reports a mode change the engine refuses as refused/)
   fakeClaude(f, '2.1.309', { engine: 'none' })
   rows = await run()
-  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn' })
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'warn', ...TABLE_ROWS })
   assert.match(byId(rows, 'engine.mcp-refused').reason, /^\$\.mcp\.call\(<server>, <tool>\) refused: <reason> not found\. The mod reports/)
 
   // No root, no version folder, no binary that runs: fail.
@@ -700,6 +755,210 @@ test('recheck: check 6 finds the engine\'s words for a refused $.mcp.call in the
   assert.deepEqual(hits(`${ENGINE_WORDS.template}\n: $.mcp.call(\x00\x07\x01\x9f) refused: \n$.mcp.call (x): no tool`), { all: 2, template: 1, near: 1 })
   assert.deepEqual(hits(`$.mcp.call(${'x'.repeat(130)}) refused: `), { all: 1, template: 0, near: 0 }, 'too far to be its words')
   assert.deepEqual(hits('$.mcp.call(${a.b}, ${c$}) refused: ${d}'), { all: 1, template: 1, near: 0 })
+})
+
+test('recheck: check 6 finds in the engine\'s JS where it sets the registry\'s statuses and its own desktop test, each in the file it\'s in, and warns or fails as they change', async (t) => {
+  const f = fixture(t)
+  const ids = ['engine.registry-status', 'engine.desktop-gate']
+  const run = async () => (await R.checkEngine({ claudeCodeRoot: f.claudeCodeRoot })).filter((r) => ids.includes(r.id))
+  let rows = await run()
+  assert.deepEqual(statuses(rows), { 'engine.registry-status': 'ok', 'engine.desktop-gate': 'ok' })
+  assert.equal(byId(rows, 'engine.registry-status').reason, 'status:"waiting",waitingFor: ×1, "idle" ×1 within 200 bytes after the waiting status, "busy" ×1 within 200 bytes after the waiting status')
+  assert.equal(byId(rows, 'engine.desktop-gate').reason, '["claude-desktop","claude-desktop-3p"] ×1, childSession ×1 within 160 bytes after the desktop entrypoints, CLAUDECODE:"1" ×2, CLAUDE_CODE_CHILD_SESSION:"1" ×1 within 120 bytes after CLAUDECODE:"1"')
+  assert.equal(byId(rows, 'engine.desktop-gate').details.files, Object.keys(engineFiles()).filter((n) => R.isSearched({ name: n })).length)
+
+  const away = ENGINE_JS.registry.replace('?"busy":"idle"', '?Q:"idle"')
+  const cases = [
+    [{ registry: ENGINE_JS.registry.replace('status:"waiting"', 'status:"blocked"') }, 'engine.registry-status', 'warn', /^status:"waiting",waitingFor: not found; "idle" not found within 200 bytes after the waiting status, only elsewhere in its files \(×1\); "busy" not found within 200 bytes after the waiting status, only elsewhere in its files \(×1\)\. The deck's status starts from/],
+    [{ registry: ENGINE_JS.registry.replace('?"busy":"idle"', '?"working":"idle"') }, 'engine.registry-status', 'warn', /^"busy" not found within 200 bytes after the waiting status \(found: status:"waiting",waitingFor: ×1, "idle" ×1 within 200 bytes after the waiting status\)\. /],
+    // Far from where the engine sets the others, or in another file: not where it sets them.
+    [{ registry: `${away};var Q=${' '.repeat(300)}"busy"` }, 'engine.registry-status', 'warn', /^"busy" not found within 200 bytes after the waiting status, only elsewhere in its files \(×1\) \(found: /],
+    [{ registry: away, other: 'var Q="busy"' }, 'engine.registry-status', 'warn', /^"busy" not found within 200 bytes after the waiting status, only elsewhere in its files \(×1\) \(found: /],
+    // A third desktop entrypoint: the list changed, and childSession has no list to follow.
+    [{ desktop: ENGINE_JS.desktop.replace('"claude-desktop-3p"]', '"claude-desktop-3p","claude-desktop-ent"]') }, 'engine.desktop-gate', 'warn', /^\["claude-desktop","claude-desktop-3p"\] not found, though "claude-desktop-3p" is \(×1\), so it changed; childSession not found within 160 bytes after the desktop entrypoints, only elsewhere in its files \(×1\) \(found: CLAUDECODE/],
+    [{ desktop: ENGINE_JS.desktop.replaceAll('claude-desktop', 'claude-app') }, 'engine.desktop-gate', 'fail', /^\["claude-desktop","claude-desktop-3p"\] not found; childSession not found within 160 bytes after the desktop entrypoints, only elsewhere in its files \(×1\) \(found: CLAUDECODE:"1" ×2, .*\)\. The mod talks to the bridge only from a desktop session/],
+    [{ desktop: ENGINE_JS.desktop.replace('&&!n().childSession', '') }, 'engine.desktop-gate', 'warn', /^childSession not found within 160 bytes after the desktop entrypoints \(found: /],
+    // What the engine starts is no longer marked as its child.
+    [{ children: ENGINE_JS.children.replace('CLAUDE_CODE_CHILD_SESSION:"1",', '') }, 'engine.desktop-gate', 'warn', /^CLAUDE_CODE_CHILD_SESSION:"1" not found within 120 bytes after CLAUDECODE:"1" \(found: /],
+    [{ children: null, shell: null }, 'engine.desktop-gate', 'warn', /^CLAUDECODE:"1" not found; CLAUDE_CODE_CHILD_SESSION:"1" not found within 120 bytes after CLAUDECODE:"1" \(found: /],
+  ]
+  for (const [js, id, status, reason] of cases) {
+    fakeClaude(f, '2.1.309', { table: engineFiles({ js }) })
+    rows = await run()
+    assert.equal(byId(rows, id).status, status, String(reason))
+    assert.match(byId(rows, id).reason, reason)
+    for (const other of rows.filter((r) => r.id !== id)) assert.equal(other.status, 'ok', `${other.id} with ${reason}`)
+  }
+
+  // Every file is searched but packed ones, native addons and assets: a chunk named otherwise counts; the same text in
+  // one of those, stored unpacked, doesn't.
+  fakeClaude(f, '2.1.309', { table: engineFiles({ js: { registry: null }, files: { 'chunk-registry.mjs': ENGINE_JS.registry } }) })
+  assert.equal(byId(await run(), 'engine.registry-status').status, 'ok')
+  const skipped = { 'desktop.js.zst': ENGINE_JS.desktop, 'desktop.node': ENGINE_JS.desktop, 'desktop.woff2.asset': ENGINE_JS.desktop }
+  fakeClaude(f, '2.1.309', { table: engineFiles({ js: { desktop: null }, files: skipped }), tableOpts: { unpacked: ['desktop.js.zst'] } })
+  rows = await run()
+  assert.equal(byId(rows, 'engine.desktop-gate').status, 'fail')
+  assert.match(byId(rows, 'engine.desktop-gate').reason, /^\["claude-desktop","claude-desktop-3p"\] not found; childSession not found within 160 bytes after the desktop entrypoints \(found: /)
+})
+
+test('recheck: check 6 fails in one row, in place of the table\'s checks, when the newest binary\'s file table can\'t be read', async (t) => {
+  const f = fixture(t)
+  for (const [opts, why] of [[{ table: null }, /no Bun file table: no trailer whose byte count and length agree/], [{ tableOpts: { entry: 56 } }, /isn't whole entries of 52 bytes/]]) {
+    fakeClaude(f, '2.1.309', opts)
+    const rows = await R.checkEngine({ claudeCodeRoot: f.claudeCodeRoot })
+    assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok', 'engine.table': 'fail' })
+    assert.match(byId(rows, 'engine.table').reason, /^Claude Code 2\.1\.309's file table can't be read \(.*\), so its registry statuses and desktop gate can't be checked$/)
+    assert.match(byId(rows, 'engine.table').reason, why)
+  }
+  // Any error reading it, not Bun's format's alone, is that row, not a stack trace.
+  fakeClaude(f, '2.1.309')
+  const binaries = { read: (file) => fs.promises.readFile(file), table: () => Promise.reject(new Error('zstd: unknown frame descriptor')) }
+  let rows = await R.checkEngine({ claudeCodeRoot: f.claudeCodeRoot, binaries })
+  assert.match(byId(rows, 'engine.table').reason, /^Claude Code 2\.1\.309's file table can't be read \(zstd: unknown frame descriptor\), so /)
+
+  // A table with no file it searches warns in their place.
+  fakeClaude(f, '2.1.309', { table: { 'a.js.zst': 'x', 'b.node': ENGINE_JS.desktop, 'c.asset': ENGINE_JS.registry } })
+  rows = await R.checkEngine({ claudeCodeRoot: f.claudeCodeRoot })
+  assert.deepEqual(statuses(rows), { engine: 'ok', 'engine.mcp-refused': 'ok', 'engine.js': 'warn' })
+  assert.equal(byId(rows, 'engine.js').reason, "Claude Code 2.1.309's file table has no file to search but packed ones (.zst), native addons (.node) and assets (.asset), so its registry statuses and desktop gate can't be checked")
+})
+
+test('recheck: check 7 runs lsappinfo as the deck does and reads its answers as front.ts does: ok, warn with no app or bundle id in front, fail with another shape', async (t) => {
+  const f = fixture(t)
+  const run = (over = {}) => R.checkSeen({ lsappinfo: f.lsappinfo, infoPlist: f.infoPlist, ...over })
+  let rows = await run()
+  assert.deepEqual(statuses(rows), { 'seen.lsappinfo': 'ok', 'seen.bundle-id': 'ok' })
+  assert.equal(byId(rows, 'seen.lsappinfo').reason, "front gave an ASN and info -only bundleid another app's bundle id, as the deck reads them")
+  assert.equal(byId(rows, 'seen.lsappinfo').details.claudeInFront, false)
+  assert.equal(byId(rows, 'seen.bundle-id').reason, "com.anthropic.claudefordesktop, as the deck's seen check compares the app in front with")
+  fakeLsappinfo(f, { info: '"CFBundleIdentifier"="com.anthropic.claudefordesktop"' })
+  assert.equal(byId(await run(), 'seen.lsappinfo').reason, "front gave an ASN and info -only bundleid Claude's bundle id, as the deck reads them")
+
+  const cases = [
+    [{ front: '[ NULL ]' }, 'warn', /^lsappinfo front named no app \(`\[ NULL \]`\), so its answer's shape can't be checked: run again with an app in front$/],
+    [{ info: '"CFBundleIdentifier"=[ NULL ]' }, 'warn', /^the app in front has no bundle id \(`"CFBundleIdentifier"=\[ NULL \]`\), so the answer's shape can't be checked/],
+    // As `lsappinfo find` answers, with the app's name: another shape, printed with its values blanked.
+    [{ front: 'ASN:0x0-0x2002-"loginwindow":' }, 'fail', /^lsappinfo front answered `ASN:0x…-0x…-"…":`, which the deck doesn't read as ASN:0x…-0x…:\. The deck's seen check asks `lsappinfo front`/],
+    [{ front: 'loginwindow Ghostty' }, 'fail', /^lsappinfo front answered `… …`, which the deck doesn't read/],
+    [{ info: 'bundleID="com.apple.loginwindow"' }, 'fail', /^lsappinfo info -only bundleid answered `bundleID="…"`, which the deck doesn't read as "CFBundleIdentifier"="…"\. /],
+    [{ code: 1 }, 'fail', /lsappinfo front failed: exit 1\. The deck's seen check/],
+  ]
+  for (const [over, status, reason] of cases) {
+    fakeLsappinfo(f, over)
+    rows = await run()
+    assert.equal(byId(rows, 'seen.lsappinfo').status, status, JSON.stringify(over))
+    assert.match(byId(rows, 'seen.lsappinfo').reason, reason)
+    assert.doesNotMatch(JSON.stringify(rows), /loginwindow|Ghostty|com\.apple/, "no other app's name or bundle id is printed")
+    assert.equal(byId(rows, 'seen.bundle-id').status, 'ok')
+  }
+  rows = await run({ lsappinfo: path.join(f.root, 'nowhere') })
+  assert.match(byId(rows, 'seen.lsappinfo').reason, /nowhere front failed: ENOENT\. /)
+  fakeLsappinfo(f, { sleep: true })
+  const started = Date.now()
+  rows = await run({ timeoutMs: 300 })
+  assert.ok(Date.now() - started < 10_000, 'killed at its timeout')
+  assert.match(byId(rows, 'seen.lsappinfo').reason, /lsappinfo front failed: no answer in 300 ms\. /)
+
+  // A shape blanks every value, quoted or not, in any script; it keeps the keys and NULL.
+  assert.equal(R.shapeOf('ASN:0x0-0x2002-"loginwindow":\n'), 'ASN:0x…-0x…-"…":')
+  assert.equal(R.shapeOf('"CFBundleIdentifier"="com.apple.Safari"'), '"CFBundleIdentifier"="…"')
+  assert.equal(R.shapeOf('Café 2 [ NULL ]'), '… … [ NULL ]')
+})
+
+test('recheck: check 7 fails when the app\'s bundle id isn\'t the one the deck compares the app in front with', async (t) => {
+  const f = fixture(t)
+  const run = () => R.checkSeen({ lsappinfo: f.lsappinfo, infoPlist: f.infoPlist })
+  fs.writeFileSync(f.infoPlist, plist('4.5000.1').replace('com.anthropic.claudefordesktop', 'com.anthropic.claude'))
+  execFileSync('plutil', ['-convert', 'binary1', f.infoPlist])
+  const rows = await run()
+  assert.equal(byId(rows, 'seen.bundle-id').status, 'fail')
+  assert.match(byId(rows, 'seen.bundle-id').reason, /^Claude\.app's bundle id is com\.anthropic\.claude\. The deck counts Claude as in front only when the app in front has the bundle id com\.anthropic\.claudefordesktop \(CLAUDE_BUNDLE_ID in claude-code\/deck\/src\/model\/front\.ts\)/)
+  fs.writeFileSync(f.infoPlist, plist('4.5000.1').replace(/\t<key>CFBundleIdentifier<\/key>\n\t<string>[^<]*<\/string>\n/, ''))
+  assert.match(byId(await run(), 'seen.bundle-id').reason, /^no CFBundleIdentifier in .*Info\.plist\. /)
+  fs.rmSync(f.infoPlist)
+  assert.match(byId(await run(), 'seen.bundle-id').reason, /^can't read .*Info\.plist: ENOENT$/)
+})
+
+test('recheck: check 8 is ok when the vendored mods API is what refresh.mjs makes from the version it names, and warns, naming the files, when it differs', async (t) => {
+  const f = fixture(t, { cc: ['2.1.309', '2.1.400'] })
+  const run = () => R.checkVendored({ vendored: f.vendored, claudeCodeRoot: f.claudeCodeRoot })
+  let rows = await run()
+  assert.deepEqual(statuses(rows), { 'vendor.mods-api': 'ok' })
+  assert.match(rows[0].reason, /mods-api is what refresh\.mjs makes from Claude Code 2\.1\.309's file table, 8 files$/)
+  // A file of another name, an asset Bun keeps elsewhere, changes nothing.
+  fakeClaude(f, '2.1.309', { table: { ...engineFiles(), 'odd.asset': 'x' }, tableOpts: { prefix: (name) => (name === 'odd.asset' ? '' : F.ROOT_PREFIX) } })
+  assert.equal((await run())[0].status, 'ok')
+  // The version the d.ts names, not the newest: 2.1.400's table is another.
+  fakeClaude(f, '2.1.400', { table: engineFiles({ dts: 'other\n' }) })
+  assert.equal((await run())[0].status, 'ok')
+
+  fs.appendFileSync(path.join(f.vendoredDir, 'reference.md'), 'A local edit.\n')
+  fs.rmSync(path.join(f.vendoredDir, 'examples', 'pane.tsx'))
+  fs.writeFileSync(path.join(f.vendoredDir, 'notes.md'), 'Mine.\n')
+  fs.writeFileSync(path.join(f.vendoredDir, '.DS_Store'), '')
+  rows = await run()
+  assert.equal(rows[0].status, 'warn')
+  assert.match(rows[0].reason, /mods-api isn't what refresh\.mjs makes from Claude Code 2\.1\.309: reference\.md differs; examples\/pane\.tsx is missing; notes\.md isn't in the binary's\. `node claude-code\/vendor\/refresh\.mjs --version 2\.1\.309` and git diff show how$/)
+  assert.deepEqual([rows[0].details.changed, rows[0].details.missing, rows[0].details.extra], [['reference.md'], ['examples/pane.tsx'], ['notes.md']])
+
+  // Its first line names 2.1.400: then it's 2.1.400's declarations it's held to.
+  writeVendored(f, '2.1.400')
+  rows = await run()
+  assert.match(rows[0].reason, /isn't what refresh\.mjs makes from Claude Code 2\.1\.400: claude-code\.d\.ts differs\. /)
+
+})
+
+test('recheck: check 8 fails when the binary\'s file table can\'t be read, and warns when refresh.mjs would refuse it or the version isn\'t bundled', async (t) => {
+  const f = fixture(t)
+  const run = () => R.checkVendored({ vendored: f.vendored, claudeCodeRoot: f.claudeCodeRoot })
+  fakeClaude(f, '2.1.309', { table: null })
+  let rows = await run()
+  assert.deepEqual(statuses(rows), { 'vendor.mods-api': 'fail' })
+  assert.match(rows[0].reason, /^Claude Code 2\.1\.309's file table can't be read: no Bun file table: no trailer whose byte count and length agree, so it isn't a Bun standalone binary, or Bun changed its format\. refresh\.mjs can't rebuild .*mods-api from it$/)
+  fakeClaude(f, '2.1.309', { tableOpts: { prefix: 'B:/~BUN/root/' } })
+  assert.match((await run())[0].reason, /^Claude Code 2\.1\.309's file table can't be read: the __bun section at \d+ \(\d+ bytes\): its entry point, file 0, isn't under \/\$bunfs\/root\/, so the file table is not where Bun keeps it, or Bun changed its format\. /)
+  // A file refresh.mjs takes that can't be unpacked, or isn't under /$bunfs/root/: the table can't be read for it.
+  fakeClaude(f, '2.1.309', { tableOpts: { unpacked: ['reference-d80c0885.md.zst'] } })
+  rows = await run()
+  assert.deepEqual(statuses(rows), { 'vendor.mods-api': 'fail' })
+  assert.match(rows[0].reason, /^Claude Code 2\.1\.309's file table can't be read: reference-d80c0885\.md\.zst can't be unpacked \(.*\), so Bun changed how it packs a file\. /)
+  fakeClaude(f, '2.1.309', { tableOpts: { prefix: (name) => (name.startsWith('band.tsx-') ? '' : F.ROOT_PREFIX) } })
+  rows = await run()
+  assert.deepEqual(statuses(rows), { 'vendor.mods-api': 'fail' })
+  assert.match(rows[0].reason, /^Claude Code 2\.1\.309's file table can't be read: band\.tsx, band\.tsx-xxxxxxx8\.txt, isn't under \/\$bunfs\/root\/, so Bun changed its format\. /)
+
+  // Readable, but missing a file, or with two of one: refresh.mjs would refuse it.
+  fakeClaude(f, '2.1.309', { table: engineFiles({ mods: { examples: { 'pane.tsx': null } } }) })
+  rows = await run()
+  assert.deepEqual(statuses(rows), { 'vendor.mods-api': 'warn' })
+  assert.equal(rows[0].reason, "Claude Code 2.1.309's file table reads, but refresh.mjs would refuse it: expected one pane.tsx, found 0; the format or the skill changed")
+  fakeClaude(f, '2.1.309', { table: { ...engineFiles(), 'claude-code.d.ts-feedf00d.txt': 'declare const x: 1\n' } })
+  assert.match((await run())[0].reason, /would refuse it: expected one claude-code\.d\.ts, found 2: /)
+
+  // Not bundled any more, or no version to look for.
+  fakeClaude(f, '2.1.309')
+  writeVendored(f, '2.1.200')
+  rows = await run()
+  assert.equal(rows[0].status, 'warn')
+  assert.match(rows[0].reason, /mods-api is for Claude Code 2\.1\.200, which isn't bundled any more \(2\.1\.309\), so it can't be compared: run claude-code\/vendor\/refresh\.mjs$/)
+  fs.writeFileSync(f.vendored, '// Claude Code function hooks\n')
+  rows = await run()
+  assert.equal(rows[0].status, 'warn')
+  assert.match(rows[0].reason, /mods-api\/claude-code\.d\.ts is missing or its first line names no version, so there's no binary to compare it with: run claude-code\/vendor\/refresh\.mjs$/)
+  writeVendored(f, '2.1.309')
+  rows = await R.checkVendored({ vendored: f.vendored, claudeCodeRoot: path.join(f.root, 'nowhere') })
+  assert.deepEqual(statuses(rows), { 'vendor.mods-api': 'fail' })
+  assert.match(rows[0].reason, /^can't list .*nowhere: ENOENT$/)
+})
+
+test('recheck: checks 6 and 8 read a bundled binary once between them', async (t) => {
+  const f = fixture(t)
+  const reads = []
+  const spy = { ...R.nodeFs, readFile: (p, ...rest) => (reads.push(String(p)), R.nodeFs.readFile(p, ...rest)) }
+  const result = await R.recheck({ ...paths(f), skipPlugin: true, fs: spy })
+  assert.equal(result.ok, true, JSON.stringify(result.checks.filter((c) => c.status !== 'ok')))
+  const bin = path.join(f.claudeCodeRoot, '2.1.309', 'abc123def456', 'claude.app', 'Contents', 'MacOS', 'claude')
+  assert.deepEqual(reads.filter((p) => p === bin), [bin], 'the newest binary, the one the vendored d.ts names too, read once')
 })
 
 // ---- privacy
@@ -759,16 +1018,16 @@ test('recheck: the command prints a table or JSON, exits 0 when nothing fails an
   assert.doesNotMatch(r.out, /mods API:/)
   assert.match(r.out, /^ok\s+bundle: summary loader\s+/m)
   assert.match(r.out, /^ok\s+engine: refused \$\.mcp\.call\s+\$\.mcp\.call\(<server>, <tool>\) refused: <reason> ×1, as the mod reads it$/m)
-  assert.match(r.out, /\n\n33 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
+  assert.match(r.out, /\n\n39 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
 
   r = await cli([...flags(f), '--skip-plugin', '--json'], { env: { HOME: f.root } })
   assert.equal(r.code, 0)
   const j = JSON.parse(r.out)
   assert.equal(j.ok, true)
-  assert.deepEqual(j.summary, { ok: 33, warn: 0, fail: 0 })
+  assert.deepEqual(j.summary, { ok: 39, warn: 0, fail: 0 })
   assert.deepEqual(j.skipped, ['mods'])
   assert.equal(j.paths.sessions, '~/sessions', 'paths under HOME read ~')
-  assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle', 'engine'])
+  assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle', 'engine', 'seen', 'vendor'])
   for (const c of j.checks) assert.deepEqual(Object.keys(c).slice(0, 5), ['group', 'id', 'name', 'status', 'reason'])
   assert.equal(byId(j.checks, 'registry.hostSessionId').details.source, `claude-code/deck/src/registry/registry.ts:${lineOf('claude-code/deck/src/registry/registry.ts', 'str(o.hostSessionId)')}`)
   assert.equal(byId(j.checks, 'records.turnWrapUp').details.source, `claude-code/deck/src/records/records.ts:${lineOf('claude-code/deck/src/records/records.ts', 'wrapUp(o.turnWrapUp)')}`)
@@ -811,7 +1070,7 @@ test('recheck: the command runs check 5 too, keeps DECK_TOKEN from Claude Code a
   r = await cli([...flags(f), '--repo', repo], { env: { HOME: f.root, TMPDIR: f.tmp } })
   assert.equal(r.code, 1)
   assert.match(r.out, /^fail\s+mods API: plugin test\s+2\.1\.309 failed \(exit 1\): 1 of 2 failed/m)
-  assert.match(r.out, /\n34 ok, 0 warn, 1 fail\n$/)
+  assert.match(r.out, /\n40 ok, 0 warn, 1 fail\n$/)
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 
@@ -870,6 +1129,38 @@ test('recheck: its field lists and strings are the deck\'s and the mod\'s own, s
   const [list, noteworthy] = byId(R.BUNDLE_CHECKS, 'summary-loader').needles
   assert.equal(list.text, JSON.stringify(SUMMARY_FIELDS))
   assert.deepEqual(noteworthy.after, { what: 'the field list', texts: [list.text, list.looser], within: R.LOADER_SPAN })
+
+  // The engine's JS: where it sets the deck's statuses, waiting first; and the gate, as committed, whose entrypoints are
+  // the engine's own list and the app's, reading the variables the checks find the app and the engine setting.
+  for (const n of R.ENGINE_JS_CHECKS.flatMap((c) => c.needles)) {
+    for (const s of n.sources) assert.match(R.cite(s), /:\d+$/, `${n.text}: "${s[1]}" isn't in ${s[0]}`)
+  }
+  assert.deepEqual(byId(R.ENGINE_JS_CHECKS, 'registry-status').needles.map((n) => n.text), ['status:"waiting",waitingFor:', ...R.REGISTRY_STATUSES.filter((s) => s !== 'waiting').map((s) => `"${s}"`)])
+  const desktop = execFileSync('git', ['-C', REPO, 'show', 'HEAD:claude-code/plugin/hooks/desktop.ts'], { encoding: 'utf8' })
+  const entry = /export const DESKTOP_ENTRYPOINTS: readonly string\[\] = \[([^\]]*)\]/.exec(desktop)?.[1] ?? ''
+  assert.deepEqual([...entry.matchAll(/'([^']+)'/g)].map((m) => m[1]), [...R.DESKTOP_ENTRYPOINTS])
+  assert.equal(byId(R.ENGINE_JS_CHECKS, 'desktop-gate').needles[0].text, JSON.stringify(R.DESKTOP_ENTRYPOINTS))
+  assert.equal(byId(R.BUNDLE_CHECKS, 'desktop-env').needles[0].text, `?"${R.DESKTOP_ENTRYPOINTS[1]}":"${R.DESKTOP_ENTRYPOINTS[0]}"`)
+  for (const v of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_SESSION_ID', 'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION']) assert.match(desktop, new RegExp(`env\\.${v}\\b`), v)
+
+  // Check 7 runs what the deck's seen check runs, asks what it asks, and reads the answers with its patterns.
+  const front = read(R.FRONT_TS)
+  assert.ok(front.includes(`export const LSAPPINFO = "${R.DEFAULTS.lsappinfo}";`), 'LSAPPINFO')
+  assert.ok(front.includes(`export const CLAUDE_BUNDLE_ID = "${R.CLAUDE_BUNDLE_ID}";`), 'CLAUDE_BUNDLE_ID')
+  assert.ok(front.includes(`return ${R.FRONT_ASN}.test(asn) ? asn : null;`), `parseFrontAsn reads ${R.FRONT_ASN}`)
+  assert.ok(front.includes(`return ${R.FRONT_BUNDLE_ID}.exec(stdout)?.[1] ?? null;`), `parseBundleId reads ${R.FRONT_BUNDLE_ID}`)
+  for (const ask of ['run(["front"])', 'run(["info", "-only", "bundleid", asn])']) assert.ok(front.includes(ask), ask)
+
+  // The hook's contract, which the plugin's type check holds to the engine's declarations: it reads the fields the
+  // bridge reads, effort by its level, and sends the Deny and the plans' modes the deck sends.
+  const contract = read('claude-code/plugin-tsc/hook-contract.ts')
+  const bodyFields = [...new Set([...wire.matchAll(/\bbody\.(\w+)(?:\.(\w+))?/g)].map((m) => (m[2] ? `${m[1]}.${m[2]}` : m[1])))].filter((n) => n !== 'effort')
+  const contractFields = [...contract.matchAll(/\binput\.(\w+)(?:\?\.(\w+))?/g)].map((m) => (m[2] ? `${m[1]}.${m[2]}` : m[1]))
+  assert.deepEqual(contractFields.toSorted(), bodyFields.toSorted())
+  assert.ok(contract.includes(`message: '${/export const DENY_MESSAGE = "([^"]+)";/.exec(wire)?.[1]}', interrupt: true`), "the deck's Deny")
+  const planModes = /export const PLAN_MODES = \[([^\]]*)\] as const;/.exec(wire)?.[1] ?? ''
+  assert.ok(contract.includes(`(mode: ${[...planModes.matchAll(/"(\w+)"/g)].map((m) => `'${m[1]}'`).join(' | ')})`), "the Approve plan's modes")
+  assert.ok(read('claude-code/plugin-tsc/tsconfig.json').includes('"hook-contract.ts"'), 'the plugin\'s type check takes it')
 })
 
 test('recheck: it cites the deck\'s wire.ts by name, not by line, and each name it cites is there', () => {

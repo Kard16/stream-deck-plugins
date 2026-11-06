@@ -24,6 +24,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 - Stay inside this repo. Outside it, these are fine without asking:
   - `streamdeck link`, `restart`, `validate` and `dev`.
   - Installing the tools pinned in `mise.toml`.
+  - Running `/usr/bin/lsappinfo` read only (`front`, and `info -only bundleid`), as the deck's seen check and `recheck.mjs` do.
   - Reading the logs listed below.
   - Reading, never writing: `~/.claude/sessions/*.json` (never the `.key` files), the sandbox sessions' transcripts under `~/.claude/projects/`, the Claude app's session records in `~/Library/Application Support/Claude/claude-code-sessions/`, and the Claude app bundle.
 - Verification means commands you ran and their output. "Should work" isn't verification.

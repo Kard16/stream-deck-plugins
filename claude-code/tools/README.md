@@ -162,17 +162,12 @@ Presses go to the fake bridge's control routes, and the fixtures' registry and r
 ```sh
 mise exec -- node claude-code/tools/recheck.mjs          # a table
 mise exec -- node claude-code/tools/recheck.mjs --json   # the same, for machines
+mise exec -- node claude-code/tools/recheck.mjs --help   # each check: what it reads, and when it warns or fails
 ```
 
-It re-checks what the plan's Log found in S0–S5 and the deck relies on, one row per check: `ok`, `warn` or `fail`, with a reason. It exits 0 when no check fails and 1 when one does (2 for a usage error).
-- **Versions:** the app's, and the Claude Code versions it bundles. It warns when the newest isn't the version `claude-code/vendor/mods-api/` was made from (the first line of its `claude-code.d.ts`), and so these checks are for.
-- **The registry:** each field the deck reads, by type, over the running sessions.
-- **The app's records:** the same, and whether each running session's record is found by its host, as the deck finds it.
-- **app.asar:** the jump route, the needs-input route, the `local_` id pattern, the mode tool, and the record loader's summary fields with its `is_noteworthy` check, which status rule 6 relies on: the loader keeps a summary only when each of `["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid"]` is missing or a string, and `is_noteworthy` missing or a boolean. The `is_noteworthy` check counts only within 2048 bytes after that list, where the loader has it (523 bytes after it in app 4.4212.0): the app's other summary validator has the same words 14 MB on, and would still have them were the loader to stop checking. So a check that moves away from the list fails too, for a look. The records' `postTurnSummary` row counts a summary the loader drops as one, the way rule 6 reads it.
-- **The mods API:** the newest bundled Claude Code's `plugin validate` and `plugin test` on `claude-code/plugin` as committed at HEAD, in a fresh temp config. It takes about 5 s, and `--skip-plugin` leaves it out.
-- **The engine's words:** in the newest bundled Claude Code's binary, the shape of its refusal of a `$.mcp.call`, `$.mcp.call(<server>, <tool>) refused: <reason>`, which the mod reads to report a mode change the engine refused as `refused` (`refusalOf` in `claude-code/plugin/hooks/commands.ts`). Worded otherwise, the mod reports it `failed`, which the deck shows alike, so a change warns.
+It re-checks what the plan's Log found in S0–S5 and the deck relies on, in eight checks, one row each: `ok`, `warn` or `fail`, with a reason. It exits 0 when no check fails and 1 when one does (2 for a usage error). `--help` describes each check, and the specs and comments in `recheck.mjs` say why. It's read only: it never opens the registry's `.key` files or a transcript, never reads the deck's token, and prints field names and counts, never a value from the registry or the records, nor another app's name.
 
-It's read only. It never opens the registry's `.key` files or a transcript, never reads the deck's token, and prints field names and counts, never a value from the registry or the records. The bundle and engine checks find strings, not behaviour: after an update, still try one jump and one mode change on the deck.
+It finds strings, not behaviour. The PermissionRequest hook's input and the deck's answers are held to the engine's own declarations by the plugin's type check instead (`claude-code/plugin-tsc/hook-contract.ts`), and the engine's rules by the smoke test (`docs/claude-code/hardening.md`, C2). `claude-code/vendor/refresh.mjs`, whose reader check 8 uses, is tested in `test/refresh.test.mjs` on small synthetic file tables (`test/bun-table.mjs`).
 
 ## Measuring the deck's idle work: idle-report.mjs
 

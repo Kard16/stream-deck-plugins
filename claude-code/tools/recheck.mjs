@@ -1,33 +1,18 @@
 #!/usr/bin/env node
 // recheck: after a Claude app update, says whether the undocumented internals the deck and the plugin rely on
-// still hold (docs/claude-code/plan.md, Phase 6; what each one is and how it was found is in the plan's Log,
-// S0–S5). Six checks:
-// 1. Versions: the app's, from its Info.plist, and the Claude Code versions it bundles. It warns when the newest
-//    isn't CHECKED_CC_VERSION, the one claude-code/vendor/mods-api/ was made from (the first line of its d.ts).
-// 2. The session registry, ~/.claude/sessions/*.json: every field the deck reads (REGISTRY_FIELDS), by type.
-// 3. The app's session records, claude-code-sessions/<account>/<org>/local_*.json: the same (RECORD_FIELDS),
-//    and whether each running session's record is found by its id, as the deck finds it.
-// 4. The app bundle, app.asar, scanned with Buffer.indexOf: the jump route, the needs-input route, the local_
-//    id pattern, the mode tool, and the record loader's summary fields and, just after them, its is_noteworthy check
-//    (BUNDLE_CHECKS).
-// 5. The mods API: the newest bundled Claude Code's `plugin validate` and `plugin test` on claude-code/plugin as
-//    committed (git HEAD, since the working tree may be mid-edit), with a fresh CLAUDE_CONFIG_DIR and HOME.
-// 6. The engine's words: how the newest bundled Claude Code words a $.mcp.call it refuses, which the mod reads to
-//    report a refused mode change (ENGINE_CHECKS).
-//
-// Read only. It writes nothing outside a temp folder it removes, never opens the registry's .key files or a
-// transcript, never reads the deck's token, and prints field names and counts, never a value from the
-// registry or the records: they hold session titles and summaries. Node 24, no dependencies.
-//
-// Checks 4 and 6 find strings, not behaviour: after an update, still try one jump and one mode change on the deck.
+// still hold (docs/claude-code/plan.md, Phase 6; how each was found is in the plan's Log, S0–S5). USAGE below
+// (`--help`) says what each of its eight checks reads and when it warns or fails; the specs and the comments beside
+// them say why. Read only: see USAGE. Node 24, no dependencies.
 
-import { spawn, spawnSync } from 'node:child_process'
+import { execFile, spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+
+import * as refresh from '../vendor/refresh.mjs'
 
 const HOME = os.homedir()
 /** The repository this script is in: the deck's sources (for citations) and, by default, the plugin at HEAD. */
@@ -43,6 +28,8 @@ export const DEFAULTS = Object.freeze({
   repo: REPO,
   /** The vendored mods API reference, which claude-code/vendor/refresh.mjs makes from a bundled Claude Code. */
   vendored: path.join(REPO, 'claude-code', 'vendor', 'mods-api', 'claude-code.d.ts'),
+  /** What the deck's "seen" check runs: front.ts's LSAPPINFO, which the drift test holds this to. */
+  lsappinfo: '/usr/bin/lsappinfo',
 })
 
 export const VENDORED_DTS = DEFAULTS.vendored
@@ -92,6 +79,18 @@ const REGISTRY_TS = `${DECK}/registry/registry.ts`
 const RECORDS_TS = `${DECK}/records/records.ts`
 const PROTOCOL = 'claude-code/protocol/PROTOCOL.md'
 const COMMANDS_TS = 'claude-code/plugin/hooks/commands.ts'
+const DESKTOP_TS = 'claude-code/plugin/hooks/desktop.ts'
+const STATUS_TS = `${DECK}/model/status.ts`
+/** The deck's "seen" check, whose two answers check 7 reads as it does. */
+export const FRONT_TS = `${DECK}/model/front.ts`
+
+/**
+ * How front.ts reads lsappinfo's two answers, and the bundle id it compares the app in front with: its parseFrontAsn's
+ * and parseBundleId's patterns and its CLAUDE_BUNDLE_ID, copied, as the drift test holds them to its text.
+ */
+export const FRONT_ASN = /^ASN:0x[0-9a-f]+-0x[0-9a-f]+:$/i
+export const FRONT_BUNDLE_ID = /"CFBundleIdentifier"="([^"]*)"/
+export const CLAUDE_BUNDLE_ID = 'com.anthropic.claudefordesktop'
 
 /**
  * The post-turn summary's fields that the app's record loader keeps only when each is missing or a string, in the
@@ -313,6 +312,17 @@ export const BUNDLE_CHECKS = Object.freeze([
       },
     ],
   },
+  {
+    id: 'desktop-env', name: 'desktop session env',
+    why: "The mod talks to the bridge only from a desktop session of its own (claude-code/plugin/hooks/desktop.ts): one the app started with CLAUDE_CODE_ENTRYPOINT claude-desktop or claude-desktop-3p and its local_ id in CLAUDE_CODE_HOST_SESSION_ID, which the hooks send as X-Deck-Host. Named otherwise, the mod stays quiet in every session. This finds the body of the app's mapper from account type to entrypoint and its host id assignment, not that the mapper's result is what the session gets as CLAUDE_CODE_ENTRYPOINT: the smoke test's hello shows that.",
+    needles: [
+      // App 4.23118.0 gives a session `CLAUDE_CODE_ENTRYPOINT:LLa(n.type)`, with
+      // `function LLa(e){return e==="3p"?"claude-desktop-3p":"claude-desktop"}`.
+      { text: '?"claude-desktop-3p":"claude-desktop"', ifMissing: 'fail', looser: '"claude-desktop-3p"', sources: [[DESKTOP_TS, 'export const DESKTOP_ENTRYPOINTS']] },
+      // And `d.CLAUDE_CODE_HOST_SESSION_ID=n` in the same environment.
+      { text: '.CLAUDE_CODE_HOST_SESSION_ID=', ifMissing: 'fail', looser: 'CLAUDE_CODE_HOST_SESSION_ID', sources: [[DESKTOP_TS, 'const host = env.CLAUDE_CODE_HOST_SESSION_ID']] },
+    ],
+  },
 ])
 
 /**
@@ -333,6 +343,43 @@ export const ENGINE_CHECKS = Object.freeze([
     refused: ') refused: ',
     within: 120,
     sources: [[COMMANDS_TS, 'const MODE_CALL_REFUSED = '], [PROTOCOL, '`$.mcp.call(<server>, <tool>) refused: <reason>` in 2.1.309']],
+  },
+])
+
+/** CLAUDE_CODE_ENTRYPOINT in the app's own sessions (claude-code/plugin/hooks/desktop.ts, DESKTOP_ENTRYPOINTS). */
+export const DESKTOP_ENTRYPOINTS = Object.freeze(['claude-desktop', 'claude-desktop-3p'])
+const DESKTOP_SET = JSON.stringify(DESKTOP_ENTRYPOINTS)
+const WAITING = 'status:"waiting",waitingFor:'
+const AFTER_WAITING = { what: 'the waiting status', texts: [WAITING], within: 200 }
+const CHILD_ENV = 'CLAUDECODE:"1"'
+
+/**
+ * What the deck and the mod rely on in the engine's JavaScript, in the newest bundled Claude Code's file table, as
+ * BUNDLE_CHECKS' needles are in app.asar: every file in it is searched apart (isSearched), and an `after` counts in the
+ * file its anchor is in. Its code is minified, so the needles are literals and property names, never the engine's own
+ * names.
+ */
+export const ENGINE_JS_CHECKS = Object.freeze([
+  {
+    id: 'registry-status', name: 'registry statuses',
+    why: "The deck's status starts from each session's registry status (claude-code/deck/src/model/status.ts): waiting while a dialog waits on the person, else busy or idle, and any other reads as idle. Check 2 counts what the running sessions have now; this is where the engine sets all three.",
+    needles: [
+      // 2.1.317: `if(x!==void 0)return{status:"waiting",waitingFor:x,working:!1};return{status:h.isLoading||h.delegatedActive?"busy":"idle",…}`.
+      { text: WAITING, ifMissing: 'warn', sources: [[STATUS_TS, 'i.registry === "waiting"']] },
+      ...REGISTRY_STATUSES.filter((s) => s !== 'waiting').map((s) => ({ text: `"${s}"`, ifMissing: 'warn', after: AFTER_WAITING, sources: [[STATUS_TS, `i.registry === "${s}"`]] })),
+    ],
+  },
+  {
+    id: 'desktop-gate', name: 'desktop gate',
+    why: "The mod talks to the bridge only from a desktop session of its own (claude-code/plugin/hooks/desktop.ts), as the engine's own test for one has it: CLAUDE_CODE_ENTRYPOINT one of DESKTOP_ENTRYPOINTS, in a process no other Claude Code started, which the engine marks with CLAUDECODE and CLAUDE_CODE_CHILD_SESSION. Changed, the mod talks from processes the engine doesn't count as desktop sessions, or stays quiet in those it does.",
+    needles: [
+      // 2.1.317: `var Stn=new Set(["claude-desktop","claude-desktop-3p"]);function eHe(){let e=cp();return e!==void 0&&Stn.has(e)&&!n().childSession}`.
+      { text: DESKTOP_SET, ifMissing: 'fail', looser: '"claude-desktop-3p"', sources: [[DESKTOP_TS, 'export const DESKTOP_ENTRYPOINTS']] },
+      { text: 'childSession', ifMissing: 'warn', after: { what: 'the desktop entrypoints', texts: [DESKTOP_SET], within: 160 }, sources: [[DESKTOP_TS, "['CLAUDE_CODE_CHILD_SESSION', env.CLAUDE_CODE_CHILD_SESSION]"]] },
+      // The environment it gives what it starts: `{CLAUDECODE:"1",CLAUDE_CODE_SESSION_ID:e.sessionId,CLAUDE_CODE_CHILD_SESSION:"1",…}`.
+      { text: CHILD_ENV, ifMissing: 'warn', sources: [[DESKTOP_TS, "['CLAUDECODE', env.CLAUDECODE]"]] },
+      { text: 'CLAUDE_CODE_CHILD_SESSION:"1"', ifMissing: 'warn', after: { what: CHILD_ENV, texts: [CHILD_ENV], within: 120 }, sources: [[DESKTOP_TS, "['CLAUDE_CODE_CHILD_SESSION', env.CLAUDE_CODE_CHILD_SESSION]"]] },
+    ],
   },
 ])
 
@@ -405,68 +452,77 @@ async function isDir(fsys, p) {
 
 // ---- 1. versions
 
-/** Numeric order of dotted versions: 2.1.40 < 2.1.309 < 2.10.0. */
-export function compareVersions(a, b) {
-  const pa = a.split('.').map(Number)
-  const pb = b.split('.').map(Number)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (d !== 0) return d
-  }
-  return 0
-}
-
-const VERSION_DIR = /^\d+\.\d+\.\d+$/
-
 /**
- * The bundled Claude Code versions under `root` (`<root>/<version>/<hash>/claude.app/Contents/MacOS/claude`), oldest
- * first, the newest, and the newest's binary: the most recently changed one when there are several.
+ * The bundled Claude Code versions under `root`, oldest first, the newest, and the binary of the newest, or of
+ * `version` when it's given and bundled, `<root>/<version>/<build>/claude.app/Contents/MacOS/claude`. They're
+ * refresh.mjs's bundledVersions and findBinary, so recheck and refresh find the same build. `error` is why `root`
+ * can't be listed.
  */
-export async function findClaudeCode(root, { fs: fsys = nodeFs } = {}) {
-  let names
+export async function findClaudeCode(root, { version } = {}) {
+  let versions
   try {
-    names = await fsys.readdir(root)
+    versions = refresh.bundledVersions(root)
   } catch (err) {
-    return { error: errCode(err), versions: [], newest: null, binary: null }
+    return { error: err.code ?? 'error', versions: [], newest: null, binary: null }
   }
-  const versions = []
-  for (const name of names) if (VERSION_DIR.test(name) && (await isDir(fsys, path.join(root, name)))) versions.push(name)
-  versions.sort(compareVersions)
   const newest = versions.at(-1) ?? null
+  const which = version ?? newest
   let binary = null
-  if (newest !== null) {
-    let hashes = []
+  if (which !== null && versions.includes(which)) {
     try {
-      hashes = await fsys.readdir(path.join(root, newest))
-    } catch {}
-    let latest = -Infinity
-    for (const hash of hashes) {
-      if (hash.startsWith('.')) continue
-      const file = path.join(root, newest, hash, 'claude.app', 'Contents', 'MacOS', 'claude')
-      try {
-        const st = await fsys.stat(file)
-        if (st.isFile() && (st.mode & 0o111) !== 0 && st.mtimeMs > latest) {
-          latest = st.mtimeMs
-          binary = file
-        }
-      } catch {}
+      binary = refresh.findBinary(which, root).binary
+    } catch (err) {
+      if (!(err instanceof refresh.RefreshError)) throw err
     }
   }
   return { error: null, versions, newest, binary }
 }
 
-/** CFBundleShortVersionString from an Info.plist, XML or binary; null when it has none. */
-export async function readAppVersion(file, { fs: fsys = nodeFs } = {}) {
+/**
+ * The bundled binaries a run reads, each read once however many checks want it (check 6 the newest, check 8 the
+ * vendored version's, often the same one, some 300 MB), and each one's file table, read by refresh.mjs's reader:
+ * `{files}`, or `{error}` with whatever the reader threw. A read of the binary that fails rejects.
+ */
+export function binaryCache(fsys = nodeFs) {
+  const bufs = new Map()
+  const tables = new Map()
+  const read = (file) => {
+    if (!bufs.has(file)) bufs.set(file, Promise.resolve().then(() => fsys.readFile(file)))
+    return bufs.get(file)
+  }
+  const table = (file) => {
+    if (!tables.has(file)) {
+      tables.set(file, read(file).then((buf) => {
+        try {
+          return { files: refresh.fileTable(buf) }
+        } catch (err) {
+          return { error: err }
+        }
+      }))
+    }
+    return tables.get(file)
+  }
+  return { read, table, clear: () => (bufs.clear(), tables.clear()) }
+}
+
+/** A string `key` from an Info.plist, XML or binary; null when it has none. */
+export async function readPlistString(file, key, { fs: fsys = nodeFs } = {}) {
   const buf = await fsys.readFile(file)
   let v = null
   if (buf.subarray(0, 6).toString('latin1') === 'bplist') {
-    const r = spawnSync('plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', file], { encoding: 'utf8' })
+    const r = spawnSync('plutil', ['-extract', key, 'raw', '-o', '-', file], { encoding: 'utf8' })
     if (r.status === 0) v = r.stdout.trim()
   } else {
-    const m = /<key>\s*CFBundleShortVersionString\s*<\/key>\s*<string>([^<]*)<\/string>/.exec(buf.toString('utf8'))
+    const m = new RegExp(`<key>\\s*${key}\\s*</key>\\s*<string>([^<]*)</string>`).exec(buf.toString('utf8'))
     if (m) v = m[1].trim()
   }
-  return v ? printable(v, 40) : null
+  return v ? printable(v, 80) : null
+}
+
+/** CFBundleShortVersionString from an Info.plist, XML or binary; null when it has none. */
+export async function readAppVersion(file, { fs: fsys = nodeFs } = {}) {
+  const v = await readPlistString(file, 'CFBundleShortVersionString', { fs: fsys })
+  return v === null ? null : printable(v, 40)
 }
 
 export async function checkVersions({ infoPlist = DEFAULTS.infoPlist, claudeCodeRoot = DEFAULTS.claudeCodeRoot, checkedVersion = CHECKED_CC_VERSION, fs: fsys = nodeFs } = {}) {
@@ -483,7 +539,7 @@ export async function checkVersions({ infoPlist = DEFAULTS.infoPlist, claudeCode
     rows.push(row(G, 'versions.app', 'app version', 'fail', `can't read ${tilde(infoPlist)}: ${errCode(err)}`))
   }
 
-  const cc = await findClaudeCode(claudeCodeRoot, { fs: fsys })
+  const cc = await findClaudeCode(claudeCodeRoot)
   const details = { versions: cc.versions, newest: cc.newest, binary: cc.binary, checkedVersion }
   if (cc.error) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'fail', `can't list ${tilde(claudeCodeRoot)}: ${cc.error}`, details))
   else if (cc.newest === null) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'fail', `no version folder in ${tilde(claudeCodeRoot)}`, details))
@@ -703,6 +759,47 @@ export function spansAfter(buf, after) {
   return []
 }
 
+/**
+ * A BUNDLE_CHECKS-shaped spec over `bufs`, each searched apart (the bundle alone, or each of the engine's JS files):
+ * every needle's hits, where its `after` lets it count, its looser one's, its status, and the row's status and
+ * reason. An `after` anchors on the first of its texts that any of `bufs` has, in each file that has it. `what` is
+ * where the needles were looked for, for a needle found only outside its span.
+ */
+export function evalNeedles(bufs, spec, what = 'the bundle') {
+  const needles = spec.needles.map((n) => {
+    let spans = null
+    if (n.after) {
+      const anchor = n.after.texts.find((text) => bufs.some((b) => b.includes(text)))
+      spans = bufs.map((b) => (anchor === undefined ? [] : spansAfter(b, { texts: [anchor], within: n.after.within })))
+    }
+    const count = (text, within = spans) => bufs.reduce((sum, b, i) => sum + countHits(b, text, within ? within[i] : null), 0)
+    const hits = count(n.text)
+    const looserHits = hits === 0 && n.looser ? count(n.looser) : null
+    // Where it must be, as people read it, and how often it's elsewhere when it isn't there.
+    const where = n.after ? ` within ${n.after.within} bytes after ${n.after.what}` : ''
+    const elsewhere = n.after && hits === 0 ? count(n.text, null) : null
+    const status = hits ? 'ok' : looserHits ? 'warn' : n.ifMissing
+    return {
+      text: n.text, hits, ...(n.after ? { after: n.after.what, within: n.after.within, anchors: spans.reduce((s, x) => s + x.length, 0), elsewhere } : {}),
+      ...(n.looser ? { looser: n.looser, looserHits } : {}), ifMissing: n.ifMissing, status, where, sources: n.sources.map(cite),
+    }
+  })
+  const status = worst(needles.map((n) => n.status))
+  let reason
+  if (status === 'ok') reason = needles.map((n) => `${n.text} ×${n.hits}${n.where}`).join(', ')
+  else {
+    const gone = needles.filter((n) => n.status !== 'ok').map((n) => {
+      let s = `${n.text} not found${n.where}`
+      if (n.elsewhere) s += `, only elsewhere in ${what} (×${n.elsewhere})`
+      if (n.looserHits) s += `, though ${n.looser} is (×${n.looserHits}), so it changed`
+      return s
+    })
+    const there = needles.filter((n) => n.status === 'ok').map((n) => `${n.text} ×${n.hits}${n.where}`)
+    reason = `${gone.join('; ')}${there.length ? ` (found: ${there.join(', ')})` : ''}. ${spec.why}`
+  }
+  return { status, reason, needles: needles.map(({ where, ...n }) => n) }
+}
+
 export async function checkBundle(file = DEFAULTS.asar, { fs: fsys = nodeFs } = {}) {
   const G = 'bundle'
   let buf
@@ -713,33 +810,8 @@ export async function checkBundle(file = DEFAULTS.asar, { fs: fsys = nodeFs } = 
   }
   const rows = [row(G, 'bundle', 'app bundle', 'ok', `${tilde(file)}, ${(buf.length / 1e6).toFixed(1)} MB`, { bytes: buf.length })]
   for (const spec of BUNDLE_CHECKS) {
-    const needles = spec.needles.map((n) => {
-      const spans = n.after ? spansAfter(buf, n.after) : null
-      const hits = countHits(buf, n.text, spans)
-      const looserHits = hits === 0 && n.looser ? countHits(buf, n.looser, spans) : null
-      // Where it must be, as people read it, and how often it's in the bundle elsewhere when it isn't there.
-      const where = n.after ? ` within ${n.after.within} bytes after ${n.after.what}` : ''
-      const elsewhere = n.after && hits === 0 ? countHits(buf, n.text) : null
-      const status = hits ? 'ok' : looserHits ? 'warn' : n.ifMissing
-      return {
-        text: n.text, hits, ...(n.after ? { after: n.after.what, within: n.after.within, anchors: spans.length, elsewhere } : {}),
-        ...(n.looser ? { looser: n.looser, looserHits } : {}), ifMissing: n.ifMissing, status, where, sources: n.sources.map(cite),
-      }
-    })
-    const status = worst(needles.map((n) => n.status))
-    let reason
-    if (status === 'ok') reason = needles.map((n) => `${n.text} ×${n.hits}${n.where}`).join(', ')
-    else {
-      const gone = needles.filter((n) => n.status !== 'ok').map((n) => {
-        let s = `${n.text} not found${n.where}`
-        if (n.elsewhere) s += `, only elsewhere in the bundle (×${n.elsewhere})`
-        if (n.looserHits) s += `, though ${n.looser} is (×${n.looserHits}), so it changed`
-        return s
-      })
-      const there = needles.filter((n) => n.status === 'ok').map((n) => `${n.text} ×${n.hits}${n.where}`)
-      reason = `${gone.join('; ')}${there.length ? ` (found: ${there.join(', ')})` : ''}. ${spec.why}`
-    }
-    rows.push(row(G, `bundle.${spec.id}`, `bundle: ${spec.name}`, status, reason, { needles: needles.map(({ where, ...n }) => n) }))
+    const { status, reason, needles } = evalNeedles([buf], spec)
+    rows.push(row(G, `bundle.${spec.id}`, `bundle: ${spec.name}`, status, reason, { needles }))
   }
   return rows
 }
@@ -907,7 +979,7 @@ function testRow(version, r, timeoutMs) {
  * in a temp folder under `tmpRoot` that's removed afterwards.
  */
 export async function checkModsApi({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, repo = DEFAULTS.repo, tmpRoot = os.tmpdir(), timeoutMs = 180_000, fs: fsys = nodeFs } = {}) {
-  const cc = await findClaudeCode(claudeCodeRoot, { fs: fsys })
+  const cc = await findClaudeCode(claudeCodeRoot)
   if (cc.error) return [row('mods', 'mods', 'mods API', 'fail', `can't list ${tilde(claudeCodeRoot)}: ${cc.error}`)]
   if (cc.newest === null) return [row('mods', 'mods', 'mods API', 'fail', `no Claude Code version folder in ${tilde(claudeCodeRoot)}`)]
   if (cc.binary === null) return [row('mods', 'mods', 'mods API', 'fail', `no claude binary at ${tilde(path.join(claudeCodeRoot, cc.newest))}/*/claude.app/Contents/MacOS/claude`)]
@@ -953,18 +1025,25 @@ export function engineHits(buf, spec) {
 }
 
 /**
- * Check 6: the newest bundled Claude Code's binary, which embeds the engine's JavaScript, scanned for the words the
- * mod reads (ENGINE_CHECKS). Read only, and fast: no process is run.
+ * The files of a file table check 6 searches: all but those packed (`.zst`), native addons (`.node`) and assets
+ * (`.asset`), so a chunk named otherwise than `.js` still counts.
  */
-export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs: fsys = nodeFs } = {}) {
+export const isSearched = (f) => !/\.(zst|node|asset)$/.test(f.name)
+
+/**
+ * Check 6: the newest bundled Claude Code's binary, which embeds the engine's JavaScript, scanned for the words the
+ * mod reads (ENGINE_CHECKS); then its file table, read by refresh.mjs's reader, for ENGINE_JS_CHECKS. When the table
+ * can't be read, or has no file to search, one row says so in their place. Read only, and fast: no process is run.
+ */
+export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs: fsys = nodeFs, binaries = binaryCache(fsys) } = {}) {
   const G = 'engine'
-  const cc = await findClaudeCode(claudeCodeRoot, { fs: fsys })
+  const cc = await findClaudeCode(claudeCodeRoot)
   if (cc.error) return [row(G, 'engine', 'engine', 'fail', `can't list ${tilde(claudeCodeRoot)}: ${cc.error}`)]
   if (cc.newest === null) return [row(G, 'engine', 'engine', 'fail', `no Claude Code version folder in ${tilde(claudeCodeRoot)}`)]
   if (cc.binary === null) return [row(G, 'engine', 'engine', 'fail', `no claude binary at ${tilde(path.join(claudeCodeRoot, cc.newest))}/*/claude.app/Contents/MacOS/claude`)]
   let buf
   try {
-    buf = await fsys.readFile(cc.binary)
+    buf = await binaries.read(cc.binary)
   } catch (err) {
     return [row(G, 'engine', 'engine', 'fail', `can't read ${tilde(cc.binary)}: ${errCode(err)}`)]
   }
@@ -982,7 +1061,191 @@ export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs
     }
     rows.push(row(G, `engine.${spec.id}`, `engine: ${spec.name}`, status, reason, { version: cc.newest, text: spec.text, template: spec.template.source, ...hits, sources: spec.sources.map(cite) }))
   }
+
+  const checks = ENGINE_JS_CHECKS.map((c) => c.name).join(' and ')
+  let table
+  try {
+    table = await binaries.table(cc.binary)
+  } catch (err) {
+    table = { error: err }
+  }
+  if (table.error) {
+    rows.push(row(G, 'engine.table', 'engine: file table', 'fail', `Claude Code ${cc.newest}'s file table can't be read (${printable(table.error?.message ?? String(table.error))}), so its ${checks} can't be checked`, { version: cc.newest }))
+    return rows
+  }
+  const searched = table.files.filter(isSearched).map((f) => f.contents)
+  if (searched.length === 0) {
+    rows.push(row(G, 'engine.js', 'engine: JS', 'warn', `Claude Code ${cc.newest}'s file table has no file to search but packed ones (.zst), native addons (.node) and assets (.asset), so its ${checks} can't be checked`, { version: cc.newest, files: table.files.length }))
+    return rows
+  }
+  for (const spec of ENGINE_JS_CHECKS) {
+    const { status, reason, needles } = evalNeedles(searched, spec, 'its files')
+    rows.push(row(G, `engine.${spec.id}`, `engine: ${spec.name}`, status, reason, { version: cc.newest, files: searched.length, needles }))
+  }
   return rows
+}
+
+// ---- 7. seen
+
+/** Runs `file` with `args`, no shell, for at most `timeoutMs`, then kills it: `{code, out, error}` with stdout alone. */
+function runFile(file, args, timeoutMs) {
+  return new Promise((resolve) => {
+    execFile(file, args, { timeout: timeoutMs, killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err && typeof err.code !== 'number') resolve({ code: null, out: String(stdout ?? ''), error: err.killed ? `no answer in ${timeoutMs} ms` : errCode(err) })
+      else resolve({ code: err ? err.code : 0, out: String(stdout ?? ''), error: null })
+    })
+  })
+}
+
+/** `lsappinfo front`'s answer, `ASN:0x0-0x620620:`, as front.ts's parseFrontAsn reads it; null for anything else. */
+export function parseFrontAsn(stdout) {
+  const asn = stdout.trim()
+  return FRONT_ASN.test(asn) ? asn : null
+}
+
+/** `lsappinfo info -only bundleid <asn>`'s bundle id, as front.ts's parseBundleId reads it; null for `[ NULL ]` or anything else. */
+export const parseBundleId = (stdout) => FRONT_BUNDLE_ID.exec(stdout)?.[1] ?? null
+
+/** Words of lsappinfo's answers that name no app: its keys, and NULL. */
+const LSAPPINFO_WORDS = new Set(['ASN', 'NULL', 'CFBundleIdentifier', 'bundleID'])
+
+/**
+ * An lsappinfo answer's shape, for a reason: every value blanked, quoted or not, `"…"`, `0x…` and `…`, so no app's name
+ * or bundle id is ever printed; its keys, punctuation and spacing kept.
+ */
+export function shapeOf(stdout) {
+  return printable(stdout.trim(), 120).replace(/"([^"]*)"|0x[0-9a-f]+|[\p{L}\p{N}_.]+/giu, (t, quoted) => {
+    if (quoted !== undefined) return LSAPPINFO_WORDS.has(quoted) ? t : '"…"'
+    if (/^0x/i.test(t)) return '0x…'
+    return LSAPPINFO_WORDS.has(t) ? t : '…'
+  })
+}
+
+const NULL_ANSWER = /^\s*\[ NULL \]\s*$/
+
+/** The row for lsappinfo's two answers, asked as the deck asks them (lsappinfoCheck in front.ts) and read as it reads them. */
+async function lsappinfoRow(G, lsappinfo, timeoutMs) {
+  const id = 'seen.lsappinfo'
+  const name = 'seen: lsappinfo'
+  const why = `The deck's seen check asks \`lsappinfo front\`, then \`lsappinfo info -only bundleid <asn>\`, and reads both so (${FRONT_TS}); an answer it can't read counts as Claude not in front, so a finished session stays unseen until it's pressed.`
+  const details = { lsappinfo: tilde(lsappinfo), source: cite([FRONT_TS, 'export function parseFrontAsn']) }
+  const first = await runFile(lsappinfo, ['front'], timeoutMs)
+  if (first.error || first.code !== 0) return row(G, id, name, 'fail', `${tilde(lsappinfo)} front failed: ${first.error ?? `exit ${first.code}`}. ${why}`, details)
+  const asn = parseFrontAsn(first.out)
+  if (asn === null) {
+    if (first.out.trim() === '' || NULL_ANSWER.test(first.out)) return row(G, id, name, 'warn', `lsappinfo front named no app (\`${shapeOf(first.out)}\`), so its answer's shape can't be checked: run again with an app in front`, details)
+    return row(G, id, name, 'fail', `lsappinfo front answered \`${shapeOf(first.out)}\`, which the deck doesn't read as ASN:0x…-0x…:. ${why}`, details)
+  }
+  const second = await runFile(lsappinfo, ['info', '-only', 'bundleid', asn], timeoutMs)
+  if (second.error || second.code !== 0) return row(G, id, name, 'fail', `${tilde(lsappinfo)} info -only bundleid failed: ${second.error ?? `exit ${second.code}`}. ${why}`, details)
+  const bundle = parseBundleId(second.out)
+  if (bundle === null) {
+    if (/\[ NULL \]/.test(second.out)) return row(G, id, name, 'warn', `the app in front has no bundle id (\`${shapeOf(second.out)}\`), so the answer's shape can't be checked: run again with another app in front`, details)
+    return row(G, id, name, 'fail', `lsappinfo info -only bundleid answered \`${shapeOf(second.out)}\`, which the deck doesn't read as "CFBundleIdentifier"="…". ${why}`, details)
+  }
+  // Another app's bundle id says what the person has open, so only whether it's Claude's is said.
+  const claude = bundle === CLAUDE_BUNDLE_ID
+  return row(G, id, name, 'ok', `front gave an ASN and info -only bundleid ${claude ? "Claude's" : "another app's"} bundle id, as the deck reads them`, { ...details, claudeInFront: claude })
+}
+
+/**
+ * Check 7: what the deck's "seen" check relies on (claude-code/deck/src/model/front.ts): lsappinfo's two answers, asked
+ * as the deck asks them and read as it reads them (FRONT_ASN, FRONT_BUNDLE_ID); and the app's bundle id, from its
+ * Info.plist, which the deck compares the app in front with (CLAUDE_BUNDLE_ID).
+ */
+export async function checkSeen({ lsappinfo = DEFAULTS.lsappinfo, infoPlist = DEFAULTS.infoPlist, timeoutMs = 2000, fs: fsys = nodeFs } = {}) {
+  const G = 'seen'
+  const rows = [await lsappinfoRow(G, lsappinfo, timeoutMs)]
+  const id = 'seen.bundle-id'
+  const name = "seen: Claude's bundle id"
+  const details = { expect: CLAUDE_BUNDLE_ID, source: cite([FRONT_TS, 'export const CLAUDE_BUNDLE_ID']) }
+  let bundle
+  try {
+    bundle = await readPlistString(infoPlist, 'CFBundleIdentifier', { fs: fsys })
+  } catch (err) {
+    rows.push(row(G, id, name, 'fail', `can't read ${tilde(infoPlist)}: ${errCode(err)}`, details))
+    return rows
+  }
+  const why = `The deck counts Claude as in front only when the app in front has the bundle id ${CLAUDE_BUNDLE_ID} (CLAUDE_BUNDLE_ID in ${FRONT_TS}), so with another one a finished session is never marked seen.`
+  if (bundle === null) rows.push(row(G, id, name, 'fail', `no CFBundleIdentifier in ${tilde(infoPlist)}. ${why}`, details))
+  else if (bundle !== CLAUDE_BUNDLE_ID) rows.push(row(G, id, name, 'fail', `Claude.app's bundle id is ${bundle}. ${why}`, { ...details, bundle }))
+  else rows.push(row(G, id, name, 'ok', `${bundle}, as the deck's seen check compares the app in front with`, { ...details, bundle }))
+  return rows
+}
+
+// ---- 8. the vendored reference
+
+/** Every file under `dir`, as a relative path with `/`, skipping names that start with a dot. */
+async function filesUnder(fsys, dir, rel = '') {
+  const out = []
+  for (const name of (await fsys.readdir(path.join(dir, rel))).sort()) {
+    if (name.startsWith('.')) continue
+    const p = rel ? `${rel}/${name}` : name
+    const st = await fsys.lstat(path.join(dir, p))
+    if (st.isDirectory()) out.push(...(await filesUnder(fsys, dir, p)))
+    else out.push(p)
+  }
+  return out
+}
+
+/**
+ * Check 8: claude-code/vendor/mods-api/, the folder `vendored` is in, against what refresh.mjs makes, in memory, from
+ * the binary of the version that file's first line names. ok when every file is the same; warn when they differ,
+ * naming the files, that version isn't bundled, or refresh.mjs would refuse it; fail when the binary's file table, or
+ * a file of it refresh.mjs takes, can't be read, which means Bun changed its format.
+ */
+export async function checkVendored({ vendored = DEFAULTS.vendored, claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs: fsys = nodeFs, binaries = binaryCache(fsys) } = {}) {
+  const G = 'vendor'
+  const id = 'vendor.mods-api'
+  const name = 'vendored mods API'
+  const dir = path.dirname(vendored)
+  const shown = path.relative(REPO, dir).startsWith('..') ? tilde(dir) : path.relative(REPO, dir)
+  const one = (status, reason, details) => [row(G, id, name, status, reason, details)]
+  const version = vendoredVersion(vendored)
+  if (version === null) return one('warn', `${shown}/claude-code.d.ts is missing or its first line names no version, so there's no binary to compare it with: run claude-code/vendor/refresh.mjs`)
+  const cc = await findClaudeCode(claudeCodeRoot, { version })
+  if (cc.error) return one('fail', `can't list ${tilde(claudeCodeRoot)}: ${cc.error}`)
+  if (!cc.versions.includes(version)) return one('warn', `${shown} is for Claude Code ${version}, which isn't bundled any more (${cc.versions.join(', ') || 'none'}), so it can't be compared: run claude-code/vendor/refresh.mjs`, { version, versions: cc.versions })
+  if (cc.binary === null) return one('fail', `no claude binary at ${tilde(path.join(claudeCodeRoot, version))}/*/claude.app/Contents/MacOS/claude`, { version })
+  let table
+  try {
+    table = await binaries.table(cc.binary)
+  } catch (err) {
+    return one('fail', `can't read ${tilde(cc.binary)}: ${errCode(err)}`, { version })
+  }
+  const unreadable = (err) => one('fail', `Claude Code ${version}'s file table can't be read: ${printable(err?.message ?? String(err))}. refresh.mjs can't rebuild ${shown} from it`, { version, binary: cc.binary })
+  if (table.error) return unreadable(table.error)
+  let expected
+  try {
+    expected = refresh.modsApi(table.files, version)
+  } catch (err) {
+    if (!(err instanceof refresh.RefreshError) || err instanceof refresh.BunFormatError) return unreadable(err)
+    return one('warn', `Claude Code ${version}'s file table reads, but refresh.mjs would refuse it: ${printable(err.message)}; the format or the skill changed`, { version })
+  }
+  const changed = []
+  const missing = []
+  for (const [rel, text] of Object.entries(expected)) {
+    let have
+    try {
+      have = await fsys.readFile(path.join(dir, rel), 'utf8')
+    } catch {
+      missing.push(rel)
+      continue
+    }
+    if (have !== text) changed.push(rel)
+  }
+  let extra = []
+  try {
+    extra = (await filesUnder(fsys, dir)).filter((rel) => !Object.hasOwn(expected, rel))
+  } catch {}
+  const details = { version, binary: cc.binary, files: Object.keys(expected).length, changed, missing, extra }
+  const differ = [
+    ...(changed.length ? [`${changed.join(', ')} ${changed.length === 1 ? 'differs' : 'differ'}`] : []),
+    ...(missing.length ? [`${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing`] : []),
+    ...(extra.length ? [`${extra.join(', ')} ${extra.length === 1 ? "isn't" : "aren't"} in the binary's`] : []),
+  ]
+  if (differ.length) return one('warn', `${shown} isn't what refresh.mjs makes from Claude Code ${version}: ${differ.join('; ')}. \`node claude-code/vendor/refresh.mjs --version ${version}\` and git diff show how`, details)
+  return one('ok', `${shown} is what refresh.mjs makes from Claude Code ${version}'s file table, ${plural(Object.keys(expected).length, 'file')}`, details)
 }
 
 // ---- all of it
@@ -999,7 +1262,15 @@ export async function recheck({ skipPlugin = false, fs: fsys = nodeFs, tmpRoot, 
   const skipped = []
   if (skipPlugin) skipped.push('mods')
   else checks.push(...(await checkModsApi({ claudeCodeRoot: paths.claudeCodeRoot, repo: paths.repo, tmpRoot, timeoutMs, fs: fsys })))
-  checks.push(...(await checkEngine({ claudeCodeRoot: paths.claudeCodeRoot, fs: fsys })))
+  // Checks 6 and 8 read the bundled binaries, each once.
+  const binaries = binaryCache(fsys)
+  try {
+    checks.push(...(await checkEngine({ claudeCodeRoot: paths.claudeCodeRoot, fs: fsys, binaries })))
+    checks.push(...(await checkSeen({ lsappinfo: paths.lsappinfo, infoPlist: paths.infoPlist, fs: fsys })))
+    checks.push(...(await checkVendored({ vendored: paths.vendored, claudeCodeRoot: paths.claudeCodeRoot, fs: fsys, binaries })))
+  } finally {
+    binaries.clear()
+  }
   const summary = { ok: 0, warn: 0, fail: 0 }
   for (const c of checks) summary[c.status]++
   return { ok: summary.fail === 0, summary, skipped, paths, checks }
@@ -1032,21 +1303,42 @@ export function renderJson(result) {
 const USAGE = `usage: node claude-code/tools/recheck.mjs [options]
 
 After a Claude app update, says whether the undocumented internals the deck and the plugin rely on still
-hold (docs/claude-code/plan.md, Phase 6). Read only: it writes nothing outside a temp folder it removes,
-never opens the registry's .key files or a transcript, and prints field names and counts, never a value
-from the registry or the records.
+hold (docs/claude-code/plan.md, Phase 6): one row per check, ok, warn or fail, with a reason.
 
   1. Versions: the app's, from its Info.plist, and the Claude Code versions it bundles. Warns when the
-     newest isn't ${CHECKED_CC_VERSION}, which the vendored mods API reference and these checks are for.
-  2. The session registry: each field the deck reads, by type, over the running sessions.
-  3. The app's session records: the same, and whether each running session's record is found by its id.
-  4. The app bundle: the jump route, the needs-input route, the local_ id pattern, the mode tool, and
-     the record loader's summary fields and, just after them, its is_noteworthy check, which status
-     rule 6 relies on.
+     newest isn't ${CHECKED_CC_VERSION}, the version the first line of the vendored mods API's d.ts names,
+     so the one these checks are for: then run claude-code/vendor/refresh.mjs.
+  2. The session registry: each field the deck reads, by type, over the running sessions, with the
+     statuses they have. A field no entry has fails when the deck needs it; one some lack warns.
+  3. The app's session records: the same, a summary the app's loader drops counting as none, and
+     whether each running session's record is found by its host, as the deck finds it.
+  4. The app bundle, app.asar: the jump and needs-input routes, the local_ id pattern, the mode tool,
+     the record loader's summary fields with its is_noteworthy check within 2048 bytes after them
+     (status rule 6), and the body of the app's mapper to the entrypoint the mod's gate reads, with
+     the host id's assignment. A string found only in another form warns; one the deck needs, gone,
+     fails.
   5. The mods API: the newest bundled Claude Code's \`plugin validate\` and \`plugin test\` on
      ${PLUGIN_PATH} as committed (git HEAD), with a fresh CLAUDE_CONFIG_DIR and HOME. About 5 s.
-  6. The engine's words: how the newest bundled Claude Code words a refused $.mcp.call, which the
-     mod reads to report a refused mode change.
+  6. The engine, the newest bundled Claude Code: in its binary, the words of a refused $.mcp.call,
+     which the mod reads (a change warns); in every file of its table but packed ones, native addons
+     and assets, read with refresh.mjs's reader, where it sets the registry's statuses (a change
+     warns) and its own desktop session test, which the mod's gate copies (its entrypoints gone
+     fails). A table it can't read fails.
+  7. Seen: runs ${DEFAULTS.lsappinfo} front, then info -only bundleid, as the deck's seen check does, and
+     reads both as front.ts does: another shape fails, no app in front warns, and it never prints
+     another app's name or bundle id. Then Claude.app's bundle id, against the one the deck compares
+     the app in front with.
+  8. The vendored reference: claude-code/vendor/mods-api/ against what refresh.mjs makes, in memory,
+     from the binary of the version its d.ts names. A file that differs warns, naming it; a table it
+     can't read fails, as Bun changed its format.
+
+The PermissionRequest hook's input and answers are held to the engine's declarations by the plugin's
+type check (claude-code/plugin-tsc/hook-contract.ts), not here. Checks 4 and 6 find strings, not
+behaviour: after an update, also run the smoke test (docs/claude-code/hardening.md, C2).
+
+Read only: it writes nothing outside a temp folder it removes, never opens the registry's .key files or
+a transcript, never reads the deck's token, and prints field names and counts, never a value from the
+registry or the records.
 
   --sessions DIR          the session registry (default ${tilde(DEFAULTS.sessions)})
   --records DIR           the app's session records (default ${tilde(DEFAULTS.records)})
@@ -1054,8 +1346,9 @@ from the registry or the records.
   --info-plist FILE       the app's Info.plist (default ${DEFAULTS.infoPlist})
   --claude-code-root DIR  the bundled Claude Code versions (default ${tilde(DEFAULTS.claudeCodeRoot)})
   --repo DIR              the repository whose HEAD's ${PLUGIN_PATH} check 5 runs on (default this one)
-  --vendored FILE         the vendored mods API d.ts, whose first line names the version check 1 expects
-                          (default claude-code/vendor/mods-api/claude-code.d.ts)
+  --vendored FILE         the vendored mods API d.ts, whose first line names the version checks 1 and 8
+                          expect; check 8 compares its folder (default claude-code/vendor/mods-api/claude-code.d.ts)
+  --lsappinfo FILE        what check 7 runs (default ${DEFAULTS.lsappinfo})
   --skip-plugin           skip check 5
   --json                  machine-readable output
   -h, --help              this text
@@ -1070,6 +1363,7 @@ const OPTIONS = {
   'info-plist': { type: 'string' },
   'claude-code-root': { type: 'string' },
   vendored: { type: 'string' },
+  lsappinfo: { type: 'string' },
   repo: { type: 'string' },
   'skip-plugin': { type: 'boolean' },
   json: { type: 'boolean' },
@@ -1094,7 +1388,7 @@ export async function main(argv) {
     process.stdout.write(USAGE)
     return 0
   }
-  for (const k of ['sessions', 'records', 'asar', 'info-plist', 'claude-code-root', 'repo', 'vendored']) {
+  for (const k of ['sessions', 'records', 'asar', 'info-plist', 'claude-code-root', 'repo', 'vendored', 'lsappinfo']) {
     if (values[k] === '') {
       process.stderr.write(`recheck: --${k} needs a path\n\n${USAGE}`)
       return 2
@@ -1109,6 +1403,7 @@ export async function main(argv) {
     claudeCodeRoot: p(values['claude-code-root']),
     repo: p(values.repo),
     vendored: p(values.vendored),
+    lsappinfo: p(values.lsappinfo),
     skipPlugin: Boolean(values['skip-plugin']),
   })
   process.stdout.write(values.json ? renderJson(result) : renderTable(result))

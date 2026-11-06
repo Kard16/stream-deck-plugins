@@ -1160,6 +1160,21 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - about 170 lines to cut.
     All fixed.
   - **Checks:** install tests 20/20 (11 before), 44 mutations caught. `status` and `setup --dry-run` ran for real. A real setup waits for another Mac.
+- 2026-11-06, **recheck's gaps, its check of the vendored reference, and the refresh test** (C3, C4 and D2: a build, a review, a fix round):
+  - **recheck: 41 ok, 0 warn, 0 fail** (35 before). The new rows:
+    - **The vendored mods API (C4):** it rebuilds the reference in memory, with refresh.mjs's own reader, from the binary of the version the d.ts's first line names, and compares. A difference warns. A file table it can't read fails.
+    - **The engine:** the registry's status values, and the engine's desktop test and child markers, as strings in its JS. A table it can't read fails.
+    - **The bundle:** how the app sets the desktop entrypoint and host id, in app.asar.
+    - **Seen:** lsappinfo's two answers, read with the deck's patterns, and Claude's bundle id from Info.plist. On an answer it can't read, it prints only the answer's shape, never another app's name.
+  - **The hook's shapes are type-checked, not string-checked.** `plugin-tsc/hook-contract.ts` assigns the deck's exact answers to the engine's types, and reads the five fields the bridge reads. The plugin's tsc then fails when the engine stops taking what the deck sends. The review found that the first version's substring checks failed on harmless refactors and passed a rename.
+  - **refresh.mjs** reads the section from its own layout instead of `otool`, so it doesn't need Xcode's tools, and its output is the same byte for byte. `refresh.test.mjs` tests the reader on a synthetic file table: a wrong offset, a missing or doubled entry, a changed first line.
+  - **The rows of the spec's Appendix A that nothing checked:**
+    - **string checks:** the registry's statuses, the desktop environment, lsappinfo;
+    - **the type check:** the hooks' input and answers;
+    - **smoke-test steps:** the jump's focus, the hook racing the dialog, answering in the app, Deny's interrupt, the rule for asks, the card closing;
+    - **accepted risks:** the records' category rules, a failing `updatedInput`, hooks read at session start, `CLAUDE_CODE_TAGS`, settings `env`.
+    - The mode tool's rows go with mode changes.
+  - **Checks:** tools 280/280 (264 before), 23 mutations caught in the fix round, the plugin's tsc, sync `--check` and its 21 tests. CLAUDE.md's list of what may run outside the repo now names lsappinfo.
 
 ## Progress
 
