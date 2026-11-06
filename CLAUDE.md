@@ -5,7 +5,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 - **Done:** the Lightroom Classic side, 2026-11-01, and its Phase 7, dials on Stream Deck pages and big steps, 2026-11-04. Plan, decisions and progress: `docs/lightroom/plan.md`.
 - **Now:** the Claude Code side, in daily use since 2026-11-03 (Phase 5). Plan, decisions and progress: `docs/claude-code/plan.md`. Design notes: `docs/research/claude-code-extensibility.md`. The user's guide: `claude-code/README.md`.
   - **Phase 7, session keys and dials,** done 2026-11-04, deck 0.4.0, checked live by the user: a key and a dial per session, answering questions, plans and approvals on the dial. Its spec: `docs/claude-code/session-keys.md`.
-  - **Now: Phase 8, efficiency and update resilience,** planned 2026-11-05. Built and committed 2026-11-06: deck 0.5.0 and plugin 0.3.0, live and released. Left are the live smoke test, the reboot and a day of use; the plan's Log says where it stands. It cuts the idle work, makes the setup resilient to Claude app and Claude Code updates, and keeps it easy to maintain. Its spec: `docs/claude-code/hardening.md`. Its session's kickoff: `docs/claude-code/hardening-kickoff.md`.
+  - **Now: Phase 8, efficiency and update resilience,** planned 2026-11-05. Built and committed 2026-11-06: deck 0.5.0 and plugin 0.3.0, live and released. The smoke test passed live the same day. Left are the reboot, a day of use, and the first real `setup`, on the user's work Mac; the plan's Log says where it stands. It cuts the idle work, makes the setup resilient to Claude app and Claude Code updates, and keeps it easy to maintain. Its spec: `docs/claude-code/hardening.md`. Its session's kickoff: `docs/claude-code/hardening-kickoff.md`.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
 ## Rules
@@ -162,6 +162,7 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `node claude-code/install/deck-install.mjs status`: whether the user's sessions get the plugin at HEAD. Exits 0 when installed and current.
 - After a commit to `claude-code/plugin`: `deck-install.mjs release`. Sessions pick it up when they next start. `undo` takes the plugin out of `settings.json`.
 - `deck-install.mjs setup` is for another Mac, from a fresh clone. It refuses here while the deck or the plugin has uncommitted changes, and the commands above are the ones for this Mac. `setup --dry-run` runs only its preflight.
+- The user's other Macs, such as their work MacBook Pro, get a change once the user pushes it and runs `git pull` and `setup` there (`claude-code/README.md`, Keeping another Mac current). After a commit to the deck or the plugin, remind the user.
 - `node --test claude-code/install/test/`
 
 **After a Claude app update** (Phase 8's routine, D1), in this order:

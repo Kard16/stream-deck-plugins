@@ -1251,6 +1251,17 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **7, missing:** every allow and deny went through T's dial, and the Approve and Deny keys were never pressed. The keys' code hasn't changed since Phase 7's live test, and the `approve` and `deny` fixtures press them.
   - **The skew, seen live:** this session, still on plugin 0.2.1, set T's mode. Its old mode hook got `404 POST "/v1/pretool"`, and the change went through.
   - **The user:** "I did the tests and everything looked good", for the steps the log can't show.
+- 2026-11-06, **the user's work Mac** (the fourth goal): the user asked how to install the Claude Code side on a work MacBook Pro that has Claude Code and the Stream Deck app, and how to keep both Macs current.
+  - **GitHub** stopped at 0b6ecaf, 2026-11-01, 41 commits back, with none of the Claude Code side. The user pushed: `0b6ecaf..7a19008`.
+  - **mise refuses a fresh clone:** a copy of `mise.toml` is untrusted, and `mise exec` stops on it until `mise trust` (mise 2026.5.12, tried on a copy in the scratchpad). The README's Setup lacked the step.
+  - **A managed Mac's policy** can keep the deck's parts off, going by Claude Code 2.1.317's settings schema:
+    - `allowManagedHooksOnly` and `disableAllHooks` stop the hook, and `allowManagedModsOnly` the mod;
+    - `allowedHttpHookUrls` must match the hook's URL, and `httpHookAllowedEnvVars` must list `DECK_TOKEN` and `CLAUDE_CODE_HOST_SESSION_ID`;
+    - `disableSideloadFlags` likely drops the whole plugin: it drops inline plugins at load, and the engine loads `CLAUDE_CODE_PLUGIN_DIRS` folders as inline plugins.
+    - Policy files are under `/Library/Application Support/ClaudeCode/` and `/Library/Managed Preferences/`. A policy can also come with the organization's Claude account, which no file shows.
+    - The README's check greps both folders with `-a`, since a plain grep misses a binary plist. Tried on a fake JSON policy and a fake binary plist, and on this Mac, which has none.
+  - **Docs:** the README's Setup gains the clone, the policy check, `mise trust` and a test approval. A new section, "Keeping another Mac current", covers a change, a Claude app update, a Stream Deck app update, taking it off and moving the clone. The update section says which Mac runs the routine. CLAUDE.md's Install says how the other Macs get a change.
+  - **Still to come:** the first real `setup`, on the work Mac.
 
 ## Progress
 
@@ -1302,4 +1313,5 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - 6282cef: mode changes removed. Deck 0.5.0 is live since 05:06:58Z. Plugin 0.3.0 is released; `status` says installed and current, and sessions load it when they next start.
     - 3b782b0: C1, the deck showing a newer Claude Code or an older plugin; C2, the smoke test and its log checker. Live since 05:33:55Z.
   - **The smoke test passed live,** 2026-11-06: 13 of 14 steps by the log, and the user saw the rest. The Approve and Deny keys weren't pressed.
-  - **Still to come:** the reboot (C7), a day of use, and the idle count after it.
+  - **The user's work Mac,** 2026-11-06: the README's Setup now covers a managed Mac, and a new section covers keeping a second Mac current. GitHub has everything to 7a19008, pushed by the user.
+  - **Still to come:** the reboot (C7), a day of use, the idle count after it, and the first real `setup`, on the work Mac.

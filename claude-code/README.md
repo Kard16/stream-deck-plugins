@@ -114,22 +114,37 @@ The target is the session last picked on the Sessions dial, or last jumped to fr
 
 ## Setup
 
-`setup` is for a new Mac, from a clone of this repository. On the Mac where the repository is developed, use the dev commands in [`CLAUDE.md`](../CLAUDE.md) instead.
+`setup` is for a new Mac, from a clone of this repository. On the Mac where the repository is developed, use the dev commands in [`CLAUDE.md`](../CLAUDE.md) instead. To bring a Mac up to date after its setup, see [Keeping another Mac current](#keeping-another-mac-current).
 
 **First:**
 - **The Stream Deck app,** 7.1 or later. Install it, open it once, so it makes its plugins folder, then quit it. setup's restart starts it again, with developer mode on and the link in place: an app already running may not see developer mode until it relaunches.
-- **The Claude app,** signed in, with one session started in its Code tab, so it has a Claude Code of its own.
-- **git and [mise](https://mise.jdx.dev).** mise brings the Node 24 the deck is built with.
+- **The Claude app,** signed in, with one session started in its Code tab, so it has a Claude Code of its own. Claude Code in a terminal isn't enough: only the app's sessions talk to the deck.
+- **git and [mise](https://mise.jdx.dev),** for example `brew install mise`. mise brings the Node 24 the deck is built with.
+- **No Claude Code policy in the way,** on a Mac an employer manages. Managed settings can turn off the plugin's hook or its mod, or keep the plugin from loading. This lists the policy files on the Mac that set any of the settings that can:
+  ```bash
+  grep -r -l -s -a -E 'allowManagedHooksOnly|allowManagedModsOnly|disableAllHooks|allowedHttpHookUrls|httpHookAllowedEnvVars|disableSideloadFlags' "/Library/Application Support/ClaudeCode" "/Library/Managed Preferences"; echo checked
+  ```
+  - **Only `checked`:** none does.
+  - **A file above it:** look in it for those names. `allowedHttpHookUrls` is fine when one of its patterns matches `http://127.0.0.1:47600/v1/permission`, and `httpHookAllowedEnvVars` when it has both `DECK_TOKEN` and `CLAUDE_CODE_HOST_SESSION_ID`.
+  - **A policy that comes with the organization's Claude account** doesn't show here. The test approval under **Then** finds it.
+  - Whatever a policy turns off, the app's own dialogs keep working.
+- **The clone,** in a folder you'll keep, on a path without a `:`. `install` writes the path into `~/.claude/settings.json`, and the Stream Deck app links the deck from there. The repository is private on GitHub, so sign in first, with `gh auth login`, or with a token when git asks for a password:
+  ```bash
+  git clone https://github.com/Kard16/stream-deck-plugins.git ~/Projects/stream-deck-plugins
+  ```
+  - GitHub has only what the Mac where the repository is developed has pushed.
+  - **Without a GitHub sign-in:** run `git bundle create deck.bundle main` on the Mac where the repository is developed, copy the file over, and clone from it. Each update then needs a new bundle.
 
 **Then, from the top of the clone:**
 ```bash
+mise trust
 mise install node
 mise exec node -- node claude-code/install/deck-install.mjs setup
 ```
-Name `node` in both: the Claude Code side needs nothing else, and a bare `mise exec --` would install every tool in `mise.toml`, Lua 5.1.5 built from source included.
+`mise trust` lets mise read the clone's `mise.toml`: it refuses a config file it hasn't been told to trust. Name `node` in the other two: the Claude Code side needs nothing else, and a bare `mise exec --` would install every tool in `mise.toml`, Lua 5.1.5 built from source included.
 
 `setup` prints each step and its result, and stops at the first that fails:
-1. **A preflight** of the list above, and of the clone: `claude-code/deck` and `claude-code/plugin` must be committed, so the build never ships unfinished code. It writes nothing.
+1. **A preflight** of the apps and the Node above, and of the clone: `claude-code/deck` and `claude-code/plugin` must be committed, so the build never ships unfinished code. It writes nothing.
 2. **`npm ci` and `npm run build`** in `claude-code/deck`.
 3. **`streamdeck dev`, `link` and `restart`:** Stream Deck's developer mode, which a linked plugin needs, then the deck plugin. A restart drops a request held on the deck back to the app's dialogs.
 4. **A wait for the deck to start:** its first start makes its token, then its log says "Bridge: listening".
@@ -149,8 +164,10 @@ Run it again after fixing what stopped it. It skips `npm ci` while `node_modules
    grep -E "Bridge: listening|Sessions: HELLO .* plugin" claude-code/deck/com.karimdhanji.claude.sdPlugin/logs/com.karimdhanji.claude.0.log
    ```
    `status` ends with "installed and current" and exits 0. The log has "Bridge: listening on 127.0.0.1:47600", then a "Sessions: HELLO … plugin" line for each session.
-3. **In the Stream Deck app,** place the actions from the **Claude Code** category, as in [The layout](#the-layout).
+3. **In the Stream Deck app,** place the actions from the **Claude Code** category, as in [The layout](#the-layout), or import a profile exported from another Mac. Each Mac keeps its own record of which session is on which slot.
    - **No Claude Code category:** quit and reopen the Stream Deck app.
+4. **Try an approval:** in a session in Manual mode, ask Claude to write a small file. The Approve key shows its request, and a press allows it.
+   - **The app asks and the deck shows nothing:** a policy is the likely cause; see **First**, above. Answer in the app.
 
 ### The release copy
 
@@ -169,6 +186,30 @@ mise exec node -- node claude-code/install/deck-install.mjs status
 chmod 600 ~/.claude/settings.json
 ```
 
+### Keeping another Mac current
+
+Only the Mac where the repository is developed changes it. Another Mac pulls what that Mac pushes, then runs `setup` again.
+
+- **After a change,** once it's committed, released and pushed. On the other Mac, from the top of the clone:
+  ```bash
+  git pull
+  mise exec node -- node claude-code/install/deck-install.mjs setup
+  ```
+  - `setup` skips what's current, then rebuilds and restarts the deck plugin. A request held on the deck at that moment goes back to the app's dialog.
+  - Its release checks a new plugin with that Mac's own Claude Code first, and keeps the old copy if the check fails.
+  - Sessions load a new plugin when they next start.
+  - Don't change files on that Mac: `setup` refuses uncommitted changes in `claude-code/deck` and `claude-code/plugin`.
+- **After a Claude app update:** each Mac's app updates itself, perhaps on different days. Until the routine has run, whatever the deck can't handle falls back to the app's own dialogs.
+  - A session on a Claude Code newer than the one this repository was checked against shows `↑`, in amber, on its Session Slot dial's Setup page.
+  - Run [After a Claude app update](#after-a-claude-app-update) on the Mac where the repository is developed, once it has that version too. Then push, and pull and run `setup` on the other Mac. That clears its `↑`.
+- **After a Stream Deck app update:** usually nothing. If the deck plugin doesn't come back, quit and reopen the Stream Deck app, or run `setup` again.
+- **To take it off a Mac,** from the top of the clone:
+  ```bash
+  mise exec node -- node claude-code/install/deck-install.mjs undo
+  cd claude-code/deck && mise exec node -- npx streamdeck unlink com.karimdhanji.claude
+  ```
+- **To move the clone:** take it off, move the folder, then run `setup` as on a new Mac.
+
 ## When something's off
 
 - **setup's preflight says the Stream Deck app has the deck plugin from another folder,** such as an older clone: `streamdeck link` won't replace it. Take that link out, then run `setup` again. From `claude-code/deck`:
@@ -176,7 +217,7 @@ chmod 600 ~/.claude/settings.json
   mise exec node -- npx streamdeck unlink com.karimdhanji.claude
   ```
 - **A session shows no details,** only working or idle: it started before the install or the last update. Restart it.
-- **The app asks for permission and the Approve key shows nothing:** the deck couldn't confirm which session asked, or the deck restarted while the request was held. Answer in the app; it always works.
+- **The app asks for permission and the Approve key shows nothing:** the deck couldn't confirm which session asked, or the deck restarted while the request was held. On a Mac an employer manages, a Claude Code policy may also keep the hook from running ([Setup](#setup), **First**). Answer in the app; it always works.
 - **After a Stream Deck or Claude app restart, or after sleep,** the deck and the sessions find each other again within seconds. A held request is lost on a deck restart, and its session shows needs you until you answer it in the app.
 - **A slot key shows the wrong session:** open the one you want in the app, then hold the key.
 - **A slot stays empty:** every running session is on another slot. Hold its key to take the one on screen.
@@ -191,11 +232,15 @@ chmod 600 ~/.claude/settings.json
 
 ## After a Claude app update
 
+On the Mac where the repository is developed, a session runs the routine in [`CLAUDE.md`](../CLAUDE.md), "After a Claude app update". Its main check:
+
 ```bash
-mise exec -- node claude-code/tools/recheck.mjs
+mise exec node -- node claude-code/tools/recheck.mjs
 ```
 
 It checks the app internals this relies on: the registry and record fields, the jump route, and the mods API on the newest bundled Claude Code. Then run the ten-minute smoke test, [`docs/claude-code/smoke-test.md`](../docs/claude-code/smoke-test.md), in a throwaway session: it says what to press and the log line that proves each step.
+
+Another Mac runs none of this. Once it's done and pushed, pull and run `setup` there, as in [Keeping another Mac current](#keeping-another-mac-current).
 
 ## Development
 
