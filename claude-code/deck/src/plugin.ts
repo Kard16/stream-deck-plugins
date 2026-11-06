@@ -19,6 +19,7 @@ import { DecisionKeys } from "./keys/decision.js";
 import { SessionKeys } from "./keys/session.js";
 import { lsappinfoCheck } from "./model/front.js";
 import { connectSources } from "./model/sources.js";
+import { VersionCheck, versionFiles } from "./model/versions.js";
 import { SessionsDials } from "./sessions/dials.js";
 import { heldToolOf, othersArt, slotKeyArt } from "./slots/art.js";
 import { SlotDials } from "./slots/dials.js";
@@ -75,6 +76,11 @@ const openSession = (host: string): void => {
 	});
 };
 
+// Drift (hardening.md, C1): each session's hello is held to the repo the deck is linked from, its vendored mods API
+// reference's Claude Code version and its plugin's version. Both are read now, and again when a hello brings a newer one,
+// so a refresh or a release mid-run is seen without a restart.
+const versions = new VersionCheck(versionFiles(pluginDir), { log: scope("Versions") });
+
 // The session model: the registry, the app's records and the bridge, merged by the app's local_ id. Both folders are
 // watched (fs.watch, FSEvents) and read about 50 ms after they change, and every 30 s whatever the watch says. A hook's
 // request or a hello that the latest reading doesn't confirm has the registry read once more at once. The wiring is
@@ -85,7 +91,7 @@ const { registry, records, model } = connectSources({
 	registryDir: REGISTRY_DIR,
 	recordsDir: RECORDS_DIR,
 	logs: { registry: scope("Registry"), records: scope("Records"), sessions: scope("Sessions") },
-	model: { front: lsappinfoCheck({ log: scope("Front") }) },
+	model: { front: lsappinfoCheck({ log: scope("Front") }), versions },
 });
 
 // The bridge on 127.0.0.1:47600.

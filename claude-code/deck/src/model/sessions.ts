@@ -33,6 +33,7 @@ import { QuietLog } from "../util/quiet-log.js";
 import { projectName } from "./format.js";
 import { type FrontCheck, FrontWatcher } from "./front.js";
 import { type SessionState, type SessionStatus, sessionState } from "./status.js";
+import { asVersion, type VersionCheck } from "./versions.js";
 
 /**
  * What a session waits on (session-keys.md, What each session shows): `approval`, a held `tool` request; `question`,
@@ -61,6 +62,13 @@ export type SessionView = {
 	mode: string | null;
 	/** The session has a current mod instance, which only a hello makes so, to take prompts. */
 	plugin: boolean;
+	/**
+	 * Its Claude Code version, x.y.z, as the hello of a current mod instance last gave it; null before one, and when it
+	 * gave `unknown` or anything else that isn't x.y.z. A session's Setup page shows it (slots/strip.ts).
+	 */
+	cc: string | null;
+	/** `cc` is newer than the Claude Code version the repo was checked against (VersionCheck's `newer`), which the Setup page marks. */
+	ccNewer: boolean;
 	/** False for a picked target whose registry file has gone, which has ended, and for a slotted session that isn't running. */
 	listed: boolean;
 	/**
@@ -150,6 +158,8 @@ type BridgeSession = {
 	/** The last `seq` seen, per instance. */
 	lastSeq: Map<string, number>;
 	cwd: string | null;
+	/** Its Claude Code version, x.y.z, from the latest hello that counted (#greet); null without one (SessionView's `cc`). */
+	cc: string | null;
 	/**
 	 * The latest from hello, `settings` events and PermissionRequests, each over the app's record. A hello counts for
 	 * less: the current instance's said again gives only the model, and none replaces a mode or effort from a
@@ -248,6 +258,11 @@ export type SessionModelOptions = {
 	 * end is seen only by an attach, the record's `lastFocusedAt` or a press.
 	 */
 	front?: FrontCheck;
+	/**
+	 * What each hello that counts is held to: the Claude Code version the repo was checked against, and its plugin's
+	 * (versions.ts, hardening.md C1). It logs the drift, and says which sessions' versions are newer. Without it, none is.
+	 */
+	versions?: VersionCheck;
 };
 
 /**
@@ -309,12 +324,14 @@ export class SessionModel implements BridgeRoutes {
 	readonly #front: FrontWatcher | null;
 	/** What on the deck shows `seen` now (the slot keys, the Others keys): the front-app check runs only while one does. */
 	readonly #seenShown = new Set<object>();
+	readonly #versions: VersionCheck | null;
 
 	constructor(opts: SessionModelOptions = {}) {
 		this.#log = opts.log ?? nullLog;
 		this.#clock = opts.clock ?? realClock;
 		this.#wallNow = opts.wallNow ?? Date.now;
 		this.#rescan = opts.rescan ?? null;
+		this.#versions = opts.versions ?? null;
 		this.#refusals = new QuietLog(this.#log, { clock: this.#clock });
 		this.#noHellos = new QuietLog(this.#log, { clock: this.#clock });
 		this.held = new HeldRequests({ log: this.#log });
@@ -913,6 +930,15 @@ export class SessionModel implements BridgeRoutes {
 		}
 		if (h.cwd) b.cwd = h.cwd;
 		if (h.model) b.settings.model = h.model;
+		// Its Claude Code version, and the drift, held to the repo's, before the emit below builds the views afresh
+		// (hardening.md, C1). Only a hello that counts: a replaced instance's may be an older process's. A throw there
+		// mustn't cost the hello.
+		b.cc = asVersion(h.cc);
+		try {
+			this.#versions?.hello(b.host, h.cc, h.plugin);
+		} catch (err) {
+			this.#log.error(`checking ${b.host}'s versions threw: ${describeError(err)}`);
+		}
 		if (current === "again") {
 			// The current instance's hello, said again, as after every rejected fetch (each Deny, each Esc): its mode and
 			// effort are what the mod has already sent or queued as `settings`, while the deck may since have taken a
@@ -1092,6 +1118,7 @@ export class SessionModel implements BridgeRoutes {
 				noHelloFrom: null,
 				lastSeq: new Map(),
 				cwd: null,
+				cc: null,
 				settings: { model: null, mode: null, effort: null },
 				from: { mode: null, effort: null },
 				turn: null,
@@ -1171,6 +1198,8 @@ export class SessionModel implements BridgeRoutes {
 			effort: b?.settings.effort ?? rec?.effort ?? null,
 			mode: b?.settings.mode ?? rec?.permissionMode ?? null,
 			plugin: (b?.inst ?? null) !== null,
+			cc: b?.cc ?? null,
+			ccNewer: this.#versions?.newer(b?.cc ?? null) ?? false,
 			listed: true,
 			running: true,
 			need: needOf(state, oldest),
@@ -1322,6 +1351,8 @@ function notRunning(key: string, title: string): SessionView {
 		effort: null,
 		mode: null,
 		plugin: false,
+		cc: null,
+		ccNewer: false,
 		listed: false,
 		running: false,
 		need: null,

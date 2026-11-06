@@ -46,7 +46,7 @@ Each dial belongs to the session on the key above it, and its strip shows what d
 **With nothing to answer,** the strip has three pages, and the dots say which:
 1. **Now:** what it's doing, or how its last turn ended, then the app's last summary, or what the app says it needs.
 2. **Context:** the context %, with its bar, the tokens, and the cost so far.
-3. **Setup:** model and effort, mode, and project.
+3. **Setup:** model and effort; the mode and the session's Claude Code version; and the project. A version newer than the one this repo was checked against ends in ↑, with the line in amber: run the routine after an update (`CLAUDE.md`).
 
 Turn to page. Press or tap to jump to the session. Long-touch goes back to the first page.
 
@@ -195,7 +195,7 @@ chmod 600 ~/.claude/settings.json
 mise exec -- node claude-code/tools/recheck.mjs
 ```
 
-It checks the app internals this relies on: the registry and record fields, the jump route, and the mods API on the newest bundled Claude Code. Then try one jump and one approval on the deck.
+It checks the app internals this relies on: the registry and record fields, the jump route, and the mods API on the newest bundled Claude Code. Then run the ten-minute smoke test, [`docs/claude-code/smoke-test.md`](../docs/claude-code/smoke-test.md), in a throwaway session: it says what to press and the log line that proves each step.
 
 ## Development
 

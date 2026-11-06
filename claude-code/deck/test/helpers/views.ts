@@ -14,6 +14,8 @@ export function view(fields: Partial<SessionView> = {}): SessionView {
 		effort: null,
 		mode: null,
 		plugin: true,
+		cc: null,
+		ccNewer: false,
 		listed: true,
 		running: true,
 		need: null,

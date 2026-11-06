@@ -8,6 +8,7 @@ Tools for testing the two Claude Code side plugins against fakes, ladder steps 4
 | `fake-claude.mjs` | Plays the plugin side of the fixtures against a bridge, standing in for Claude Code's hooks and the mod at once: `--against-fake` or `--interactive` (step 5). |
 | `recheck.mjs` | After a Claude app update: whether the undocumented internals the deck and the plugin rely on still hold (Phase 6), the app's and the bundled engine's. Read only. |
 | `idle-report.mjs` | What the Claude deck did while idle, from its log, per minute and in total, and with `--live` from `top` too (Phase 8, A1). Read only. |
+| `smoke-check.mjs` | After the live smoke test, `docs/claude-code/smoke-test.md`: whether the deck's log has the line that proves each of its steps, and the lines to look at (Phase 8, C2). Read only. |
 | `lib/protocol.mjs` | The protocol's constants and answers, which routes are Claude Code's and which the mod's, and its fingerprint and summary: the reference implementation's own, imported from `claude-code/protocol/make-fixtures.mjs`. |
 | `lib/fixtures.mjs` | Reads and checks the fixtures and `vectors.json`. |
 | `lib/match.mjs` | PROTOCOL.md's matching rules: partial objects, `*`, arrays, query parameters, `at` ignored, the exact match an Answer or an Approve plan needs, and binding of command ids and insts. |
@@ -172,7 +173,7 @@ mise exec -- node claude-code/tools/recheck.mjs --help   # each check: what it r
 
 It re-checks what the plan's Log found in S0–S5 and the deck relies on, in eight checks, one row each: `ok`, `warn` or `fail`, with a reason. It exits 0 when no check fails and 1 when one does (2 for a usage error). `--help` describes each check, and the specs and comments in `recheck.mjs` say why. It's read only: it never opens the registry's `.key` files or a transcript, never reads the deck's token, and prints field names and counts, never a value from the registry or the records, nor another app's name.
 
-It finds strings, not behaviour. The PermissionRequest hook's input and the deck's answers are held to the engine's own declarations by the plugin's type check instead (`claude-code/plugin-tsc/hook-contract.ts`), and the engine's rules by the smoke test (`docs/claude-code/hardening.md`, C2). `claude-code/vendor/refresh.mjs`, whose reader check 8 uses, is tested in `test/refresh.test.mjs` on small synthetic file tables (`test/bun-table.mjs`).
+It finds strings, not behaviour. The PermissionRequest hook's input and the deck's answers are held to the engine's own declarations by the plugin's type check instead (`claude-code/plugin-tsc/hook-contract.ts`), and the engine's rules by the smoke test (`docs/claude-code/smoke-test.md`, with `smoke-check.mjs` below). `claude-code/vendor/refresh.mjs`, whose reader check 8 uses, is tested in `test/refresh.test.mjs` on small synthetic file tables (`test/bun-table.mjs`).
 
 ## Measuring the deck's idle work: idle-report.mjs
 
@@ -197,6 +198,23 @@ It reports what the Claude deck did, per minute and in total, for `docs/claude-c
 - **The window:** `--since` runs to the log's last line, `--last N` is the N minutes before now, and with neither the whole log is reported. The log's times, and the report's, are UTC.
 
 It's read only: it reads the log, runs `ps` and `top`, and writes nothing. It exits 0 when it reported, 1 when the log can't be read or `--live` finds no deck, and 2 for a usage error.
+
+## After the smoke test: smoke-check.mjs
+
+```sh
+mise exec -- node claude-code/tools/smoke-check.mjs --since 2026-11-06T05:00:00Z --host local_…   # a table
+mise exec -- node claude-code/tools/smoke-check.mjs --since 2026-11-06T05:00:00Z --host local_… --json
+```
+
+It checks the deck's log for `docs/claude-code/smoke-test.md`, the live test after each update (`docs/claude-code/hardening.md`, C2), from `--since` to the log's end.
+- **Each of the 14 steps** reads `ok` or `missing`, with the lines that prove it, as `claude-code/deck/src` writes them, or why not. A step can take more than one line: a jump is its `jump … via …` line, `Jump: opened … in N ms`, then the session's `EVENT … attach` within 5 s, which says the app showed it; a Deny is its `ANSWER` and the turn's `EVENT … turn.end`, with no other call or request between.
+- **`--host`** is the throwaway session: only its lines prove a step. Step 1's can be any session's, since the stopped session a jump starts is often the user's own.
+- **It follows the deck's ids:** `ANSWER #n` and `RELEASED #n` belong to the latest `HELD #n`, as ids start at 1 again when the deck restarts, and a Saved Prompt's `cN` to its `QUEUED cN`. A session is running from a hello the registry listed until its `ENDED` or the deck's restart; a dying mod's hello, which the registry doesn't list, doesn't count. Lines before `--since` give that context, but prove nothing.
+- **What only the user can say** is listed under "ask the user": the app's dialog beside a held request, the cards closing, the window coming to the front, and the version on the strip.
+- **The watch list** is the whole deck's: each `RELEASED … (rule 2)`, a wrong release while the app's dialog is still up, flagged when its session reads needs-you within 5 s with nothing held; and every warn and error line, its first line only.
+- **The logs:** by default the deck's newest, `com.karimdhanji.claude.0.log`, and the older ones in its folder back to `--since`, as the SDK starts a new one each time the deck starts. `--log FILE` reads that one only. Steps 2, 8, 10 and 12 need the deck at debug, and with no debug line in the window it says so.
+
+It's read only: it reads the logs and the vendored mods API's first line, and writes nothing. It exits 0 when every step's proof is there, 1 when one is missing or the log can't be read, and 2 for a usage error.
 
 ## The fake bridge's control routes
 

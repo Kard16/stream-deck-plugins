@@ -1269,7 +1269,7 @@ hold (docs/claude-code/plan.md, Phase 6): one row per check, ok, warn or fail, w
 
 The PermissionRequest hook's input and answers are held to the engine's declarations by the plugin's
 type check (claude-code/plugin-tsc/hook-contract.ts), not here. Checks 4 and 6 find strings, not
-behaviour: after an update, also run the smoke test (docs/claude-code/hardening.md, C2).
+behaviour: after an update, also run the smoke test (docs/claude-code/smoke-test.md).
 
 Read only: it writes nothing outside a temp folder it removes, never opens the registry's .key files or
 a transcript, never reads the deck's token, and prints field names and counts, never a value from the

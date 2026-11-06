@@ -1226,6 +1226,17 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - tools 273/273; recheck 39 ok, 0 warn, 0 fail;
     - install 20/20;
     - the plugin's tsc, sync `--check` and its 15 tests, `plugin validate`, `plugin test` 155/155.
+  - **Committed** as 6282cef. Plugin 0.3.0 is released, and `status` says installed and current. The two running sessions kept 0.2.1, with no reload, as the installer says.
+- 2026-11-06, **Wave 3: drift on the deck (C1), the smoke test (C2), and the routine's pointers (D1):**
+  - **C1:** the deck reads two versions from the repo: the Claude Code version on the vendored reference's first line, and the plugin's in its plugin.json. It reads both at startup, and again when a hello brings a newer one.
+    - **A newer Claude Code:** one info line per version a run (`Versions: Claude Code <v> in <host>: newer than …`). Its session's Setup page reads `<mode> mode · <version> ↑`, in amber. An equal version shows in grey.
+    - **An older plugin:** one line per session. Live at 05:33:55Z, both running sessions: `runs plugin 0.2.1, older than 0.3.0 in the repo: it loads the new one when it next starts`.
+    - **Checks:** deck 514/514 (503 before), also with the clock shifted; 31 mutations caught; validate. Live since 05:33:55Z, restarted with nothing held.
+  - **C2:** `docs/claude-code/smoke-test.md` is 14 steps in a throwaway session, each with the deck log line that proves it.
+    - `tools/smoke-check.mjs --since … --host …` finds those lines, and lists every rule-2 release and every warn.
+    - Five things show only on screen, and the doc says "you see it" for them.
+    - Tools 284/284 (273 before), 12 mutations caught.
+  - **D1:** the routine is in CLAUDE.md (Wave 2's entry). The README's update section and recheck's help now point at the smoke test.
 
 ## Progress
 
@@ -1269,4 +1280,11 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [ ] Phase 8: efficiency and update resilience. Started 2026-11-05; the spec is `docs/claude-code/hardening.md`, and the Log's last entries say where it stands.
   - The idle counters are built and live, and the baseline is measured (A1), 2026-11-06.
   - The questions round is answered. A fourth goal, deploying to the user's other Macs, is in.
-  - Still to come: waves 1–3 and their checks, the smoke test live, the reboot (C7), and a day of use.
+  - **Committed, 2026-11-06:**
+    - 64d2e71: the counters and the baseline;
+    - b19a2c3: setup on other Macs;
+    - d1121bc: recheck's gaps, its check of the vendored reference, and the refresh test;
+    - 672c50e: the idle fixes, which meet the target;
+    - 6282cef: mode changes removed. Deck 0.5.0 is live since 05:06:58Z. Plugin 0.3.0 is released; `status` says installed and current, and sessions load it when they next start.
+  - **Wave 3, building:** C1, the deck flagging a newer Claude Code or an older plugin; C2, the smoke test and its log checker.
+  - **Still to come:** the smoke test live, the reboot (C7), a day of use, and the idle count after it.

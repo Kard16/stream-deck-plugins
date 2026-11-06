@@ -12,7 +12,7 @@ import { APPROVAL_CHOICES, PLAN_CHOICES, type QuestionItem, SlotDials, type Slot
 import { dialSlotId } from "../src/slots/ids.js";
 import { Slots } from "../src/slots/slots.js";
 import { MemorySlotStore } from "../src/slots/store.js";
-import { nowLine, pageDots, SLOT_LAYOUTS, SLOT_STRIP_COLORS, SLOT_TEXT, type SlotScreenKind, slotStrip } from "../src/slots/strip.js";
+import { NEWER_MARK, nowLine, pageDots, SLOT_LAYOUTS, SLOT_STRIP_COLORS, SLOT_TEXT, type SlotScreenKind, slotStrip } from "../src/slots/strip.js";
 import type { Feedback } from "../src/util/painter.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { deckRoot } from "./helpers/paths.js";
@@ -133,6 +133,14 @@ function screens(): [string, SlotScreen][] {
 	const waiting = view({ status: "needs-you", need: "question", since: NOW - 4 * 60_000 });
 	const plan = view({ status: "needs-you", need: "plan", since: NOW - 65_000 });
 	const approve = view({ status: "approval", need: "approval", since: NOW - 12_000 });
+	// The Setup page's Claude Code version (hardening.md, C1): on the checked one, and newer, with modes short and long.
+	const onSetup = { model: "claude-opus-5-5", effort: "max", project: "stream-deck-plugins" } as const;
+	const checked = view({ ...onSetup, mode: "auto", cc: "2.1.317", ccNewer: false });
+	const newer = view({ ...onSetup, mode: "auto", cc: "2.1.318", ccNewer: true });
+	const newerEdits = view({ ...onSetup, mode: "acceptEdits", cc: "2.1.318", ccNewer: true });
+	const checkedEdits = view({ ...onSetup, mode: "acceptEdits", cc: "2.1.317", ccNewer: false });
+	const newerNoMode = view({ ...onSetup, mode: null, cc: "2.1.318", ccNewer: true });
+	const newerLongMode = view({ ...onSetup, mode: "someFutureModeWithALongName", cc: "2.1.318", ccNewer: true });
 	const options = (picked: string[] = []): QuestionItem[] => [
 		{ t: "option", label: "Red", description: "Warm", ticked: picked.includes("Red") },
 		{ t: "option", label: "Blue", description: null, ticked: picked.includes("Blue") },
@@ -160,7 +168,21 @@ function screens(): [string, SlotScreen][] {
 		...fields,
 	});
 	const out: [string, SlotScreen][] = [["empty", { kind: "empty", slot: SLOT }]];
-	for (const [name, s] of [["working", working], ["done", done], ["blank", blank], ["input", input], ["not running", off], ["high context", high]] as const) {
+	const sessions = [
+		["working", working],
+		["done", done],
+		["blank", blank],
+		["input", input],
+		["not running", off],
+		["high context", high],
+		["checked", checked],
+		["newer", newer],
+		["newer accept edits", newerEdits],
+		["checked accept edits", checkedEdits],
+		["newer no mode", newerNoMode],
+		["newer long mode", newerLongMode],
+	] as const;
+	for (const [name, s] of sessions) {
 		for (let page = 0; page < 3; page++) out.push([`pages ${name} ${page}`, { kind: "pages", slot: SLOT, session: s, page, pages: 3 }]);
 	}
 	for (const pick of [null, 0, 1]) out.push([`approval pick ${pick}`, { kind: "approval", slot: SLOT, session: approve, request: 1, tool: "Bash", summary: "rm -rf build && npm run build && npm test -- --test-name-pattern=slot", choices: APPROVAL_CHOICES, pick }]);
@@ -248,6 +270,28 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		assert.deepEqual(strings(off, "name", "line1", "line2"), ["Yesterday's ses…", "Not running", "Press to open it"]);
 		assert.equal((off.name as { color: string }).color, SLOT_STRIP_COLORS.dim);
 		assert.deepEqual(strings(strip("pages not running 2"), "line1", "line2", "line3"), ["Haiku 5.5 · low", "Manual mode", "notes"]);
+	});
+
+	test("the Setup page: the mode, then the session's Claude Code version, marked and amber when it's newer than the repo was checked against; none without one (hardening.md, C1)", () => {
+		const all = new Map(screens());
+		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
+		const { caption, needsYou } = SLOT_STRIP_COLORS;
+		assert.deepEqual(strip("pages checked 2").line2, { value: "Auto mode · 2.1.317", color: caption });
+		assert.deepEqual(strip("pages newer 2").line2, { value: `Auto mode · 2.1.318 ${NEWER_MARK}`, color: needsYou });
+		assert.equal(NEWER_MARK, "↑");
+		// The version stays whole on a line too long for it: the word "mode" goes first, then the mode's name is cut.
+		assert.deepEqual(strip("pages newer accept edits 2").line2, { value: "Accept edits · 2.1.318 ↑", color: needsYou });
+		assert.equal(value(strip("pages checked accept edits 2"), "line2"), "Accept edits · 2.1.317");
+		assert.equal(value(strip("pages newer long mode 2"), "line2"), "someFutureM… · 2.1.318 ↑");
+		assert.equal(value(strip("pages newer no mode 2"), "line2"), "Mode — · 2.1.318 ↑");
+		// The rest of the page is as it was.
+		assert.deepEqual(strings(strip("pages newer 2"), "line1", "line3"), ["Opus 5.5 · max", "stream-deck-plugins"]);
+		// No version from the session's hello: the mode alone, as before.
+		assert.deepEqual(strip("pages working 2").line2, { value: "Accept edits mode", color: caption });
+		assert.deepEqual(strip("pages blank 2").line2, { value: "Mode —", color: caption });
+		assert.deepEqual(strip("pages not running 2").line2, { value: "Manual mode", color: caption });
+		// The other pages send the second line's colour too, so the Setup page's amber doesn't stay on the strip after a turn.
+		for (const page of [0, 1]) assert.equal((strip(`pages newer ${page}`).line2 as { color?: string }).color, caption, `page ${page}`);
 	});
 
 	test("the Now line for each status", () => {

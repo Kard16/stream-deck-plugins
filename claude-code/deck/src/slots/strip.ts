@@ -157,13 +157,37 @@ export function nowLine(s: SessionView, now: number): { value: string; color: st
 	}
 }
 
+/** What marks a session's Claude Code version on its Setup page when it's newer than the one the repo was checked against. */
+export const NEWER_MARK = "↑";
+
+/**
+ * The Setup page's second line: the mode, then the session's Claude Code version when its hello gave one, marked with
+ * NEWER_MARK, and the line in amber, when it's newer than the one the repo was checked against (hardening.md, C1):
+ * `Auto mode · 2.1.318 ↑`. The version stays whole: on a line too long for its item, the word "mode" goes first
+ * (`Accept edits · 2.1.318 ↑`), then the mode's name is cut.
+ */
+function modeLine(s: SessionView): Text {
+	const c = SLOT_STRIP_COLORS;
+	const name = s.mode === null ? null : modeName(s.mode);
+	const mode = name === null ? "Mode —" : `${name} mode`;
+	if (s.cc === null) return text("pages", "line2", mode, { color: c.caption });
+	const tail = ` · ${s.cc}${s.ccNewer ? ` ${NEWER_MARK}` : ""}`;
+	const [width, size] = SLOT_TEXT.pages.line2;
+	const room = fits(size, width) - tail.length;
+	const head = mode.length <= room || name === null ? mode : clip(name, Math.max(1, room));
+	return text("pages", "line2", `${head}${tail}`, { color: s.ccNewer ? c.needsYou : c.caption });
+}
+
 /**
  * The pages, while the session needs nothing the dial can answer (session-keys.md, The strip): the title and the page
  * dots on each, then
  * 1. Now: what it's doing or how its last turn ended; then what the app says it needs, while it needs input, else the
  *    last summary, on up to two lines;
  * 2. Context: `Context 62%` with its bar, `620k of 1M tokens`, `Cost $1.24`;
- * 3. Setup: model and effort, mode, project.
+ * 3. Setup: model and effort; mode, and the Claude Code version when the session's hello gave one (modeLine); project.
+ *
+ * The second line has its colour on every page, since the Setup page's can be amber, and the strip keeps a colour it
+ * isn't sent again.
  */
 function pagesStrip(s: SessionView, page: number, pages: number, now: number): Feedback {
 	const c = SLOT_STRIP_COLORS;
@@ -173,7 +197,7 @@ function pagesStrip(s: SessionView, page: number, pages: number, now: number): F
 		return {
 			...head,
 			line1: text("pages", "line1", pct === null ? "Context —" : `Context ${pct}%`, { color: c.title }),
-			line2: text("pages", "line2", tokensText(s.tokens, s.window) ?? ""),
+			line2: text("pages", "line2", tokensText(s.tokens, s.window) ?? "", { color: c.caption }),
 			line3: text("pages", "line3", costText(s.cost) === null ? "" : `Cost ${costText(s.cost)}`),
 			bar: contextBar(pct, true),
 		};
@@ -183,7 +207,7 @@ function pagesStrip(s: SessionView, page: number, pages: number, now: number): F
 		return {
 			...head,
 			line1: text("pages", "line1", known ? modelAndEffort(s.model, s.effort) : "Model —", { color: c.title }),
-			line2: text("pages", "line2", s.mode === null ? "Mode —" : `${modeName(s.mode)} mode`),
+			line2: modeLine(s),
 			line3: text("pages", "line3", s.project ?? ""),
 			bar: contextBar(pct, false),
 		};
@@ -191,7 +215,7 @@ function pagesStrip(s: SessionView, page: number, pages: number, now: number): F
 	const first = nowLine(s, now);
 	const note = s.need === "input" && s.needs !== null ? s.needs : s.summary;
 	const [l2 = "", l3 = ""] = lines("pages", "line2", !s.running && note === null ? "Press to open it" : note, 2);
-	return { ...head, line1: text("pages", "line1", first.value, { color: first.color }), line2: { value: l2 }, line3: { value: l3 }, bar: contextBar(pct, false) };
+	return { ...head, line1: text("pages", "line1", first.value, { color: first.color }), line2: { value: l2, color: c.caption }, line3: { value: l3 }, bar: contextBar(pct, false) };
 }
 
 /** An approval: `Allow Bash?`, its command or file on up to two lines, and the Allow and Deny chips. */
