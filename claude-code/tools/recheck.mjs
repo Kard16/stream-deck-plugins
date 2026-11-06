@@ -3,7 +3,7 @@
 // still hold (docs/claude-code/plan.md, Phase 6; what each one is and how it was found is in the plan's Log,
 // S0–S5). Six checks:
 // 1. Versions: the app's, from its Info.plist, and the Claude Code versions it bundles. It warns when the newest
-//    isn't CHECKED_CC_VERSION, the one claude-code/vendor/mods-api-2.1.309/ and these checks are for.
+//    isn't CHECKED_CC_VERSION, the one claude-code/vendor/mods-api/ was made from (the first line of its d.ts).
 // 2. The session registry, ~/.claude/sessions/*.json: every field the deck reads (REGISTRY_FIELDS), by type.
 // 3. The app's session records, claude-code-sessions/<account>/<org>/local_*.json: the same (RECORD_FIELDS),
 //    and whether each running session's record is found by its id, as the deck finds it.
@@ -41,10 +41,34 @@ export const DEFAULTS = Object.freeze({
   infoPlist: path.join(APP, 'Contents', 'Info.plist'),
   claudeCodeRoot: path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code'),
   repo: REPO,
+  /** The vendored mods API reference, which claude-code/vendor/refresh.mjs makes from a bundled Claude Code. */
+  vendored: path.join(REPO, 'claude-code', 'vendor', 'mods-api', 'claude-code.d.ts'),
 })
 
-/** The Claude Code version the vendored mods API reference (claude-code/vendor/mods-api-2.1.309/) and these checks are for. */
-export const CHECKED_CC_VERSION = '2.1.309'
+export const VENDORED_DTS = DEFAULTS.vendored
+
+/**
+ * The Claude Code version the vendored mods API reference and these checks are for: the one its declarations' first
+ * line names (`// Written by Claude Code <version>.`), so a refresh moves it and nothing else has to. Null when the
+ * file is missing or its first line says no version, which check 1 reports.
+ */
+export function vendoredVersion(file = VENDORED_DTS) {
+  let head
+  try {
+    const fd = fs.openSync(file, 'r')
+    try {
+      const buf = Buffer.alloc(80)
+      head = buf.subarray(0, fs.readSync(fd, buf, 0, 80, 0)).toString('utf8').split('\n', 1)[0]
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+  return /^\/\/ Written by Claude Code (\d+\.\d+\.\d+)\.$/.exec(head)?.[1] ?? null
+}
+
+export const CHECKED_CC_VERSION = vendoredVersion()
 /** The app version the Log's findings were made on (docs/claude-code/plan.md, kickoff and S5). */
 export const FINDINGS_APP_VERSION = '4.4212.0'
 /** The plugin check 5 runs on, from the repository's HEAD. */
@@ -445,7 +469,7 @@ export async function readAppVersion(file, { fs: fsys = nodeFs } = {}) {
   return v ? printable(v, 40) : null
 }
 
-export async function checkVersions({ infoPlist = DEFAULTS.infoPlist, claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs: fsys = nodeFs } = {}) {
+export async function checkVersions({ infoPlist = DEFAULTS.infoPlist, claudeCodeRoot = DEFAULTS.claudeCodeRoot, checkedVersion = CHECKED_CC_VERSION, fs: fsys = nodeFs } = {}) {
   const G = 'versions'
   const rows = []
   try {
@@ -460,13 +484,14 @@ export async function checkVersions({ infoPlist = DEFAULTS.infoPlist, claudeCode
   }
 
   const cc = await findClaudeCode(claudeCodeRoot, { fs: fsys })
-  const details = { versions: cc.versions, newest: cc.newest, binary: cc.binary, checkedVersion: CHECKED_CC_VERSION }
+  const details = { versions: cc.versions, newest: cc.newest, binary: cc.binary, checkedVersion }
   if (cc.error) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'fail', `can't list ${tilde(claudeCodeRoot)}: ${cc.error}`, details))
   else if (cc.newest === null) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'fail', `no version folder in ${tilde(claudeCodeRoot)}`, details))
+  else if (checkedVersion === null) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'fail', `${cc.newest} bundled, but claude-code/vendor/mods-api/claude-code.d.ts is missing or its first line names no version: run claude-code/vendor/refresh.mjs`, details))
   else {
     const others = cc.versions.length === 1 ? 'the only one' : `the newest of ${cc.versions.join(', ')}`
-    if (cc.newest === CHECKED_CC_VERSION) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'ok', `${cc.newest}, ${others}: the version the vendored mods API and these checks are for`, details))
-    else rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'warn', `${cc.newest}, ${others}; the vendored mods API (claude-code/vendor/mods-api-${CHECKED_CC_VERSION}/), CLAUDE.md's commands and these checks are for ${CHECKED_CC_VERSION}`, details))
+    if (cc.newest === checkedVersion) rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'ok', `${cc.newest}, ${others}: the version the vendored mods API and these checks are for`, details))
+    else rows.push(row(G, 'versions.claude-code', 'bundled Claude Code', 'warn', `${cc.newest}, ${others}; the vendored mods API (claude-code/vendor/mods-api/) and these checks are for ${checkedVersion}: run claude-code/vendor/refresh.mjs, then the plugin's type check and this again`, details))
   }
   return rows
 }
@@ -966,7 +991,7 @@ export async function checkEngine({ claudeCodeRoot = DEFAULTS.claudeCodeRoot, fs
 export async function recheck({ skipPlugin = false, fs: fsys = nodeFs, tmpRoot, timeoutMs, ...overrides } = {}) {
   const paths = { ...DEFAULTS, ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)) }
   const checks = []
-  checks.push(...(await checkVersions({ infoPlist: paths.infoPlist, claudeCodeRoot: paths.claudeCodeRoot, fs: fsys })))
+  checks.push(...(await checkVersions({ infoPlist: paths.infoPlist, claudeCodeRoot: paths.claudeCodeRoot, checkedVersion: vendoredVersion(paths.vendored), fs: fsys })))
   const registry = await checkRegistry(paths.sessions, { fs: fsys })
   checks.push(...registry.rows)
   checks.push(...(await checkRecords(paths.records, registry.hosts, { fs: fsys })))
@@ -1029,6 +1054,8 @@ from the registry or the records.
   --info-plist FILE       the app's Info.plist (default ${DEFAULTS.infoPlist})
   --claude-code-root DIR  the bundled Claude Code versions (default ${tilde(DEFAULTS.claudeCodeRoot)})
   --repo DIR              the repository whose HEAD's ${PLUGIN_PATH} check 5 runs on (default this one)
+  --vendored FILE         the vendored mods API d.ts, whose first line names the version check 1 expects
+                          (default claude-code/vendor/mods-api/claude-code.d.ts)
   --skip-plugin           skip check 5
   --json                  machine-readable output
   -h, --help              this text
@@ -1042,6 +1069,7 @@ const OPTIONS = {
   asar: { type: 'string' },
   'info-plist': { type: 'string' },
   'claude-code-root': { type: 'string' },
+  vendored: { type: 'string' },
   repo: { type: 'string' },
   'skip-plugin': { type: 'boolean' },
   json: { type: 'boolean' },
@@ -1066,7 +1094,7 @@ export async function main(argv) {
     process.stdout.write(USAGE)
     return 0
   }
-  for (const k of ['sessions', 'records', 'asar', 'info-plist', 'claude-code-root', 'repo']) {
+  for (const k of ['sessions', 'records', 'asar', 'info-plist', 'claude-code-root', 'repo', 'vendored']) {
     if (values[k] === '') {
       process.stderr.write(`recheck: --${k} needs a path\n\n${USAGE}`)
       return 2
@@ -1080,6 +1108,7 @@ export async function main(argv) {
     infoPlist: p(values['info-plist']),
     claudeCodeRoot: p(values['claude-code-root']),
     repo: p(values.repo),
+    vendored: p(values.vendored),
     skipPlugin: Boolean(values['skip-plugin']),
   })
   process.stdout.write(values.json ? renderJson(result) : renderTable(result))

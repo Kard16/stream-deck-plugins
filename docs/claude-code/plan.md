@@ -998,6 +998,20 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Long press:** with a session of the user's newly opened, holding the 4th key put it there in place of T5. Holding it again with T5 on screen put T5 back. A swap between two slots wasn't tried live; unit tests cover it.
   - **One brief state:** after a hook answer, the deck shows needs-you for about 0.2 s, until the registry leaves `waiting`. It was there before Phase 7, and nobody noticed it.
   - The user: "All worked".
+- 2026-11-05, **the repo follows the app's Claude Code, 2.1.317** (at the user's word, after Phase 7's commit):
+  - **The vendored reference** moved from `claude-code/vendor/mods-api-2.1.309/` to `claude-code/vendor/mods-api/`, rebuilt from 2.1.317's binary. Its version is the first line of `claude-code.d.ts`.
+  - **`claude-code/vendor/refresh.mjs`** does that in one command. It reads the binary's `__BUN,__bun` file table, read only, and never loads the skill.
+    - On 2.1.309 it gives the old vendored copy back, byte for byte. The d.ts matches to its line 16,972; 2.1.309 had appended the built-in tools' input types after that.
+    - On 2.1.317, its d.ts is the very file the engine wrote beside the plugin.
+    - Between the two versions, `reference.md` and the d.ts changed: about 6,000 lines, mostly new calls and wording. The examples didn't change.
+  - **`recheck.mjs`** takes the version it expects from that first line, with a `--vendored FILE` option for its tests, and fails when the line is missing.
+  - **`deck-install.mjs release`** validates with the newest bundled Claude Code, found by version and build folder, where it had hard-coded 2.1.309's build path. It gained `--claude-code-root`.
+  - **Checks:**
+    - The mod type-checks against 2.1.317's declarations; `plugin validate` passes and `plugin test` is 159 of 159.
+    - Tools 256 of 256, install 11 of 11.
+    - `recheck.mjs`: 35 ok, 0 warn, 0 fail.
+    - Two mutations of the installer's lookup were each caught.
+  - CLAUDE.md, PROTOCOL.md's Parties and the tools README say how a refresh goes.
 
 ## Progress
 
@@ -1028,7 +1042,8 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - The guide is `claude-code/README.md`.
   - Round 4 committed (86054e1) and live: deck 0.3.2; the plugin is unchanged, so 0.2.1 stays released.
   - The overnight scope is done. The user's checklist is in the Log's last entries; item 9 is answered, and deck 0.3.3 does it.
-  - Still to come: a reboot (macOS 26's localhost delay), the next Claude app update with recheck, and a day of real use.
+  - The Claude app's update to Claude Code 2.1.317 (2026-11-03) was found on 2026-11-04, and rechecked 35 ok on 2026-11-05 after the vendored reference was refreshed.
+  - Still to come: a reboot (macOS 26's localhost delay), and a day of real use.
 - [ ] Phase 7: session keys and dials. Started 2026-11-04; the spec is `docs/claude-code/session-keys.md`, and the Log's last entries say where it stands.
   - Spikes T5 and T6: questions and plans can be answered from the deck.
   - Contract: PROTOCOL.md's amendment "2026-11-04, session keys", 26 fixtures.

@@ -186,6 +186,7 @@ function fixture(t, { sessions = 3, version = '4.4212.0', cc = ['2.1.309'] } = {
     asar: path.join(root, 'app.asar'),
     infoPlist: path.join(root, 'Info.plist'),
     claudeCodeRoot: path.join(root, 'cc'),
+    vendored: path.join(root, 'vendored.d.ts'),
     tmp: path.join(root, 'tmp'),
   }
   for (const d of [f.sessions, f.orgDir, f.claudeCodeRoot, f.tmp]) fs.mkdirSync(d, { recursive: true })
@@ -196,12 +197,13 @@ function fixture(t, { sessions = 3, version = '4.4212.0', cc = ['2.1.309'] } = {
   }
   fs.writeFileSync(f.asar, asarWith())
   fs.writeFileSync(f.infoPlist, plist(version))
+  fs.writeFileSync(f.vendored, '// Written by Claude Code 2.1.309.\n// Claude Code function hooks\n')
   for (const v of cc) fakeClaude(f, v)
   return f
 }
 
 const paths = (f) => ({ sessions: f.sessions, records: f.records, asar: f.asar, infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot })
-const flags = (f) => ['--sessions', f.sessions, '--records', f.records, '--asar', f.asar, '--info-plist', f.infoPlist, '--claude-code-root', f.claudeCodeRoot]
+const flags = (f) => ['--sessions', f.sessions, '--records', f.records, '--asar', f.asar, '--info-plist', f.infoPlist, '--claude-code-root', f.claudeCodeRoot, '--vendored', f.vendored]
 const byId = (rows, id) => rows.find((r) => r.id === id) ?? assert.fail(`no row ${id} in ${rows.map((r) => r.id).join(', ')}`)
 const statuses = (rows) => Object.fromEntries(rows.map((r) => [r.id, r.status]))
 const tailOf = (row) => row.details.tail.join('\n')
@@ -230,7 +232,7 @@ function cli(args, { env = {}, timeoutMs = 30_000 } = {}) {
 
 test('recheck: versions are ok with 2.1.309 alone, warn when a newer Claude Code is bundled, and fail with none or no app version', async (t) => {
   const f = fixture(t)
-  let rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot })
+  let rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: '2.1.309' })
   assert.deepEqual(statuses(rows), { 'versions.app': 'ok', 'versions.claude-code': 'ok' })
   assert.equal(byId(rows, 'versions.app').reason, "Claude.app 4.4212.0, the version the Log's findings were made on")
   assert.match(byId(rows, 'versions.claude-code').reason, /^2\.1\.309, the only one: /)
@@ -239,7 +241,7 @@ test('recheck: versions are ok with 2.1.309 alone, warn when a newer Claude Code
   fs.writeFileSync(f.infoPlist, plist('4.5000.1'))
   execFileSync('plutil', ['-convert', 'binary1', f.infoPlist])
   assert.equal(fs.readFileSync(f.infoPlist).subarray(0, 6).toString('latin1'), 'bplist')
-  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot })
+  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: '2.1.309' })
   assert.equal(byId(rows, 'versions.app').status, 'ok')
   assert.match(byId(rows, 'versions.app').reason, /^Claude\.app 4\.5000\.1; the Log's findings were made on 4\.4212\.0/)
 
@@ -247,10 +249,10 @@ test('recheck: versions are ok with 2.1.309 alone, warn when a newer Claude Code
   fakeClaude(f, '2.1.400')
   fs.mkdirSync(path.join(f.claudeCodeRoot, '2.1.40'))
   fs.mkdirSync(path.join(f.claudeCodeRoot, 'not-a-version'))
-  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot })
+  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: '2.1.309' })
   const cc = byId(rows, 'versions.claude-code')
   assert.equal(cc.status, 'warn')
-  assert.match(cc.reason, /^2\.1\.400, the newest of 2\.1\.40, 2\.1\.309, 2\.1\.400; the vendored mods API \(claude-code\/vendor\/mods-api-2\.1\.309\/\)/)
+  assert.match(cc.reason, /^2\.1\.400, the newest of 2\.1\.40, 2\.1\.309, 2\.1\.400; the vendored mods API \(claude-code\/vendor\/mods-api\/\) and these checks are for 2\.1\.309: run claude-code\/vendor\/refresh\.mjs/)
   assert.deepEqual(cc.details.versions, ['2.1.40', '2.1.309', '2.1.400'])
   assert.equal(cc.details.binary, path.join(f.claudeCodeRoot, '2.1.400', 'abc123def456', 'claude.app', 'Contents', 'MacOS', 'claude'))
 
@@ -258,14 +260,34 @@ test('recheck: versions are ok with 2.1.309 alone, warn when a newer Claude Code
   fs.rmSync(f.infoPlist)
   fs.rmSync(f.claudeCodeRoot, { recursive: true })
   fs.mkdirSync(f.claudeCodeRoot)
-  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot })
+  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: '2.1.309' })
   assert.deepEqual(statuses(rows), { 'versions.app': 'fail', 'versions.claude-code': 'fail' })
   assert.match(byId(rows, 'versions.app').reason, /^can't read .*Info\.plist: ENOENT$/)
   assert.match(byId(rows, 'versions.claude-code').reason, /^no version folder in /)
   fs.writeFileSync(f.infoPlist, plist(null))
-  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: path.join(f.root, 'nowhere') })
+  rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: path.join(f.root, 'nowhere'), checkedVersion: '2.1.309' })
   assert.match(byId(rows, 'versions.app').reason, /^no CFBundleShortVersionString in /)
   assert.match(byId(rows, 'versions.claude-code').reason, /^can't list .*nowhere: ENOENT$/)
+})
+
+test('recheck: the checked version is the one the vendored d.ts names on its first line, and check 1 fails without one', async (t) => {
+  const f = fixture(t)
+  const file = path.join(f.root, 'probe.d.ts')
+  fs.writeFileSync(file, '// Written by Claude Code 2.1.400.\n// Claude Code function hooks\n')
+  assert.equal(R.vendoredVersion(file), '2.1.400')
+  for (const head of ['// Claude Code function hooks\n', '// Written by Claude Code 2.1.400\n', '// Written by Claude Code two.\n', '']) {
+    fs.writeFileSync(file, head)
+    assert.equal(R.vendoredVersion(file), null, JSON.stringify(head))
+  }
+  assert.equal(R.vendoredVersion(path.join(f.root, 'missing.d.ts')), null)
+
+  // The repository's own: CHECKED_CC_VERSION is what its first line says, so a refresh moves it.
+  const first = fs.readFileSync(R.VENDORED_DTS, 'utf8').split('\n', 1)[0]
+  assert.equal(first, `// Written by Claude Code ${R.CHECKED_CC_VERSION}.`)
+
+  const rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: null })
+  assert.equal(byId(rows, 'versions.claude-code').status, 'fail')
+  assert.match(byId(rows, 'versions.claude-code').reason, /^2\.1\.309 bundled, but claude-code\/vendor\/mods-api\/claude-code\.d\.ts is missing or its first line names no version: run claude-code\/vendor\/refresh\.mjs$/)
 })
 
 test('recheck: versions sort by number, not by text', () => {

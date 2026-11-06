@@ -80,7 +80,7 @@ const NEVER_SENT = Object.freeze(['updatedPermissions', 'updatedInput'])
 /**
  * What Claude Code reads at the top of any hook's answer: `continue: false` stops the session and
  * `stopReason` says why, `decision: "block"` with a `reason` blocks the event (ClassicResult in
- * claude-code/vendor/mods-api-2.1.309/claude-code.d.ts), and `systemMessage` and `suppressOutput` show and
+ * claude-code/vendor/mods-api/claude-code.d.ts), and `systemMessage` and `suppressOutput` show and
  * hide text. None of PROTOCOL.md's answers has any of them.
  */
 const HOOK_FIELDS = Object.freeze(['continue', 'stopReason', 'decision', 'reason', 'systemMessage', 'suppressOutput'])

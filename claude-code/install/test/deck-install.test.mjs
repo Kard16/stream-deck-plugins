@@ -11,6 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import * as DI from '../deck-install.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SCRIPT = path.resolve(HERE, '..', 'deck-install.mjs')
@@ -442,6 +443,43 @@ test("release refuses uncommitted changes in claude-code/plugin, and copies only
   assert.equal(info.version, '0.1.0')
   assert.ok(Math.abs(Date.parse(info.time) - Date.now()) < 60_000, info.time)
   assert.equal(new Date(info.time).toISOString(), info.time, 'an ISO time')
+})
+
+test('release validates with the newest Claude Code the app bundles, found by version and build, unless --claude names one', async (t) => {
+  const f = fixture(t)
+  const root = path.join(f.root, 'claude-code')
+  const bin = fakeClaude(f, { code: 0 })
+  const build = (version, name, { executable = true } = {}) => {
+    const file = path.join(root, version, name, 'claude.app', 'Contents', 'MacOS', 'claude')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.copyFileSync(bin, file)
+    fs.chmodSync(file, executable ? 0o755 : 0o644)
+    return file
+  }
+
+  // No version folder, or none with an executable build: refused, and the copy isn't made.
+  fs.mkdirSync(root)
+  let r = await expectCode(f, ['release', '--claude-code-root', root], 1)
+  assert.match(r.err, /no Claude Code to validate with: no version folder in .*claude-code\. Pass --claude FILE/)
+  build('2.1.400', 'abc', { executable: false })
+  r = await expectCode(f, ['release', '--claude-code-root', root], 1)
+  assert.match(r.err, /no executable claude in .*2\.1\.400\/\*\/claude\.app\/Contents\/MacOS\//)
+  assert.equal(fs.existsSync(f.copy), false)
+  assert.equal(calls(f).length, 0)
+
+  // By number, 2.1.400 is the newest of 2.1.40, 2.1.309 and 2.1.400, and its executable build is the one used.
+  build('2.1.40', 'old')
+  build('2.1.309', 'mid')
+  const newest = build('2.1.400', 'def')
+  fs.mkdirSync(path.join(root, 'not-a-version'))
+  r = await expectCode(f, ['release', '--claude-code-root', root], 0)
+  assert.match(r.out, /^ {2}plugin validate \(Claude Code 2\.1\.400\): passed$/m)
+  assert.deepEqual(DI.newestClaudeCode(root), { version: '2.1.400', binary: newest })
+  assert.equal(calls(f).length, 1)
+
+  // --claude wins over the folder.
+  r = await expectCode(f, ['release', '--claude', bin, '--claude-code-root', path.join(f.root, 'nowhere')], 0)
+  assert.match(r.out, /^ {2}plugin validate \(.*bin\/claude\): passed$/m)
 })
 
 test('release keeps the previous copy when plugin validate fails, and swaps when it passes', async (t) => {

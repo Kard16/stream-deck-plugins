@@ -14,7 +14,8 @@
 //    a folder it loads left out), whether both keys hold the right values, whether CLAUDE_CODE_PLUGIN_DIR_WATCH is in
 //    env, and whether claude-code/plugin has uncommitted changes. It exits 0 when installed and current.
 // 2. release, only from a clean claude-code/plugin: HEAD's copy through `git archive | tar -x` into a temp folder in
-//    the release folder, then the app's Claude Code 2.1.309 `plugin validate` on it, with only PATH and a fresh HOME,
+//    the release folder, then `plugin validate` on it from the newest Claude Code the app bundles, which new desktop
+//    sessions run (newestClaudeCode), with only PATH and a fresh HOME,
 //    TMPDIR and CLAUDE_CONFIG_DIR, as recheck.mjs runs it. Only if that passes is the copy swapped in. RELEASE.json
 //    goes beside it, and what changed from the previous copy is printed.
 // 3. install, given a current copy: backs up settings.json (claude-code/release/backups/, 0600), then sets both keys,
@@ -53,15 +54,61 @@ export const WATCH_KEY = 'CLAUDE_CODE_PLUGIN_DIR_WATCH'
 /** 32 random bytes as lowercase hex (claude-code/deck/src/bridge/token.ts). The deck replaces a file holding anything else when it starts. */
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/
 
-/** The Claude Code the desktop sessions run, and so the one a release is validated with (CLAUDE.md). */
-export const CC_VERSION = '2.1.309'
 const VALIDATE_TIMEOUT_MS = 120_000
 
 export const DEFAULTS = Object.freeze({
   settings: path.join(HOME, '.claude', 'settings.json'),
   repo: REPO,
-  claude: path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code', CC_VERSION, '5af865b9901c', 'claude.app', 'Contents', 'MacOS', 'claude'),
+  /** Where the app keeps the Claude Code versions it bundles: `<root>/<version>/<build>/claude.app/Contents/MacOS/claude`. */
+  claudeCodeRoot: path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code'),
 })
+
+const VERSION_DIR = /^\d+\.\d+\.\d+$/
+
+/** Numeric order of dotted versions: 2.1.40 < 2.1.309 < 2.10.0. */
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+/**
+ * The newest Claude Code the app bundles under `root`, which new desktop sessions run, and so the one a release is
+ * validated with: `{version, binary}`, where `binary` is that version's most recently changed executable build, or
+ * null when it has none. Null when `root` has no version folder or can't be read. recheck.mjs's findClaudeCode reads
+ * the folder the same way, so no version or build folder is written down anywhere to go stale.
+ */
+export function newestClaudeCode(root = DEFAULTS.claudeCodeRoot) {
+  let names
+  try {
+    names = fs.readdirSync(root)
+  } catch {
+    return null
+  }
+  const versions = names.filter((n) => VERSION_DIR.test(n) && fs.statSync(path.join(root, n), { throwIfNoEntry: false })?.isDirectory()).sort(compareVersions)
+  const version = versions.at(-1)
+  if (version === undefined) return null
+  let binary = null
+  let latest = -Infinity
+  let builds = []
+  try {
+    builds = fs.readdirSync(path.join(root, version))
+  } catch {}
+  for (const build of builds) {
+    if (build.startsWith('.')) continue
+    const file = path.join(root, version, build, 'claude.app', 'Contents', 'MacOS', 'claude')
+    const st = fs.statSync(file, { throwIfNoEntry: false })
+    if (st?.isFile() && (st.mode & 0o111) !== 0 && st.mtimeMs > latest) {
+      latest = st.mtimeMs
+      binary = file
+    }
+  }
+  return { version, binary }
+}
 
 /** Temp folders and child processes, so an interrupted run can still remove and stop them. */
 const temps = new Set()
@@ -158,7 +205,7 @@ function ignoredIn(repo, rels) {
 
 /**
  * What the engine writes into a plugin folder it loads, which a copy from git never holds: the mods API's declarations
- * in .claude-plugin/types/ and a tsconfig.json at the root that extends them (claude-code/vendor/mods-api-2.1.309/reference.md).
+ * in .claude-plugin/types/ and a tsconfig.json at the root that extends them (claude-code/vendor/mods-api/reference.md).
  */
 export const engineWritten = (rel) => rel === 'tsconfig.json' || rel === '.claude-plugin/types' || rel.startsWith('.claude-plugin/types/')
 
@@ -633,8 +680,12 @@ export async function release(o, log) {
     log(`release: ${PLUGIN_PATH} at ${short(commit)}, ${printable(m.name ?? '(no name)', 60)} ${printable(m.version ?? '(no version)', 40)}`)
     if (o.skipValidate) log('  plugin validate: skipped (--skip-validate)')
     else {
-      const who = o.claude === DEFAULTS.claude ? `Claude Code ${CC_VERSION}` : tilde(o.claude)
-      const v = await validate(o.claude, fresh)
+      const cc = o.claude !== null ? { version: null, binary: o.claude } : newestClaudeCode(o.claudeCodeRoot)
+      if (cc === null || cc.binary === null) {
+        refuse(`no Claude Code to validate with: ${cc === null ? `no version folder in ${tilde(o.claudeCodeRoot)}` : `no executable claude in ${tilde(path.join(o.claudeCodeRoot, cc.version))}/*/claude.app/Contents/MacOS/`}. Pass --claude FILE, so the release copy stays as it was`)
+      }
+      const who = cc.version !== null ? `Claude Code ${cc.version}` : tilde(cc.binary)
+      const v = await validate(cc.binary, fresh)
       if (!v.ok) refuse(`plugin validate (${who}) ${v.why}, so the release copy stays as it was${v.tail.length ? `:\n${v.tail.map((l) => `    ${l}`).join('\n')}` : ''}`)
       log(`  plugin validate (${who}): passed`)
     }
@@ -770,8 +821,8 @@ New sessions pick a change up when they start; running ones only once they resta
            whether ${WATCH_KEY} is in env, and whether ${PLUGIN_PATH} has
            uncommitted changes. Exits 0 when installed and current, 1 otherwise.
   release  refuses uncommitted changes in ${PLUGIN_PATH}. Copies it from HEAD into the release
-           folder, runs the app's Claude Code ${CC_VERSION} \`plugin validate\` on the copy, and only if
-           that passes swaps it in as ${PLUGIN_NAME}/, with ${RELEASE_FILE} beside it.
+           folder, runs \`plugin validate\` on the copy from the newest Claude Code the app bundles, and
+           only if that passes swaps it in as ${PLUGIN_NAME}/, with ${RELEASE_FILE} beside it.
   install  needs a current release copy. Backs up settings.json (backups/ in the release folder,
            0600), then sets ${DIRS_KEY} and ${TOKEN_KEY} in env.
   undo     backs up settings.json, then removes both keys, and env when that leaves it empty.
@@ -780,7 +831,10 @@ New sessions pick a change up when they start; running ones only once they resta
   --token-file FILE   the deck's token (default <repo>/${TOKEN_PATH})
   --release-dir DIR   the release folder (default <repo>/${RELEASE_PATH})
   --repo DIR          the repository whose HEAD is released (default this one)
-  --claude FILE       the Claude Code binary release validates with (default the app's ${CC_VERSION})
+  --claude FILE       the Claude Code binary release validates with (default the newest the app
+                      bundles, found in --claude-code-root)
+  --claude-code-root DIR
+                      the app's bundled Claude Code versions (default ${tilde(DEFAULTS.claudeCodeRoot)})
   --skip-validate     release without \`plugin validate\`
   --force             install over another ${DIRS_KEY}; install or undo on a settings.json
                       a rewrite changes elsewhere (the backup keeps the original)
@@ -796,6 +850,7 @@ const OPTIONS = {
   'release-dir': { type: 'string' },
   repo: { type: 'string' },
   claude: { type: 'string' },
+  'claude-code-root': { type: 'string' },
   'skip-validate': { type: 'boolean' },
   force: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
@@ -811,7 +866,8 @@ export function resolveOptions(values) {
     tokenFile: path.resolve(values['token-file'] ?? path.join(repo, TOKEN_PATH)),
     releaseDir,
     copy: path.join(releaseDir, PLUGIN_NAME),
-    claude: path.resolve(values.claude ?? DEFAULTS.claude),
+    claude: values.claude === undefined ? null : path.resolve(values.claude),
+    claudeCodeRoot: path.resolve(values['claude-code-root'] ?? DEFAULTS.claudeCodeRoot),
     skipValidate: Boolean(values['skip-validate']),
     force: Boolean(values.force),
   }

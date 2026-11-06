@@ -10,7 +10,7 @@ Contents: [Parties](#parties) · [Transport](#transport) · [Identity](#identity
 
 - **The permission hook:** an `http` PermissionRequest hook in the plugin's `hooks/hooks.json`. Claude Code posts the hook's input and waits for the answer, while the app shows its own dialog beside it. The first answer wins (S2).
 - **The mode hook:** an `http` PreToolUse hook in the same `hooks/hooks.json`, matched to the app's mode tool alone. Claude Code posts the hook's input before the tool's permission check, the auto-mode classifier included, and waits for the answer ([Mode checks](#mode-checks)).
-- **The mod:** the plugin's `hooks/register.ts`, one instance per session, on the mods API of the app's Claude Code 2.1.309. It says hello, reports events, and fetches and runs the deck's commands.
+- **The mod:** the plugin's `hooks/register.ts`, one instance per session, on the mods API of the app's Claude Code (2.1.317 since 2026-11-03; `claude-code/vendor/mods-api/` is its reference). It says hello, reports events, and fetches and runs the deck's commands.
 - **The bridge:** the HTTP server inside the deck plugin.
 - **The deck:** the rest of the deck plugin. It merges what the bridge hears with the session registry and the app's session records ([The deck's session model](#the-decks-session-model)).
 

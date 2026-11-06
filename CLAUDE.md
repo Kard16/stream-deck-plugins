@@ -101,10 +101,11 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 
 ## Claude Code plugin (hooks and a mod)
 
-**Versions:** desktop sessions run the app's own Claude Code 2.1.309, from `~/Library/Application Support/Claude/claude-code/2.1.309/`; the `claude` on PATH is 2.1.312. Check the plugin with the app's version.
+**Versions:** new desktop sessions run the newest Claude Code the app bundles, under `~/Library/Application Support/Claude/claude-code/<version>/<build>/`: 2.1.317 since 2026-11-03. Running sessions keep the version they started on. The `claude` on PATH is 2.1.312. Check the plugin with the app's version.
 
 **Mods API**
-- The reference is `claude-code/vendor/mods-api-2.1.309/`: `claude-code.d.ts` declares every event and every call on `$`, with examples (grep it), and `reference.md` covers loading, testing and failures. It's early access and changes between releases.
+- The reference is `claude-code/vendor/mods-api/`. Its version is on the first line of `claude-code.d.ts`, which declares every event and every call on `$`, with examples (grep it). `reference.md` covers loading, testing and failures. It's early access and changes between releases.
+- **After a Claude app update,** `node claude-code/vendor/refresh.mjs` rebuilds the reference from the newest bundled binary, without loading the skill. Then run the plugin's type check and `recheck.mjs`. recheck warns until the reference matches the newest bundled version, and `deck-install.mjs release` validates with the newest on its own.
 - A mod has no Node and no DOM. It reaches everything through `$`: `$.http.fetch`, `$.clock`, `$.process`, `$.env`, `$.session`, `$.prompt`.
 - Don't load the plugin-authoring skill: it arms the session's mods folder. Read the vendored copy instead.
 
@@ -143,7 +144,7 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `npx streamdeck validate com.karimdhanji.lightroom.sdPlugin`
 - The plugin is linked, and Stream Deck's developer mode is on (`npx streamdeck dev`). A linked plugin doesn't start without developer mode.
 
-**Claude Code plugin** (from the repo root; `CC` is the app's binary, `$HOME/Library/Application Support/Claude/claude-code/2.1.309/5af865b9901c/claude.app/Contents/MacOS/claude`)
+**Claude Code plugin** (from the repo root; `CC` is the newest bundled binary, `$HOME/Library/Application Support/Claude/claude-code/2.1.317/91184d3d9ba3/claude.app/Contents/MacOS/claude` since 2026-11-03; `recheck.mjs --json` names it in `details.binary` after an update)
 - Run every `claude` or `"$CC"` command with `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`: the install puts both in this session's environment, and they would load the release copy too.
 - `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`
 - `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`. Put `perl -e 'alarm 180; exec @ARGV'` before `"$CC"` for `plugin test`: the test kit has no time limit of its own, and a mod that retries at once can hang it.

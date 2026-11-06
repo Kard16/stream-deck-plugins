@@ -10,7 +10,7 @@
 // the plugin weren't loaded). The bridge starts on the first hook to run, normally session.start, and its hello
 // runs detached, so the session's start and first prompt never wait for it.
 //
-// API: Claude Code 2.1.309's mods API, early access (claude-code/vendor/mods-api-2.1.309/claude-code.d.ts). The
+// API: the app's Claude Code's mods API, early access (claude-code/vendor/mods-api/claude-code.d.ts). The
 // engine reads `$` off the source and won't load a module that stores it or hands it to a method, so adapter()
 // wraps the calls this plugin makes in closures, and the rest of the plugin never sees `$`.
 

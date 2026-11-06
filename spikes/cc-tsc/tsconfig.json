@@ -14,6 +14,6 @@
     "jsxFactory": "h",
     "jsxFragmentFactory": "Fragment"
   },
-  "files": ["../../claude-code/vendor/mods-api-2.1.309/claude-code.d.ts"],
+  "files": ["../../claude-code/vendor/mods-api/claude-code.d.ts"],
   "include": ["../cc-plugin/hooks/**/*.ts", "../cc-plugin/tests/**/*.ts"]
 }

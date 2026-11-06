@@ -164,7 +164,7 @@ mise exec -- node claude-code/tools/recheck.mjs --json   # the same, for machine
 ```
 
 It re-checks what the plan's Log found in S0–S5 and the deck relies on, one row per check: `ok`, `warn` or `fail`, with a reason. It exits 0 when no check fails and 1 when one does (2 for a usage error).
-- **Versions:** the app's, and the Claude Code versions it bundles. It warns when the newest isn't 2.1.309, the one `claude-code/vendor/mods-api-2.1.309/` and these checks are for.
+- **Versions:** the app's, and the Claude Code versions it bundles. It warns when the newest isn't the version `claude-code/vendor/mods-api/` was made from (the first line of its `claude-code.d.ts`), and so these checks are for.
 - **The registry:** each field the deck reads, by type, over the running sessions.
 - **The app's records:** the same, and whether each running session's record is found by its host, as the deck finds it.
 - **app.asar:** the jump route, the needs-input route, the `local_` id pattern, the mode tool, and the record loader's summary fields with its `is_noteworthy` check, which status rule 6 relies on: the loader keeps a summary only when each of `["title","description","status_category","status_detail","recent_action","needs_action","summarizes_uuid"]` is missing or a string, and `is_noteworthy` missing or a boolean. The `is_noteworthy` check counts only within 2048 bytes after that list, where the loader has it (523 bytes after it in app 4.4212.0): the app's other summary validator has the same words 14 MB on, and would still have them were the loader to stop checking. So a check that moves away from the list fails too, for a look. The records' `postTurnSummary` row counts a summary the loader drops as one, the way rule 6 reads it.
