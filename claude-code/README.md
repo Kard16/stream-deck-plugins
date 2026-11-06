@@ -58,6 +58,8 @@ Turn to page. Press or tap to jump to the session. Long-touch goes back to the f
 - **Plan:** **✓ Auto**, **✓ Accept edits** or **✓ Manual** approves the plan and leaves Plan mode into that mode. **✗ Reject** stops the turn, so you can say in the app what to change. The whole plan is in the app.
 - **Answer in app:** a question or plan the deck can't read, or one too big for it. A press jumps.
 
+**When the dial answers first, the app's own question or plan card closes by itself.**
+
 **A press sends only what the strip has shown you:** the request, once it has been there for a second, and your pick, once it has shown for a moment, about 0.3 s. So a quick double press, or a tick just before the press, can't send something you didn't see. Otherwise the strip alerts and sends nothing, and the second starts again. A press for a request just answered somewhere else, in the app or on the Approve or Deny key, alerts too: whichever answers first wins.
 
 ## Other Sessions

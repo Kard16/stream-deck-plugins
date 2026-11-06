@@ -1,6 +1,6 @@
 # Claude Code build plan
 
-**Status:** Phase 7, session keys and dials, started 2026-11-04 at the user's word, and live on deck 0.4.0 the same day; its spec is `docs/claude-code/session-keys.md`. Phase 5's day of use and Phase 4's step 11 are still open. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
+**Status:** Phase 7, session keys and dials, is done and live on deck 0.4.0 (2026-11-04); its spec is `docs/claude-code/session-keys.md`. Next is Phase 8, efficiency and update resilience, planned 2026-11-05: its spec is `docs/claude-code/hardening.md`, and its session starts from `docs/claude-code/hardening-kickoff.md`. Phase 5's day of use and Phase 4's step 11 are still open. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -239,6 +239,28 @@ The user's revision after a day of use, 2026-11-04. The spec, with the user's an
 - The dial under each key belongs to its session. The strip pages through details, and the dial answers the session's questions, plans and approvals.
 - An Others key counts the sessions off the keys that need the user.
 - Verified by: the deck's checks and the new fixtures, then the user on the hardware with a throwaway session that asks a question, a plan and an approval.
+- Done 2026-11-04, committed as `00c7622`, and checked live by the user.
+
+### Phase 8: efficiency and update resilience (only when the user says so)
+
+Planned 2026-11-05, after the user asked how a press flows through the system and where it is inefficient, fragile or not future-proof. The spec, with the user's words, the questions for them, the workstreams and the facts they rest on, is `docs/claude-code/hardening.md`. Its session starts from `docs/claude-code/hardening-kickoff.md`.
+- **Measure first:** the idle baseline, before any change and after each workstream.
+- **Idle work:**
+  - mod copies that aren't the current one, polling once a second;
+  - a model emit on every poll;
+  - the two once-a-second file scans;
+  - the "seen" check's process spawns.
+- **Resilience:**
+  - catching a newer Claude Code the day it lands;
+  - a ten-minute live smoke test after each update;
+  - recheck's gaps;
+  - what a hung deck does to the hooks;
+  - the reboot still open from Phase 6.
+- **Maintenance:**
+  - one routine after an update;
+  - a test for `vendor/refresh.mjs`;
+  - pruning features the user doesn't use.
+- Verified by: every check as now, a mutation per new rule, the idle numbers against the target the user agrees, the smoke test live, and a day of use.
 
 ## Human-only steps
 
@@ -1012,6 +1034,14 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - `recheck.mjs`: 35 ok, 0 warn, 0 fail.
     - Two mutations of the installer's lookup were each caught.
   - CLAUDE.md, PROTOCOL.md's Parties and the tools README say how a refresh goes.
+- 2026-11-05, **Phase 7 closed, and Phase 8 planned:**
+  - **Card close:** the user saw the app's question and plan cards close by themselves when the dial answered T7. That was the last thing not seen live, and session-keys.md and the README now say so.
+  - **Archived:** the main thread archived Deck test T5, T6 and T7 at the user's word.
+  - **The user's question** was how a press flows from the deck into Claude Code and back, and where that is inefficient, fragile or not future-proof.
+    - A read-only map of the code gave every timer, poll, fallback and dependency with its file and line.
+    - The main thread's answer named, in order of worth: idle polling from mod copies that aren't current, an emit on every poll, the two once-a-second file scans, and the "seen" spawns.
+    - It named as failure points: app updates breaking undocumented internals, version skew between running sessions, a hung deck holding hooks until their timeout, and the port and token.
+  - **The handover,** at the user's word: `docs/claude-code/hardening.md` is Phase 8's spec, and `docs/claude-code/hardening-kickoff.md` is its session's kickoff. CLAUDE.md names both.
 
 ## Progress
 
@@ -1044,10 +1074,13 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - The overnight scope is done. The user's checklist is in the Log's last entries; item 9 is answered, and deck 0.3.3 does it.
   - The Claude app's update to Claude Code 2.1.317 (2026-11-03) was found on 2026-11-04, and rechecked 35 ok on 2026-11-05 after the vendored reference was refreshed.
   - Still to come: a reboot (macOS 26's localhost delay), and a day of real use.
-- [ ] Phase 7: session keys and dials. Started 2026-11-04; the spec is `docs/claude-code/session-keys.md`, and the Log's last entries say where it stands.
+- [x] Phase 7: session keys and dials, 2026-11-04. The spec is `docs/claude-code/session-keys.md`.
   - Spikes T5 and T6: questions and plans can be answered from the deck.
   - Contract: PROTOCOL.md's amendment "2026-11-04, session keys", 26 fixtures.
   - Built and reviewed: deck 0.4.0 and the tools, with the main thread's checks passing.
   - Live with the user, 2026-11-04: a question, a plan and an approval answered on the dial, plus slots, seen, jumps and the long press. The user: "All worked".
-  - Still to come: a commit and the plugin's `release`, archiving T5, T6 and T7, and a swap between two slots, tried live.
+  - Committed (00c7622) and released, 2026-11-04. Only `tests/fixtures.gen.ts` changed in the release copy, and `status` says installed and current.
+  - The app's cards close when the dial answers, seen by the user. T5, T6 and T7 archived, 2026-11-05.
+  - Left for Phase 8's smoke test: a swap between two slots, tried live.
+- [ ] Phase 8: efficiency and update resilience. Planned 2026-11-05: the spec is `docs/claude-code/hardening.md`, and its session starts from `docs/claude-code/hardening-kickoff.md`.
   - Still to come: the build, its checks, and the live run with the user. The plugin's code is unchanged.

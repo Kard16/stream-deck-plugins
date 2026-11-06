@@ -38,7 +38,7 @@ Spike `spikes/cc-ask/`: a stand-in for `/v1/permission` on 127.0.0.1:47610 and a
   - With no `setMode`, it went back to the mode it had before Plan mode.
 - **A Deny without `interrupt`, with feedback,** kept T6 planning. It wrote a plan file and asked again with the feedback's change.
 - **ExitPlanMode's `tool_input`** is `{}` when Claude wrote no plan file, and `{plan, planFilePath}` when it did. There are no `permission_suggestions` either way.
-- **Not seen yet:** the app's cards closing when the hook answers first. The engine cancels the app's request and the registry left `waiting` each time. The user glances at it once.
+- **Seen live, 2026-11-05:** the app's question and plan cards close by themselves when the dial answers first. The engine cancels the app's request, and the registry leaves `waiting` (T7; the user watched).
 
 ## The layout
 
