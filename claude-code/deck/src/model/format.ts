@@ -1,3 +1,4 @@
+import type { ThreadAgent, ThreadRun, Threads } from "../protocol/wire.js";
 import type { SessionStatus } from "./status.js";
 
 /** The app's names for the modes, as its own picker shows them. */
@@ -42,24 +43,11 @@ export function modelAndEffort(model: string | null, effort: string | null): str
 	return `${modelName(model)} · ${effortName(effort)}`;
 }
 
-const STATUS_LABELS: Record<SessionStatus, string> = {
-	approval: "approval",
-	"needs-you": "needs you",
-	working: "working",
-	failed: "failed",
-	interrupted: "interrupted",
-	done: "done",
-	idle: "idle",
-};
-
-export function statusLabel(status: SessionStatus): string {
-	return STATUS_LABELS[status];
-}
-
-/** Status colours, shared by the strips and the keys. */
+/** Status colours, for the slot strips' Now page. Background is blue like working (agents-and-wake.md, B2). */
 export const STATUS_COLORS: Record<SessionStatus, string> = {
 	approval: "#F2994A",
 	"needs-you": "#F2C94C",
+	background: "#4A9EFF",
 	working: "#4A9EFF",
 	failed: "#EB5757",
 	interrupted: "#E0A43A",
@@ -67,13 +55,8 @@ export const STATUS_COLORS: Record<SessionStatus, string> = {
 	idle: "#A7ADB8",
 };
 
-/** The colour for a session that has ended (a picked target whose registry file went). */
+/** The colour for a slotted session that isn't running: its process has stopped. */
 export const ENDED_COLOR = "#6A707A";
-
-/** "working: notes.md" while a tool runs, else the status alone. */
-export function statusLine(status: SessionStatus, doing: string | null): string {
-	return status === "working" && doing ? `working: ${doing}` : statusLabel(status);
-}
 
 /**
  * How long ago `since` was, as the keys and strips show it: `30s`, `4m`, `2h`, `3d`, each rounded down
@@ -126,6 +109,72 @@ export function tokensText(tokens: number | null, window: number | null): string
 /** `$1.24`; null without a cost. */
 export function costText(usd: number | null): string | null {
 	return usd === null || !Number.isFinite(usd) ? null : `$${Math.max(0, usd).toFixed(2)}`;
+}
+
+/** Text whose last `keep` characters stay whole when it's cut to fit (keys/art.ts's clipKeep): a run's counts. */
+export type Label = { text: string; keep: number };
+
+/** A workflow run as the keys and the log name it: `review 5/9`, its agents ended of those started. */
+export function runLabel(run: ThreadRun): string {
+	return `${run.name} ${run.finished}/${run.started}`;
+}
+
+/**
+ * The run the key and the strip follow: the most recent with a loop in a turn, which the mod lists before the rest,
+ * the most recent first (PROTOCOL.md, Events: threads); null with none, and while no loop is in a turn at all.
+ */
+export function activeRun(t: Threads | null): ThreadRun | null {
+	if (t === null || t.running <= 0) return null;
+	return t.runs.find((r) => r.open > 0) ?? null;
+}
+
+/**
+ * What a session's other loops are at, on the key's bottom line and the strip's Now page (agents-and-wake.md, B2): the
+ * run they follow (activeRun) as `review 5/9`, its counts kept whole when it's cut; else `3 agents` (`1 agent`) while
+ * any is in a turn; null with none.
+ */
+export function threadsLabel(t: Threads | null): Label | null {
+	const run = activeRun(t);
+	if (run !== null) return { text: runLabel(run), keep: ` ${run.finished}/${run.started}`.length };
+	if (t === null || t.running <= 0) return null;
+	return { text: t.running === 1 ? "1 agent" : `${t.running} agents`, keep: 0 };
+}
+
+/** How many Agents pages the strip has at most, and how many running agents each lists (agents-and-wake.md, B2). */
+export const MAX_AGENT_PAGES = 3;
+const AGENTS_A_PAGE = 2;
+
+/**
+ * The first line of each Agents page (agents-and-wake.md, B2): the run they follow as `review · 5/9 done`, or
+ * `review · 5/9, 1 failed` when some failed, the counts kept whole and the name cut when it's too long; else
+ * `3 agents running` (`1 agent running`).
+ */
+export function agentsHead(t: Threads): Label {
+	const run = activeRun(t);
+	if (run === null) return { text: `${t.running} agent${t.running === 1 ? "" : "s"} running`, keep: 0 };
+	const counts = ` · ${run.finished}/${run.started}${run.failed > 0 ? `, ${run.failed} failed` : " done"}`;
+	return { text: `${run.name}${counts}`, keep: counts.length };
+}
+
+/** A running agent on an Agents page: `● logs: Grep: Device`, the kind without a description, nothing after none doing. */
+function agentLine(a: ThreadAgent): string {
+	return `● ${a.desc || a.kind}${a.doing ? `: ${a.doing}` : ""}`;
+}
+
+/**
+ * The lines of the strip's Agents pages, two running agents a page, while other loops are in a turn; none while none
+ * is. At most MAX_AGENT_PAGES: when more are running than fit, the last line says `+<n> more`. `running` counts them
+ * all, and only the snapshot's agents can be listed, so those it leaves out count among the more too.
+ */
+export function agentPages(t: Threads | null): string[][] {
+	if (t === null || t.running <= 0) return [];
+	const room = MAX_AGENT_PAGES * AGENTS_A_PAGE;
+	const all = Math.max(t.running, t.agents.length);
+	const listed = t.agents.slice(0, all > room ? room - 1 : room).map(agentLine);
+	const lines = all > listed.length ? [...listed, `+${all - listed.length} more`] : listed;
+	const pages: string[][] = [];
+	for (let i = 0; i < lines.length; i += AGENTS_A_PAGE) pages.push(lines.slice(i, i + AGENTS_A_PAGE));
+	return pages;
 }
 
 /** The project a session works in: the last segment of its `cwd`, trailing slashes aside; null without one. */

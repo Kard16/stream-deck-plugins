@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { IN_FLIGHT_MS, type PollReply } from "../src/bridge/commands.js";
-import { decisionKeySvg, promptKeySvg, sessionKeySvg, svgDataUrl, wrap } from "../src/keys/art.js";
+import { decisionKeySvg, promptKeySvg, svgDataUrl, wrap } from "../src/keys/art.js";
 import { PromptKeys, REFUSED_SHOW_MS, SENT_SHOW_MS } from "../src/keys/commands.js";
 import { DecisionKeys, SETTLE_MS } from "../src/keys/decision.js";
-import { SessionKeys, sessionKeyLook } from "../src/keys/session.js";
 import { SessionModel } from "../src/model/sessions.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { FakeClock } from "./helpers/fake-clock.js";
@@ -202,6 +201,41 @@ describe("Approve and Deny keys", () => {
 		assert.match(approve.painted("k")?.svg ?? "", /Offline/);
 	});
 
+	test("a request held when the bridge stops listening stays on the keys, and a press answers it, as its old server keeps it open (PROTOCOL.md, Failure and recovery); the face and the press agree", () => {
+		const { clock, model, surface, feedback, permission } = setup();
+		const approve = new DecisionKeys(model, "allow", { clock });
+		const deny = new DecisionKeys(model, "deny", { clock });
+		approve.add("a", surface("a"));
+		deny.add("d", surface("d"));
+		const rm = permission(A, "Bash", { command: "rm -rf build" });
+		const ls = permission(B, "Bash", { command: "ls" });
+		clock.advance(SETTLE_MS + 200);
+		// The server errored after listening: the bridge listens again on its retry schedule (C5), and both stay held.
+		model.setBridgeState("retrying");
+		clock.advance(200);
+		for (const [keys, id] of [[approve, "a"], [deny, "d"]] as const) {
+			const painted = keys.painted(id);
+			assert.match(painted?.svg ?? "", />rm -rf build</, `${id}: the key still shows the request`);
+			assert.doesNotMatch(painted?.svg ?? "", /Offline/, id);
+			assert.equal(painted?.shown, 1, `${id}: and a press acts on it`);
+		}
+		approve.press("a");
+		assert.equal(JSON.parse(rm.sent[0] ?? "null").hookSpecificOutput.decision.behavior, "allow");
+		// The next one shows at once, and the 1 s starts again for it, listening or not.
+		deny.press("d");
+		assert.deepEqual(ls.sent, []);
+		clock.advance(SETTLE_MS);
+		deny.press("d");
+		assert.equal(JSON.parse(ls.sent[0] ?? "null").hookSpecificOutput.decision.behavior, "deny");
+		assert.deepEqual(feedback, ["a:ok", "d:alert", "d:ok"]);
+		// Nothing held: Offline, and a press acts on nothing.
+		clock.advance(200);
+		assert.match(approve.painted("a")?.svg ?? "", />Offline</);
+		assert.equal(approve.painted("a")?.shown, null);
+		approve.press("a");
+		assert.deepEqual(feedback.at(-1), "a:alert");
+	});
+
 	test("images change only when the look does, at most 10 a second", () => {
 		const { clock, model, surface, images, permission } = setup();
 		const approve = new DecisionKeys(model, "allow", { clock });
@@ -220,7 +254,7 @@ describe("Saved Prompt keys", () => {
 	test("a press queues the text for the target; the key shows waiting, then sent for a few seconds", () => {
 		const { clock, model, surface, mod } = setup();
 		const poll = mod(A);
-		model.pick(A);
+		model.pick(A, "the test");
 		const keys = new PromptKeys(model, { clock });
 		keys.add("k", surface("k"), { text: "  Run the tests and report.\n", label: "Tests" });
 		assert.deepEqual(keys.look("k"), { label: "Tests", target: "Session 1", state: "idle", online: true });
@@ -245,7 +279,7 @@ describe("Saved Prompt keys", () => {
 	test("refused or failed shows refused, longer", () => {
 		const { clock, model, surface, mod, log } = setup();
 		mod(A);
-		model.pick(A);
+		model.pick(A, "the test");
 		const keys = new PromptKeys(model, { clock, log });
 		keys.add("k", surface("k"), { text: "Carry on." });
 		keys.press("k");
@@ -261,7 +295,7 @@ describe("Saved Prompt keys", () => {
 	test("while the key's last prompt is queued, delivered or waiting, a press alerts and sends nothing: a double press sends once", () => {
 		const { clock, model, surface, feedback, log } = setup();
 		model.hello({ v: 1, sid: "sid-1", host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
-		model.pick(A);
+		model.pick(A, "the test");
 		const keys = new PromptKeys(model, { clock, log });
 		keys.add("k", surface("k"), { text: "Carry on." });
 		keys.press("k");
@@ -296,7 +330,7 @@ describe("Saved Prompt keys", () => {
 		const { clock, model, surface, feedback, log } = setup();
 		// The session has the plugin, but its mod has stopped polling.
 		model.hello({ v: 1, sid: "sid-1", host: A, inst: `i-${A}`, model: "claude-haiku-5-5" });
-		model.pick(A);
+		model.pick(A, "the test");
 		const keys = new PromptKeys(model, { clock, log });
 		keys.add("k", surface("k"), { text: "Carry on." });
 		keys.press("k");
@@ -338,10 +372,10 @@ describe("Saved Prompt keys", () => {
 		keys.add("k", surface("k"), {});
 		keys.press("k");
 		keys.press("k", { text: "hi" });
-		model.pick(B);
+		model.pick(B, "the test");
 		keys.press("k");
 		mod(A);
-		model.pick(A);
+		model.pick(A, "the test");
 		model.setRegistry([reg(2, B)]);
 		keys.press("k");
 		assert.deepEqual(feedback, ["k:alert", "k:alert", "k:alert", "k:alert"]);
@@ -350,33 +384,15 @@ describe("Saved Prompt keys", () => {
 	});
 });
 
-describe("Session key", () => {
-	test("shows the target's title and status; a press jumps to it", () => {
-		const { clock, model, surface, feedback, jumps, open } = setup();
-		const keys = new SessionKeys(model, { clock, open });
-		keys.add("k", surface("k"));
-		keys.press("k");
-		assert.deepEqual(feedback, ["k:alert"], "no target yet");
-		model.pick(B);
-		clock.advance(200);
-		assert.match(keys.painted("k") ?? "", />Session 2</);
-		assert.match(keys.painted("k") ?? "", />working</);
-		keys.press("k");
-		assert.deepEqual(jumps, [B]);
-		model.setRegistry([reg(1, A)]);
-		keys.press("k");
-		assert.deepEqual(feedback, ["k:alert", "k:alert"], "an ended target alerts");
-		assert.deepEqual(sessionKeyLook(model.target()), { title: "Session 2", status: "ended", statusColor: "#6A707A" });
-	});
-});
-
 describe("key art", () => {
 	test("text is escaped, cut and wrapped", () => {
 		assert.match(decisionKeySvg({ decision: "allow", online: true, count: 150, oldest: { title: "<b>&", summary: "x", ask: false } }), />99\+</);
 		assert.match(decisionKeySvg({ decision: "allow", online: true, count: 1, oldest: { title: "<b>&", summary: "x", ask: false } }), /&lt;b&gt;&amp;/);
 		assert.match(decisionKeySvg({ decision: "deny", online: false, count: 0, oldest: null }), /Offline/);
+		// A request held while the bridge isn't listening is still answerable, so it shows as it would online.
+		const held = { title: "Session 1", summary: "rm -rf build", ask: false };
+		assert.equal(decisionKeySvg({ decision: "deny", online: false, count: 1, oldest: held }), decisionKeySvg({ decision: "deny", online: true, count: 1, oldest: held }));
 		assert.match(promptKeySvg({ label: null, target: null, state: "idle", online: true }), /Set text/);
-		assert.match(sessionKeySvg({ title: "A very long session title that needs wrapping", status: "done", statusColor: "#fff" }), /…/);
 		assert.deepEqual(wrap("Run the tests and report.", 11, 3), ["Run the", "tests and", "report."]);
 		assert.deepEqual(wrap("one two three four five six seven", 9, 2), ["one two", "three fo…"]);
 		assert.deepEqual(wrap("supercalifragilistic", 11, 2), ["supercalif…"]);

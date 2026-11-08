@@ -2,8 +2,8 @@ import { type Log, quote } from "../util/log.js";
 
 /** What a jump needs from the session model (SessionModel implements it). */
 export interface JumpModel {
-	/** Makes the session the target for prompts, as a pick on the Sessions dial does. */
-	pick(key: string, via?: string): void;
+	/** Makes the session the target for prompts (PROTOCOL.md, The deck's session model). */
+	pick(key: string, via: string): void;
 	/** A turn's end before now counts as seen. */
 	markSeen(host: string): void;
 }

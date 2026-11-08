@@ -377,7 +377,7 @@ test('recheck: a needed registry field missing from every entry fails; one the d
   assert.equal(byId(rows, 'registry.status').status, 'fail')
   assert.match(byId(rows, 'registry.status').reason, /^0\/3 string; 3 number\. /)
   assert.equal(byId(rows, 'registry.startedAt').status, 'warn')
-  assert.match(byId(rows, 'registry.startedAt').reason, /^0\/3 number; 3 missing\. It orders the Sessions dial/)
+  assert.match(byId(rows, 'registry.startedAt').reason, /^0\/3 number; 3 missing\. The slots fill with the newest first/)
   assert.deepEqual(hosts, [])
 })
 
@@ -550,7 +550,7 @@ test('recheck: the bundle is ok with every string, warns when only a corroborati
   assert.match(byId(rows, 'bundle').reason, / 0\.0 MB$/)
 
   const cases = [
-    [{ continueUrl: '' }, 'bundle.jump', 'warn', /^claude:\/\/code\/continue\?session= not found \(found: "\/continue" ×1\)\. The Sessions dial/],
+    [{ continueUrl: '' }, 'bundle.jump', 'warn', /^claude:\/\/code\/continue\?session= not found \(found: "\/continue" ×1\)\. The slot keys and dials/],
     [{ continueRoute: '' }, 'bundle.jump', 'fail', /^"\/continue" not found \(found: claude:\/\/code\/continue\?session= ×1\)\. /],
     [{ needsInputUrl: '', needsInputRoute: '' }, 'bundle.needs-input', 'warn', /^code\/needs-input not found; "\/needs-input" not found\. S5 found it/],
     [{ hostPattern: 'var lmr=/^local_[A-Za-z0-9_-]{1,128}$/;' }, 'bundle.local-id', 'warn', /^\^local_\[A-Za-z0-9-\]\{1,64\}\$ not found, though \^local_ is \(×1\), so it changed\. The app's route/],
@@ -1101,14 +1101,12 @@ test('recheck: its field lists and strings are the deck\'s and the mod\'s own, s
   for (const ask of ['run(["front"])', 'run(["info", "-only", "bundleid", asn])']) assert.ok(front.includes(ask), ask)
 
   // The hook's contract, which the plugin's type check holds to the engine's declarations: it reads the fields the
-  // bridge reads, effort by its level, and sends the Deny and the plans' modes the deck sends.
+  // bridge reads, effort by its level, and sends the Deny the deck sends. The Approve plan's modes went in Phase 9.
   const contract = read('claude-code/plugin-tsc/hook-contract.ts')
   const bodyFields = [...new Set([...wire.matchAll(/\bbody\.(\w+)(?:\.(\w+))?/g)].map((m) => (m[2] ? `${m[1]}.${m[2]}` : m[1])))].filter((n) => n !== 'effort')
   const contractFields = [...contract.matchAll(/\binput\.(\w+)(?:\?\.(\w+))?/g)].map((m) => (m[2] ? `${m[1]}.${m[2]}` : m[1]))
   assert.deepEqual(contractFields.toSorted(), bodyFields.toSorted())
   assert.ok(contract.includes(`message: '${/export const DENY_MESSAGE = "([^"]+)";/.exec(wire)?.[1]}', interrupt: true`), "the deck's Deny")
-  const planModes = /export const PLAN_MODES = \[([^\]]*)\] as const;/.exec(wire)?.[1] ?? ''
-  assert.ok(contract.includes(`(mode: ${[...planModes.matchAll(/"(\w+)"/g)].map((m) => `'${m[1]}'`).join(' | ')})`), "the Approve plan's modes")
   assert.ok(read('claude-code/plugin-tsc/tsconfig.json').includes('"hook-contract.ts"'), 'the plugin\'s type check takes it')
 })
 

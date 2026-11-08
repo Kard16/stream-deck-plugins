@@ -2,12 +2,11 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
-import { costText, projectName, sinceChangesAt, sinceText, tokenCount, tokensText } from "../src/model/format.js";
+import { costText, modelName, projectName, sinceChangesAt, sinceText, tokenCount, tokensText } from "../src/model/format.js";
 import { SessionModel } from "../src/model/sessions.js";
-import { KEEP_INPUT_BYTES } from "../src/protocol/ask.js";
-import { ALLOW_DECISION } from "../src/protocol/wire.js";
 import type { AppRecord } from "../src/records/records.js";
 import type { RegistrySession } from "../src/registry/registry.js";
+import { jumpTo } from "../src/slots/jump.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
@@ -90,7 +89,7 @@ describe("what each session shows (session-keys.md)", () => {
 		assert.equal(view(B)?.need, "question");
 		permission(B, "Bash", { command: "ls" });
 		assert.equal(view(B)?.status, "approval", "the status puts a tool first");
-		assert.equal(view(B)?.need, "question", "the need follows the oldest, which the dial answers");
+		assert.equal(view(B)?.need, "question", "the need follows the oldest, which the dial shows");
 		permission(C, "ExitPlanMode", {});
 		assert.equal(view(C)?.need, "plan");
 		model.setRecords(new Map([[A, record(A)], [C, record(C, { turnCategory: "blocked" })]]));
@@ -378,6 +377,28 @@ describe("seen (session-keys.md, What each session shows)", () => {
 		assert.equal(view(A)?.seen, true);
 	});
 
+	test("nothing asks while no Stream Deck is connected, though a key shows seen; a connect starts it, and a disconnect stops it (agents-and-wake.md, C3)", async () => {
+		const { model, clock, at, events, view, asks } = ended({ front: async () => false });
+		model.setDeckConnected(false);
+		at(10_000);
+		events(A, { t: "attach", surface: "desktop" });
+		await settle();
+		clock.advance(5000);
+		await settle();
+		assert.equal(asks(), 0, "an unseen session on screen and a key that shows seen, but no deck");
+		model.setDeckConnected(true);
+		await settle();
+		assert.equal(asks(), 1, "asked at once");
+		clock.advance(1000);
+		await settle();
+		assert.equal(asks(), 2);
+		model.setDeckConnected(false);
+		clock.advance(10_000);
+		await settle();
+		assert.equal(asks(), 2, "the deck went: no more asks");
+		assert.equal(view(A)?.seen, false);
+	});
+
 	test("a phone's detach doesn't take the session off screen: the check goes on", async () => {
 		const { at, events, clock, asks } = ended({ front: async () => false });
 		at(10_000);
@@ -502,59 +523,18 @@ describe("slotted sessions the registry doesn't list, and the session on screen"
 		assert.equal(model.onScreen()?.host, B);
 	});
 
-	test("a pick from a slot names where it came from, and a not-running target keeps its record's title", () => {
-		const { model, log } = setup([reg(1, A)]);
+	test("the target is the session last jumped to from a slot or Others, over the one on screen; the log names where, and a not-running target keeps its record's title", () => {
+		const { model, log } = setup([reg(1, A), reg(2, C)]);
 		model.keepHosts([B]);
-		model.setRecords(new Map([[B, record(B, { title: "Asleep" })]]));
-		model.pick(B, "slot key fixture:1:0");
+		model.setRecords(new Map([[B, record(B, { title: "Asleep" })], [C, record(C, { lastFocusedAt: 9000 })]]));
+		assert.equal(model.target()?.key, C, "nothing jumped to yet: the session on screen");
+		const opened: string[] = [];
+		jumpTo(model, B, (h) => opened.push(h), "slot key fixture:1:0", log);
 		assert.ok(log.at("info").some((l) => l.includes("TARGET local_b: picked on slot key fixture:1:0")), log.at("info").join("\n"));
-		assert.deepEqual([model.target()?.title, model.target()?.listed, model.target()?.running], ["Asleep", false, false]);
-		model.pick(A);
-		assert.ok(log.at("info").some((l) => l.includes("TARGET local_a: picked on the Sessions dial")));
-	});
-
-	test("a held ask keeps its tool_input for the dial, up to 64 KiB; over that it's display-only, and the log says so", () => {
-		const { model, log, permission } = setup([reg(1, A)]);
-		const input = { questions: [{ question: "Q?", header: "H", options: [{ label: "Yes" }, { label: "No" }], multiSelect: false }] };
-		permission(A, "AskUserQuestion", input);
-		const kept = model.held.oldestFor(A)?.ask;
-		assert.equal(kept?.t, "question");
-		assert.deepEqual(kept?.t === "question" ? kept.input : null, input);
-		permission(A, "ExitPlanMode", { plan: "x".repeat(KEEP_INPUT_BYTES) });
-		assert.deepEqual(model.held.list()[1]?.ask, { t: "inApp", why: "too big" });
-		assert.ok(log.at("info").some((l) => l.includes('ASK "ExitPlanMode" from local_a is display-only (too big)')), log.at("info").join("\n"));
-		permission(A, "Bash", { command: "ls" });
-		assert.equal(model.held.list()[2]?.ask, null, "a tool's request keeps nothing");
-	});
-
-	test("an ask whose tool_input the token scrub changed is display-only, and the log says why; a tool's request so flagged is held as usual", () => {
-		const { model, log } = setup([reg(1, A)]);
-		const flagged = (tool: string, input: unknown): FakeReply => {
-			const reply = new FakeReply();
-			model.permission({ session_id: "sid-1", tool_name: tool, tool_input: input }, A, reply, true);
-			return reply;
-		};
-		const question = flagged("AskUserQuestion", { questions: [{ question: "Q?", header: "H", options: [{ label: "Yes" }, { label: "No <token>" }], multiSelect: false }] });
-		const plan = flagged("ExitPlanMode", { plan: "# Plan <token>\n", planFilePath: "/p.md" });
-		const bash = flagged("Bash", { command: "echo <token>" });
-		const [q, p, b] = model.held.list();
-		assert.deepEqual([q?.kind, q?.ask], ["ask", { t: "inApp", why: "scrubbed" }]);
-		assert.deepEqual([p?.kind, p?.ask], ["ask", { t: "inApp", why: "scrubbed" }]);
-		assert.deepEqual([b?.kind, b?.ask, b?.summary], ["tool", null, "echo <token>"]);
-		for (const tool of ["AskUserQuestion", "ExitPlanMode"]) {
-			const line = `info ASK "${tool}" from local_a is display-only (scrubbed: the bridge took a run of its token out of the tool_input, so an answer couldn't echo it as it came): its dial reads "Answer in app"`;
-			assert.ok(log.at("info").includes(line), log.at("info").join("\n"));
-		}
-		assert.ok(!log.at("info").some((l) => l.includes('ASK "Bash"')));
-		// No answer fits a display-only request: the dial's press jumps instead.
-		assert.equal(model.held.answer(A, q?.id ?? -1, { t: "answers", picks: { "Q?": ["Yes"] } }).ok, false);
-		model.held.release(q?.id ?? -1, "the test");
-		for (const answer of [{ t: "plan", mode: "auto" }, { t: "deny" }] as const) assert.equal(model.held.answer(A, p?.id ?? -1, answer).ok, false, answer.t);
-		model.held.release(p?.id ?? -1, "the test");
-		assert.deepEqual([question.answers, plan.answers], [[{ status: 200, body: {} }], [{ status: 200, body: {} }]], "released, never answered");
-		// The flagged Bash takes the keys' Allow, which echoes nothing.
-		assert.equal(model.held.answer(A, b?.id ?? -1, { t: "allow" }).ok, true);
-		assert.deepEqual(bash.answers, [{ status: 200, body: ALLOW_DECISION }]);
+		assert.deepEqual([opened, model.target()?.title, model.target()?.listed, model.target()?.running], [[B], "Asleep", false, false]);
+		jumpTo(model, A, () => {}, "the Others key", log);
+		assert.deepEqual([model.target()?.key, model.picked], [A, A], "the newest jump, though C is on screen");
+		assert.ok(log.at("info").some((l) => l.includes("TARGET local_a: picked on the Others key")));
 	});
 });
 
@@ -612,5 +592,12 @@ describe("how since, tokens and cost read (format.ts)", () => {
 		assert.equal(costText(0), "$0.00");
 		assert.equal(costText(null), null);
 		assert.deepEqual([projectName("/Users/me/stream-deck-plugins"), projectName("/a/b/"), projectName("/"), projectName(null)], ["stream-deck-plugins", "b", null, null]);
+	});
+
+	test("model names as the app's menus have them", () => {
+		assert.equal(modelName("claude-opus-4-7[1m]"), "Opus 4.7 1M");
+		assert.equal(modelName("claude-sonnet-4-20250514"), "Sonnet 4");
+		assert.equal(modelName("sonnet"), "Sonnet");
+		assert.equal(modelName("gpt-x"), "gpt-x");
 	});
 });

@@ -244,7 +244,7 @@ describe("status rule 6, the app's own needs-input indicator (its _D, Dw and jM)
 	/** The record's turn category, and the status it gives an idle session the bridge knows nothing of. */
 	const read = (fields: Record<string, unknown>): { category: string | null; status: string } => {
 		const category = parseRecord(A, JSON.stringify(fields))?.turnCategory ?? null;
-		return { category, status: sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category }) };
+		return { category, status: sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category, running: 0 }) };
 	};
 	const forLast = { postTurnSummaryFor: LAST, lastAssistantUuid: LAST };
 	const blocked = { status_category: "blocked", needs_action: "Merge PR #12?" };
@@ -330,7 +330,7 @@ describe("status rule 6 reads only a summary the app's record loader keeps (its 
 	/** The status of an idle session the bridge knows nothing of, from a record with this summary for its last message. */
 	const statusOf = (summary: unknown): string => {
 		const category = parseRecord(A, JSON.stringify({ postTurnSummary: summary, ...forLast }))?.turnCategory ?? null;
-		return sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category });
+		return sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category, running: 0 });
 	};
 	/** The category of a record whose wrap-up asks the user something, and whose summary says failed: failed if the summary is kept, blocked if it's dropped. */
 	const withWrapUp = (summary: unknown): string | null => parseRecord(A, JSON.stringify({ postTurnSummary: summary, turnWrapUp: { description: "x", needsUser: "Retry?" } }))?.turnCategory ?? null;

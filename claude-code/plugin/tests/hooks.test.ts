@@ -21,7 +21,7 @@ test('hello goes first, with the ids, cwd, model and versions; then one poll, wi
     inst: expect.any(String),
     cwd: '/sandbox',
     model: MODEL,
-    plugin: '0.3.0',
+    plugin: '0.4.0',
     cc: '2.1.309',
   })
   expect(poll?.method).toBe('GET')
@@ -50,7 +50,7 @@ test('an input the mod can\'t read costs it its event, never the hook', async ($
   expect(w.logs).toEqual([])
 })
 
-test('tool calls report start and end: a subagent\'s carry its id, an error ends ok false, a refusal carries its reason', async ($, on) => {
+test("tool calls report start and end: a subagent's sends only its end, with its id, an error ends ok false, a refusal carries its reason", async ($, on) => {
   const w = world(on)
   const refusal = "The user doesn't want to proceed with this tool use."
   w.engine.tool = e =>
@@ -68,12 +68,11 @@ test('tool calls report start and end: a subagent\'s carry its id, an error ends
   expect(w.events().map(x => x.event)).toEqual([
     { t: 'tool.start', at: any, tool: 'Read', use: 'u1', summary: 'notes.md', fp: fingerprint('Read', read) },
     { t: 'tool.end', at: any, tool: 'Read', use: 'u1', fp: fingerprint('Read', read), ok: true },
-    { t: 'tool.start', at: any, tool: 'Bash', use: 'u2', agent: 'agent-7', summary: 'false', fp: fingerprint('Bash', bash) },
     { t: 'tool.end', at: any, tool: 'Bash', use: 'u2', agent: 'agent-7', fp: fingerprint('Bash', bash), ok: false },
     { t: 'tool.start', at: any, tool: 'Write', use: 'u3', summary: 's9.txt', fp: fingerprint('Write', write) },
     { t: 'tool.end', at: any, tool: 'Write', use: 'u3', fp: fingerprint('Write', write), ok: false, denied: refusal },
   ])
-  expect(w.events().map(x => x.seq)).toEqual([1, 2, 3, 4, 5, 6])
+  expect(w.events().map(x => x.seq)).toEqual([1, 2, 3, 4, 5])
 })
 
 test("a call refused at the permission prompt reaches the hook as an errored result: its tool.end says ok false, without denied", async ($, on) => {
@@ -168,14 +167,13 @@ test('settings: mode and effort from the main loop\'s classic hooks, the model a
   expect(w.settings()).toEqual([{ mode: 'default', effort: 'low' }, { mode: 'acceptEdits' }, { effort: 'high' }, { model: 'claude-sonnet-5-5' }])
 })
 
-test('turns, failures, attach, detach, measure and end become events; a measurement of rate limits alone is not sent', async ($, on) => {
+// Other loops' turns: threads.test.ts.
+test("the main loop's turns, failures, attach, detach, measure and end become events; a measurement of rate limits alone is not sent", async ($, on) => {
   const w = world(on)
   await $.session.start(START)
   await w.settle()
   await $.session.attach({ surface: 'desktop', clientId: 'desktop:default', viewport: { columns: 120, rows: 40 } })
   await $.turn.start({ text: 'go', turnId: 't1' })
-  await $.turn.start({ text: 'look around', turnId: 't-sub', agentId: 'agent-7' })
-  await $.turn.complete({ answer: 'found it', durationMs: 9, isAborted: false, turnId: 't-sub', reason: 'answer', agentId: 'agent-7' })
   await $.classic.StopFailure({ error: 'overloaded', error_details: '529 Overloaded' })
   await $.turn.complete({ answer: '', durationMs: 9, isAborted: false, turnId: 't1', reason: 'error' })
   await $.session.measure({ changed: ['rateLimits'], context: { window: 1_000_000 }, rateLimits: [] })
@@ -189,8 +187,6 @@ test('turns, failures, attach, detach, measure and end become events; a measurem
   expect(w.events().map(x => x.event)).toEqual([
     { t: 'attach', at: any, surface: 'desktop' },
     { t: 'turn.start', at: any, turn: 't1' },
-    { t: 'turn.start', at: any, turn: 't-sub', agent: 'agent-7' },
-    { t: 'turn.end', at: any, turn: 't-sub', agent: 'agent-7', reason: 'answer' },
     { t: 'failed', at: any, error: 'overloaded' },
     { t: 'turn.end', at: any, turn: 't1', reason: 'error' },
     { t: 'measure', at: any, context: { percent: 9, tokens: 90_000, window: 1_000_000 }, cost: { usd: 0.03 } },

@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
-import { clip, fits, type OthersFace, othersKeySvg, type SlotFace, slotKeySvg, slotToneBackground, type SlotTone } from "../src/keys/art.js";
+import { clip, clipKeep, fits, type OthersFace, othersKeySvg, type SlotFace, slotKeySvg, slotToneBackground, type SlotTone } from "../src/keys/art.js";
 import { SessionModel, type SessionView } from "../src/model/sessions.js";
+import type { ThreadRun, Threads } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { heldToolOf, NEED_WORDS, othersArt, othersFace, slotFace, slotKeyArt, toolName } from "../src/slots/art.js";
 import { slotId } from "../src/slots/ids.js";
@@ -207,6 +208,67 @@ describe("the Session Slot key's face, from its session (session-keys.md, The ke
 		assert.deepEqual(NEED_WORDS, { question: "Question", plan: "Plan", approval: "Approve?", input: "Needs you" });
 		// fits(), the shared measure, is about 0.54 em a character.
 		assert.equal(fits(18, 120), 12);
+	});
+});
+
+describe("a session's other loops on its key (agents-and-wake.md, B2: option A)", () => {
+	/** `running` loops in a turn, and runs as given over `review`, 5 of 9 ended, one loop in a turn. */
+	const threads = (running: number, runs: Partial<ThreadRun>[] = []): Threads => ({
+		running,
+		agents: [],
+		runs: runs.map((r) => ({ run: "wf_1", name: "review", started: 9, finished: 5, failed: 0, open: 1, ...r })),
+	});
+
+	test("Background is blue with its own word; for Working and Background the bottom line says the newest run in a turn, else how many agents, else (working only) the tool it's on", () => {
+		const cases: [string, Partial<SessionView>, Partial<SlotFace>][] = [
+			["background, a run", { status: "background", threads: threads(3, [{}]), doing: "npm test" }, { tone: "working", word: "Background", tool: "review 5/9", keep: 4 }],
+			["background, agents only", { status: "background", threads: threads(3), doing: "npm test" }, { tone: "working", word: "Background", tool: "3 agents", keep: 0 }],
+			["background, one agent", { status: "background", threads: threads(1) }, { word: "Background", tool: "1 agent" }],
+			["background, no picture to say why", { status: "background", doing: "npm test" }, { word: "Background", tool: null }],
+			["working, a run", { status: "working", threads: threads(2, [{}]), doing: "npm test" }, { tone: "working", word: "Working", tool: "review 5/9" }],
+			["working, agents only", { status: "working", threads: threads(2), doing: "npm test" }, { word: "Working", tool: "2 agents" }],
+			["working, a run none of whose loops is in a turn", { status: "working", threads: threads(2, [{ open: 0 }]), doing: "npm test" }, { tool: "2 agents" }],
+			["working, none in a turn", { status: "working", threads: threads(0, [{ open: 1 }]), doing: "npm test" }, { tool: "npm test" }],
+			["working, no picture", { status: "working", doing: "npm test" }, { tool: "npm test", keep: undefined }],
+			["the most recent run in a turn, which the mod lists first", { status: "background", threads: threads(4, [{ name: "deck", started: 3, finished: 1, open: 2 }, { open: 2 }]) }, { tool: "deck 1/3" }],
+			["a run in a turn before one that isn't", { status: "background", threads: threads(1, [{ name: "old", open: 0 }, {}]) }, { tool: "review 5/9" }],
+		];
+		for (const [what, fields, want] of cases) {
+			const face = slotFace(look(view({ since: NOW - 60_000, ...fields })));
+			for (const [k, v] of Object.entries(want)) assert.deepEqual(face[k as keyof SlotFace], v, `${what}: ${k}`);
+		}
+		assert.equal(slotToneBackground("working"), "#1F4E8C", "working's blue");
+	});
+
+	test("a long run name is cut with its counts whole; Background's top line takes a smaller size, so the word stays whole beside its since; all inside the key", () => {
+		const svg = slotKeySvg(slotFace(look(view({ status: "background", since: NOW - 30_000, context: 62, threads: threads(3, [{ name: "agents-and-wake-review" }]) }))));
+		const t = texts(svg);
+		assert.deepEqual(
+			t.filter((x) => x.y === 117).map((x) => x.text),
+			["agen… 5/9", "62%"],
+		);
+		assert.deepEqual(
+			t.filter((x) => x.y === 34).map((x) => [x.text, x.size]),
+			[
+				["Background", 14],
+				["30s", 14],
+			],
+		);
+		assertInside(svg, "background");
+		assertApart(svg, 34, "background's top line");
+		assertApart(svg, 117, "background's bottom line");
+		// A word that fits at 17 stays at 17.
+		const working = texts(slotKeySvg(slotFace(look(view({ status: "working", since: NOW - 30_000, threads: threads(2) })))));
+		assert.deepEqual(
+			working.filter((x) => x.y === 34).map((x) => [x.text, x.size]),
+			[
+				["Working", 17],
+				["30s", 17],
+			],
+		);
+		// Counts that leave no room for the name are cut as any text is.
+		assert.equal(clipKeep("review 12345/67890", 8, 12), "review…");
+		assert.equal(clipKeep("review 5/9", 10, 4), "review 5/9", "what fits stays whole");
 	});
 });
 

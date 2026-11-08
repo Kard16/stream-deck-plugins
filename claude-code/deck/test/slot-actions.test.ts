@@ -9,9 +9,8 @@ import { SessionModel } from "../src/model/sessions.js";
 import { ALLOW_DECISION } from "../src/protocol/wire.js";
 import type { AppRecord } from "../src/records/records.js";
 import type { RegistrySession } from "../src/registry/registry.js";
-import { COALESCE_MS } from "../src/sessions/dials.js";
 import { heldToolOf, othersArt, slotKeyArt } from "../src/slots/art.js";
-import { SlotDials } from "../src/slots/dials.js";
+import { COALESCE_MS, SlotDials } from "../src/slots/dials.js";
 import { slotId } from "../src/slots/ids.js";
 import { HOLD_MS, SlotKeys } from "../src/slots/keys.js";
 import { OthersKeys } from "../src/slots/others.js";
@@ -216,7 +215,7 @@ describe("the Session Slot action on a dial (SlotActions)", () => {
 		assert.equal(strip("d2").name, "Session 2");
 	});
 
-	test("turning pages, a push or a tap jumps, a long touch goes back a step, and a push that turned while held is no press", () => {
+	test("turning pages, a push or a tap jumps, a long touch goes back to the first page, and a push that turned while held is no press", () => {
 		const { clock, model, slotActions, opened, push, strip } = setup();
 		slotActions.appearDial(fakeDial("d0"));
 		assert.equal(strip("d0").dots, "●○○");

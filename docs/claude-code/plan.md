@@ -1,6 +1,6 @@
 # Claude Code build plan
 
-**Status:** Phase 7, session keys and dials, is done and live on deck 0.4.0 (2026-11-04); its spec is `docs/claude-code/session-keys.md`. Next is Phase 8, efficiency and update resilience, planned 2026-11-05: its spec is `docs/claude-code/hardening.md`, and its session starts from `docs/claude-code/hardening-kickoff.md`. Phase 5's day of use and Phase 4's step 11 are still open. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
+**Status:** Phase 9, approvals, agents and wake, started 2026-11-07: its spec is `docs/claude-code/agents-and-wake.md`. Phase 8 (`docs/claude-code/hardening.md`) is built, live and released, with its reboot and day of use still open. Phase 7, session keys and dials, is done (`docs/claude-code/session-keys.md`). Phase 5's day of use and Phase 4's step 11 are still open. The contract is in `claude-code/protocol/PROTOCOL.md`. Written 2026-11-01 by the build session, from the research of 2026-10-31 and checks made on this Mac at kickoff. Kickoff questions answered the same day.
 
 The build session records decisions and spike results in **Log** at the bottom and keeps **Progress** current, so a fresh session can pick up from this file.
 
@@ -261,6 +261,14 @@ Planned 2026-11-05, after the user asked how a press flows through the system an
   - a test for `vendor/refresh.mjs`;
   - pruning features the user doesn't use.
 - Verified by: every check as now, a mutation per new rule, the idle numbers against the target the user agrees, the smoke test live, and a day of use.
+
+### Phase 9: approvals, agents and wake (only when the user says so)
+
+Planned and started 2026-11-07, after the user's day on their work Mac. The spec, with the user's words, their two rounds of answers, the investigation and the design, is `docs/claude-code/agents-and-wake.md`. The contract is PROTOCOL.md's amendment "2026-11-07, Phase 9".
+- **Inputs:** the dial stops answering questions and plans, and the Session key and the Sessions dial go. Approvals, jumps and Saved Prompts stay.
+- **Agents and workflows:** the mod reports a session's other loops in a `threads` snapshot. The deck shows `Background`, a workflow's progress on the key, and an Agents page on the strip. Release rule 1 matches the loop.
+- **Wake:** the deck handles the device leaving and returning, repaints in full when it's back, rests while it's away, and logs what kind of sleep it woke from. `tools/doctor.mjs` diagnoses a drop before a re-plug.
+- Verified by: every check as now, a mutation per new rule, the smoke test's new steps live, and a day on the work Mac.
 
 ## Human-only steps
 
@@ -1262,6 +1270,151 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - The README's check greps both folders with `-a`, since a plain grep misses a binary plist. Tried on a fake JSON policy and a fake binary plist, and on this Mac, which has none.
   - **Docs:** the README's Setup gains the clone, the policy check, `mise trust` and a test approval. A new section, "Keeping another Mac current", covers a change, a Claude app update, a Stream Deck app update, taking it off and moving the clone. The update section says which Mac runs the routine. CLAUDE.md's Install says how the other Macs get a change.
   - **Still to come:** the first real `setup`, on the work Mac.
+- 2026-11-07, **Phase 9 begins,** after the user's day on the work Mac. Their feedback, verbatim, and both rounds of answers are in `docs/claude-code/agents-and-wake.md`. In short:
+  - **Inputs:** they answer questions in the app, never change the mode, and use the deck for approvals and switching sessions. The dial's question and plan answers go, and so do the Session key and the Sessions dial. Saved Prompts stay, "willing to scrap if it is a lot to maintain".
+  - **Wake:** after a sleep on the work Mac the keys stayed lit but stale, and presses didn't switch the app's window. Only re-plugging Thunderbolt fixed it. One cable moves between the laptops.
+  - **Agents:** keep the key blue while background work runs (it reads `Background`), a workflow's progress on the key as text, and an Agents page on the strip. No tag saying which Mac drives the deck.
+- 2026-11-07, **the investigation** (a workflow of six read-only agents, about 20 minutes):
+  - **This Mac's logs, 11-03 to 11-07:** the Stream Deck app turned the deck off at each display sleep or lock and back on about 5 s after the wake, 25 times out of 25. This Mac went into real system sleep once. The deck plugin has no device handling: it got no event when the deck left or came back, and while the deck was on the work Mac for 28 h it sent 1,139 images and ran 2,886 `lsappinfo` checks. Polls and hellos recovered at every wake; no warn or error line in ten logs. The work Mac's logs aren't reachable from here.
+  - **The drop:** keys keep their last images while the deck has power and no host, and jumps don't use the bridge, so dead presses point below the plugin. With one cable, the likely causes are the work Mac's Thunderbolt-tunnelled USB after real system sleep, the monitor's firmware, or the Stream Deck app not re-acquiring the deck.
+  - **Agents:** the registry already stays `busy` while a workflow runs after the main turn, so keys read Working, without saying what. The mod already sends subagents' events, and the deck drops about 95% of them (813 against 46 in one workflow). The mods API gives `agent.spawn`, per-loop turns and the Workflow result, but nothing for a workflow's phase or end. Release rule 1 ignores which loop asked. The poll burst after a turn spins about 60 polls whenever background work runs on.
+  - **Removals:** dial answers rely on the engine taking `updatedInput`, the most fragile trick left. The command channel behind Saved Prompts is the biggest feature: about 1,050 deck, 190 mod and 1,600 test lines.
+- 2026-11-07, **the contract,** in this thread: PROTOCOL.md's amendment "2026-11-07, Phase 9", with `make-fixtures.mjs`. 21 fixtures: four dial-answer fixtures go, `dial-gone` moves onto a Bash request, `needs-you` gains the dial's jump, and `threads` and `release-by-agent` are new. `v` stays 1. **Before the build:** the deck fails 4 of 512 tests and the tools 3 of 187, all of them the new fixtures, the dial's jump line or the fixture count.
+- 2026-11-07, **the build** (a workflow of five agents, about 100 minutes: the deck as a chain, A then B then C, with the plugin and tools tracks beside it):
+  - **Deck A, the removals:** 2,692 lines out of 46 files. Every ask on the dial is the Answer in app screen, where a press or tap jumps and answers nothing. Only the three answer bodies can be sent, which the type now enforces (`NO_DECISION`). The manifest has five actions. Version 0.6.0.
+  - **Deck B, agents:**
+    - threads read with care;
+    - `background` inside rule 3, with its `since`;
+    - the run label on the key, its counts kept whole;
+    - up to three Agents pages on the strip;
+    - the poll window with `running`;
+    - release rule 1 by loop.
+    - To keep "Background" whole, a key's top word now shrinks from 17 px to as small as 13 px.
+  - **Deck C, devices and wake:**
+    - `Devices` follows connects.
+    - Every key and strip repaints at a connect, and 10 s and 20 s after each wake.
+    - While no device is connected, the painters send nothing, and the `lsappinfo` check and the label ticker stop.
+    - The wake line measures system sleep from the gap between the two clocks.
+    - The bridge listens again if its server closes or fails.
+  - **Plugin 0.4.0:**
+    - the `threads.ts` tracker;
+    - an observe-only `agent.spawn` hook;
+    - other loops' starts and ends go only to the tracker;
+    - a flush before the main loop's turn end;
+    - `quiet()`, so a process the bridge never talks from sets no timers (the review replaced it with `up()` and `onHello`).
+  - **Tools:**
+    - the fakes follow the amendment;
+    - smoke-check's 16 steps and the new lines;
+    - `doctor.mjs`, with unit tests only;
+    - smoke-test.md's steps 14 to 16.
+  - **Each builder's checks:**
+    - Deck 515 of 515, also with the clock shifted, with 97 mutations.
+    - Plugin test 169 of 169, with 43 mutations.
+    - Tools 294 of 294, with 50 mutations. fake-claude 21 of 21, and recheck 39 ok.
+    - Every mutation was caught.
+  - **The main thread's re-run:** everything passed but one install test. Deck C's re-listen changed the shape of the "listening on" line that test reads for setup's wait. The first line keeps its shape again, and install passes 20 of 20.
+  - **The spec, corrected** to what the build agreed: the Device, Repaint, wake and re-listen lines; `background` inside rule 3; the Agents line.
+  - **PROTOCOL.md item 8:**
+    - The mod sends `threads` again after each answered hello, and queues none while the line is failing. After a deck restart, an agent on one long call would otherwise show nothing until its picture changed.
+    - Failure and recovery now covers the deck's re-listen.
+    - A plugin-side fixture rule: a `tool.call` stays open until its `tool.end` line.
+  - `session-keys.md` is marked partly superseded.
+- 2026-11-07, **the review and its fixes** (a workflow of seven agents, about 70 minutes: four read-only reviewers, for the deck, the plugin, the tools and the tracks together, then a fixer per track):
+  - **27 findings,** two of them major, both in the smoke test:
+    - steps 14 and 15 left out that T's own Workflow call asks first in Manual;
+    - step 15 never checked that the request's `agent_id` is its call's `agentId`, which release rule 1 now relies on.
+    - The rest were minor and nits.
+  - **The deck** (522 tests after its fixer):
+    - Approve and Deny keep a held request on the keys while the bridge listens again: the old server still answers it.
+    - A slot key acts on what it showed at key-down, and a slot dial jumps only to the session its strip showed, so the repaint a press from an away device brings can't stand in for it.
+    - The page dots shrink to fit six.
+    - Done, Failed and Stopped after background work are timed, and seen, from when that work ended, not from the turn's end.
+  - **The plugin** (177 tests): three tests close mutation gaps. `quiet()` became `up()` and `onHello`: nothing is made, sent or timed before the first answered hello, and the snapshot goes again after each one.
+  - **The tools** (302 tests):
+    - smoke-check's step 14 needs the run's agents spawned and ended, and with `--pid` checks the registry stayed busy;
+    - step 15 needs the agent's own `tool.end` under the same agent;
+    - doctor gets a 30 s limit per command, counts only Stream Decks and one app start per pid;
+    - the fixture player keeps each session's current instance.
+  - **Main thread:**
+    - **Taken back: the fixers' "an action appearing counts as the device's connect".** On 11-05 the Stream Deck app had the deck suspended from 21:52 to 08:10, and the deck plugin's slot dials still appeared and filled at its restarts at 22:00, 23:06 and 23:33. So `willAppear` says nothing about the device, and counting it would log a missed connect at every start while the deck is away, misleading doctor. A press still counts.
+    - **PROTOCOL.md item 9:** `doing` is the call in the loop's current turn, and stands alone when it would read the same without the call's arguments (`TodoWrite`, not `TodoWrite: TodoWrite`).
+    - **Item 8's wording:** no `threads` before the first answered hello either, and "nothing to report" means throughout.
+    - **The `threads` fixture's note** no longer claims what no fixture line can pin.
+    - **The spec, `session-keys.md` and Progress** follow.
+  - **The main thread's re-run, all passing:**
+    - deck 523 of 523, also two days ahead and a week back, with its build and validate;
+    - tools 302 of 302 and install 20 of 20;
+    - the plugin's tsc, validate, sync check, and test 177 of 177;
+    - recheck 39 ok, the fixtures unchanged by regeneration, and fake-claude 21 of 21.
+- 2026-11-07, **a second review, of the fixes** (a workflow of nine agents, about 43 minutes: a reviewer for the deck and one for the plugin, tools and contract, each on a copy of the repo, then a skeptic for each of the seven most severe findings):
+  - **Confirmed, two, both missing tests, not wrong code:**
+    - Only a fall of `running` from above 0 may time the work's end. Without that, the snapshot the mod now sends again after each answered hello would turn a seen Done back into an unseen Done 0s.
+    - The test guarding the willAppear revert caught one spelling only.
+  - **Refuted, five:**
+    - A dial push that sends a chip is judged at its release. That takes a push held 300 ms to 1 s, and this user's 18 logged pushes lasted 60 to 153 ms.
+    - After an outage, a main-loop `turn.end` reaches the deck before the snapshot. With the registry busy while agents run, the key reads Working either way.
+    - Two more test gaps that would change nothing the user sees.
+    - The page dots measured at the wrong weight. Refuted, but its skeptic found that six dots at 9 px, with SF's tracking, could come 0.4 px over their item.
+  - **Five nits, not verified, all taken:**
+    - a test for a hello that hangs;
+    - PROTOCOL.md's Rates names the flush before a turn's end;
+    - the fixture generator's `doing` follows item 9;
+    - a test for a replaced instance's hello in the fixture player;
+    - `ExitPlanMode`'s fixed `Plan ready` stands alone, by the same rule, now named in PROTOCOL.md.
+  - **Main thread:**
+    - **Six dots now take 8 px:** `DOT_EM` 1, from SF at weight 700 with its tracking. The layout schema says both that clip is the default and that ellipsis is, so the dots get a margin rather than a guess.
+    - **Tests for each,** two new and four extended, each checked against the mutation it guards:
+      - in the deck, X4's resend, the revert's guard in any spelling, and the dots' sizes;
+      - in the plugin, the hung hello and `ExitPlanMode`;
+      - in the tools, the replaced instance.
+  - **The main thread's re-run, all passing:**
+    - deck 524 of 524, also two days ahead and a week back, with its build and validate;
+    - tools 302 of 302 and install 20 of 20;
+    - the plugin's tsc, validate, sync check, and test 178 of 178;
+    - recheck 39 ok, the fixtures unchanged by regeneration, and fake-claude 21 of 21.
+- 2026-11-08, **the smoke test, live with the user** (`docs/claude-code/smoke-test.md`, 15:15–16:25Z, with a 40-minute pause while the user was away):
+  - **Setup:** deck 0.6.0, built and restarted at 15:13:07Z. The deck connected at its start, and all five running sessions said hello again, four of them on plugin 0.2.1 or 0.3.0, as the deck noted.
+    - The throwaway session "Phase 9 smoke test" (`local_07b1564d-…`, pid 65509), from the preset, on Haiku 5.5 at low effort, in Manual. It ran plugin 0.4.0 from the dev copy, on Claude Code 2.1.317.
+    - It wasn't titled "Deck smoke test": 11-06's throwaway of that name (`local_c88d2512-…`) still runs, and it was on bottom key 4.
+  - **smoke-check: 15 ok, 1 missing,** with no warn or error line, no rule-2 release, no listening again, and no device taken as connected:
+    - **2 and 9:** Others and a slot key jumped to T in 65 and 61 ms, and the app showed it about 150 ms after the press.
+    - **3 and 12:** a long press put T on bottom key 4, in place of 11-06's throwaway. Two long presses swapped it with this session and back.
+    - **4 and 6 to 8:**
+      - T's dial allowed a Bash.
+      - The Approve key allowed a Write, and the Deny key denied a Bash. Those keys were pressed live for the first time since Phase 7.
+      - The turn ended 125 ms after the Deny, with no other call.
+      - An allow in the app let its request go by rule 1.
+    - **5:** the question read Answer in app. The dial's press jumped 6.3 s after it was held, and the answer in the app let it go by rule 1 2.8 s later, with no ANSWER.
+    - **10 and 11:** a Saved Prompt was done 36 ms after it was queued, and T was seen at that turn's end.
+    - **13:** T's hello said 2.1.317, the vendored reference's version, so no mark.
+    - **14:** the run `smoke` counted 0/1 up to 3/3, with up to 3 in a turn and Background for 34.7 s. The registry read T busy throughout, but for a wait while an agent's request was held.
+    - **15:** the `writer` agent's `echo seven`, allowed on T's dial, ended 23 ms later under the same fp and agent id. Step 14's agents had shown the same twice.
+    - **16:** the deck gone for 34 s with no wake between, so the cable: back, and repainted 1 ms later. Before that, the display slept from 15:40 to 16:21 while the user was away: back 5.3 s after the wake, with no system sleep, and with the 10 s and 20 s repaints.
+    - **1, missing:** no key reads Not running on the user's layout. The Others key now sits top right, where the deck's saved slots still put a slot, holding the stopped "Lightroom plugin feedback and improvements" (`local_bafd23f1-…`). Step 1 passed on 11-06, and Phase 9 changed only which session a press acts on, the one shown at press-down, which unit tests cover.
+  - **T refused three tasks from this session:**
+    - task 5, after the Deny: a peer's word doesn't overrule the user's denial;
+    - tasks 6 and 7: the Workflow tool runs only when the user asks in their own words.
+    - The user typed a go-ahead in T each time. The first named only the workflow, so T skipped task 6's background subagent.
+    - On Haiku, the workflow agents ran Bash loops where the task said Grep, and two of them asked.
+    - After each refusal T read needs-you, from the app's own record (`need_input`): right, since it waited on the user.
+  - **Fixes, from the run:**
+    - **`smoke-check.mjs`:** step 14 had passed on step 15's one-agent run, because during the three-agent run the registry read T `waiting` while an agent's request was held. A `waiting` while the deck holds one of the session's requests now counts as busy.
+      - One test was extended, and fails without the change.
+      - Tools 302 of 302. The checker now passes step 14 on `smoke`.
+    - **`smoke-test.md`:**
+      - the user's one go-ahead in T after step 4, covering the Deny and both workflows, which is untried;
+      - step 13 before step 12, since it has no log line;
+      - the agents told "and no other tool";
+      - the registry rule, as above.
+  - **The user, on what the log can't show:**
+    - step 13, "That looks right";
+    - step 14, "the workflow ended quickly but it looked okay from what I saw";
+    - step 16, the keys came back;
+    - the windows and the dialogs in steps 2, 4, 5, 7, 9 and 15, yes.
+  - **Found:**
+    - **The Others key alerts** on a press when no session off the slots needs you, as designed (`session-keys.md`, Others). The user had expected something to happen.
+    - **A stale slot:** the deck keeps a slot's session after its key is gone. If "Lightroom plugin feedback and improvements" ran, no key would show it: Others leaves out every session with a slot, shown or not (`Slots.slotted()`). Approve and Deny would still show its requests. Not fixed; the user didn't take it up.
+  - T and 11-06's throwaway still run, until the user's word to archive them.
 
 ## Progress
 
@@ -1315,3 +1468,9 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **The smoke test passed live,** 2026-11-06: 13 of 14 steps by the log, and the user saw the rest. The Approve and Deny keys weren't pressed.
   - **The user's work Mac,** 2026-11-06: the README's Setup now covers a managed Mac, and a new section covers keeping a second Mac current. GitHub has everything to 7a19008, pushed by the user.
   - **Still to come:** the reboot (C7), a day of use, the idle count after it, and the first real `setup`, on the work Mac.
+- [ ] Phase 9: approvals, agents and wake. Started 2026-11-07; the spec is `docs/claude-code/agents-and-wake.md`, and the Log's last entries say where it stands.
+  - The questions rounds are answered, the investigation is done, and the contract is written (21 fixtures).
+  - The build, the review and its fixes are done, and every check passes (Log, 2026-11-07).
+  - A second review, of the fixes, is done too.
+  - **The smoke test passed live,** 2026-11-08, on deck 0.6.0: 15 of 16 steps by the log, and the user saw the rest. Step 1 had no key reading Not running on the user's layout.
+  - Still to come: the commit and release, and a day on the work Mac.

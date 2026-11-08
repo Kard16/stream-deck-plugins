@@ -14,7 +14,6 @@ import { parseArgs } from 'node:util'
 import { DEFAULTS, readToken, startFakeBridge } from './lib/bridge.mjs'
 import { controlClient, ControlError } from './lib/client.mjs'
 import { REPO } from './lib/fixtures.mjs'
-import { DIAL_PLANS } from './lib/protocol.mjs'
 
 const rel = (p) => {
   const r = path.relative(REPO, p)
@@ -43,7 +42,7 @@ Running it:
 Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}) or --port, with --token-file:
   state                          the deck's view, sessions, held requests, commands, registry
   answer <id> allow|deny|none    answers one held tool request (ids p1, p2… are in state); never
-                                 an ask request, which only its session's dial answers
+                                 an ask request, which the deck never answers
   approve [<id>]                 Approve: the oldest held request, as the key does. With an id, as
                                  a key that showed that request: it alerts if the oldest is another
   deny [<id>]                    Deny: the same
@@ -51,13 +50,9 @@ Commands, to the fake bridge at --url (default http://127.0.0.1:${DEFAULTS.port}
                                  the one its strip showed last: allow or deny a tool request. With
                                  an id, as a dial whose strip showed that request: it alerts if
                                  that one has gone or isn't the session's oldest
-  dial <host> plan <choice> [<id>]
-                                 an ExitPlanMode: ${DIAL_PLANS.join(', ')}. reject is the
-                                 keys' Deny; the others approve it, leaving Plan mode into that mode
-  dial <host> picks <json> [<id>]
-                                 an AskUserQuestion: <json> maps each question's text to the
-                                 labels picked, as '{"Red or blue?": ["Blue"]}'. A question or plan
-                                 the dial can't read shows Answer in app, and a press jumps
+  dial <host> press [<id>]       the same press with nothing picked: it jumps to the session, and
+                                 answers nothing. On an ask request, which reads Answer in app,
+                                 any press jumps
   prompt <host> <text>           the Saved Prompt key with that text: queues a prompt for that
                                  session (local_…), or alerts while the key's last prompt is
                                  still queued, delivered or waiting, and for a session whose mod
@@ -146,42 +141,16 @@ function controlCall(cmd, args) {
   }
 }
 
-const DIAL_SHAPE = `<host> allow|deny [<id>], <host> plan ${DIAL_PLANS.join('|')} [<id>] or <host> picks <json> [<id>]`
+const DIAL_SHAPE = '<host> allow|deny|press [<id>]'
 
 /**
- * The control route's body for `dial`'s arguments: `{host, decision | plan | picks, shown?}`, the id being the request
- * the strip showed. A UsageError for anything else, before any token is read.
+ * The control route's body for `dial`'s arguments: `{host, decision?, shown?}`, `press` being a press with nothing
+ * picked and the id the request the strip showed. A UsageError for anything else, before any token is read.
  */
 function dialPress(args) {
-  const [host, what, ...rest] = args
-  if (!host || !what) throw new UsageError(`dial takes ${DIAL_SHAPE}`)
-  const press = { host }
-  let id
-  if (what === 'allow' || what === 'deny') {
-    if (rest.length > 1) throw new UsageError(`dial ${what} takes the host, then at most the id of the request the strip shows (p3)`)
-    press.decision = what
-    ;[id] = rest
-  } else if (what === 'plan') {
-    if (!DIAL_PLANS.includes(rest[0]) || rest.length > 2) throw new UsageError(`dial plan takes one of ${DIAL_PLANS.join(', ')}, then at most the id of the request the strip shows`)
-    press.plan = rest[0]
-    ;[, id] = rest
-  } else if (what === 'picks') {
-    if (rest.length < 1 || rest.length > 2) throw new UsageError(`dial picks takes a JSON object of each question's labels, as '{"Red or blue?": ["Blue"]}', then at most the id of the request the strip shows`)
-    let picks
-    try {
-      picks = JSON.parse(rest[0])
-    } catch {
-      throw new UsageError(`dial picks: ${rest[0]} isn't JSON`)
-    }
-    const fits = picks !== null && typeof picks === 'object' && !Array.isArray(picks) && Object.values(picks).every((v) => Array.isArray(v) && v.every((l) => typeof l === 'string'))
-    if (!fits) throw new UsageError(`dial picks: ${rest[0]} isn't an object from each question's text to a list of labels`)
-    press.picks = picks
-    ;[, id] = rest
-  } else {
-    throw new UsageError(`dial takes ${DIAL_SHAPE}`)
-  }
-  if (id !== undefined) press.shown = id
-  return press
+  const [host, what, id, ...rest] = args
+  if (!host || !['allow', 'deny', 'press'].includes(what) || rest.length) throw new UsageError(`dial takes ${DIAL_SHAPE}`)
+  return { host, ...(what === 'press' ? {} : { decision: what }), ...(id === undefined ? {} : { shown: id }) }
 }
 
 async function command(values, [cmd, ...args]) {

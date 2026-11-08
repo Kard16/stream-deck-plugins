@@ -5,14 +5,15 @@ import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
 import { fits } from "../src/keys/art.js";
+import { agentPages, agentsHead, MAX_AGENT_PAGES } from "../src/model/format.js";
 import { SessionModel, type SessionView } from "../src/model/sessions.js";
+import type { ThreadAgent, ThreadRun } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
-import { COALESCE_MS } from "../src/sessions/dials.js";
-import { APPROVAL_CHOICES, PLAN_CHOICES, type QuestionItem, SlotDials, type SlotScreen } from "../src/slots/dials.js";
+import { APPROVAL_CHOICES, COALESCE_MS, SlotDials, type SlotScreen } from "../src/slots/dials.js";
 import { dialSlotId } from "../src/slots/ids.js";
 import { Slots } from "../src/slots/slots.js";
 import { MemorySlotStore } from "../src/slots/store.js";
-import { NEWER_MARK, nowLine, pageDots, SLOT_LAYOUTS, SLOT_STRIP_COLORS, SLOT_TEXT, type SlotScreenKind, slotStrip } from "../src/slots/strip.js";
+import { DOT_EM, dotsSize, NEWER_MARK, nowLine, pageDots, SLOT_LAYOUTS, SLOT_STRIP_COLORS, SLOT_TEXT, type SlotScreenKind, slotStrip } from "../src/slots/strip.js";
 import type { Feedback } from "../src/util/painter.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { deckRoot } from "./helpers/paths.js";
@@ -54,10 +55,11 @@ function overlap(a: Item, b: Item): boolean {
 describe("the Session Slot strip's layouts (com.karimdhanji.claude.sdPlugin/layouts/slot-*.json)", () => {
 	// streamdeck validate checks only the layout the manifest names, so these hold its rules for every one the dial
 	// switches to: one item out of the strip, or two at one zOrder overlapping, and the whole layout fails silently.
-	test("one layout per screen kind, each file there, and no stray slot layout", () => {
-		assert.deepEqual(KINDS.sort(), ["approval", "empty", "inApp", "pages", "plan", "question"]);
+	test("one layout per screen kind, each file there, and no stray layout: the Sessions dial's and the question's and plan's went in Phase 9", () => {
+		assert.deepEqual(KINDS.sort(), ["approval", "empty", "inApp", "pages"]);
 		assert.equal(new Set(Object.values(SLOT_LAYOUTS)).size, KINDS.length);
-		const files = readdirSync(LAYOUT_DIR).filter((f) => f.startsWith("slot-"));
+		// Dotfiles aside: Finder may leave a .DS_Store, which git ignores.
+		const files = readdirSync(LAYOUT_DIR).filter((f) => !f.startsWith("."));
 		assert.deepEqual(files.sort(), Object.values(SLOT_LAYOUTS).map((p) => path.basename(p)).sort());
 		const ids = KINDS.map((k) => layoutOf(k).id);
 		assert.equal(new Set(ids).size, ids.length, "ids are unique");
@@ -123,6 +125,40 @@ describe("the Session Slot strip's layouts (com.karimdhanji.claude.sdPlugin/layo
 const NOW = 2_000_000;
 const SLOT = "dev:1:0";
 
+/** A workflow run as a `threads` event lists it: `review`, 5 of 9 ended, unless the test says otherwise. */
+function run(fields: Partial<ThreadRun> = {}): ThreadRun {
+	return { run: "wf_1", name: "review", started: 9, finished: 5, failed: 0, open: 3, ...fields };
+}
+
+/** `n` workflow agents, `agent 1`…, each on a Grep. */
+function agents(n: number): ThreadAgent[] {
+	return Array.from({ length: n }, (_, i) => ({ kind: "workflow", desc: `agent ${i + 1}`, doing: `Grep: pattern ${i + 1}` }));
+}
+
+/** Sessions with other loops in a turn: a workflow's three, ten with only eight listed, and one subagent. */
+const AGENT_SESSIONS = [
+	[
+		"workflow",
+		view({
+			title: "Review the diff",
+			status: "background",
+			since: NOW - 4 * 60_000,
+			context: 62,
+			threads: {
+				running: 3,
+				agents: [
+					{ kind: "workflow", desc: "logs", doing: "Grep: Device" },
+					{ kind: "workflow", desc: "hardware", doing: "" },
+					{ kind: "other", desc: "", doing: "WebSearch: U2725QE firmware update for the hub" },
+				],
+				runs: [run()],
+			},
+		}),
+	],
+	["ten", view({ title: "Many agents", status: "background", threads: { running: 10, agents: agents(8), runs: [] } })],
+	["subagent", view({ title: "One subagent", status: "working", doing: "notes.md", threads: { running: 1, agents: [{ kind: "subagent", desc: "Explore the tests", doing: "" }], runs: [] } })],
+] as const;
+
 function screens(): [string, SlotScreen][] {
 	const working = view({ title: "Stream Deck plugins revision for the session keys", status: "working", doing: "npm test --workspace=claude-code/deck", since: NOW - 4 * 60_000, context: 62.4, tokens: 620_000, window: 1_000_000, cost: 1.239, model: "claude-opus-5-5", effort: "max", mode: "acceptEdits", project: "stream-deck-plugins", summary: "Built the slot strip and its layouts, then ran the deck's tests; all 470 passed after one fix to the painter." });
 	const done = view({ status: "done", seen: false, since: NOW - 3 * 60_000, summary: "Wrote the README" });
@@ -130,7 +166,7 @@ function screens(): [string, SlotScreen][] {
 	const input = view({ status: "needs-you", need: "input", since: NOW - 30_000, needs: "Pick which branch to keep before it carries on with the merge", summary: "Merged two branches" });
 	const off = view({ running: false, listed: false, title: "Yesterday's session", model: "claude-haiku-5-5", effort: "low", mode: "default", project: "notes" });
 	const high = view({ status: "working", context: 91 });
-	const waiting = view({ status: "needs-you", need: "question", since: NOW - 4 * 60_000 });
+	const question = view({ status: "needs-you", need: "question", since: NOW - 4 * 60_000 });
 	const plan = view({ status: "needs-you", need: "plan", since: NOW - 65_000 });
 	const approve = view({ status: "approval", need: "approval", since: NOW - 12_000 });
 	// The Setup page's Claude Code version (hardening.md, C1): on the checked one, and newer, with modes short and long.
@@ -141,32 +177,6 @@ function screens(): [string, SlotScreen][] {
 	const checkedEdits = view({ ...onSetup, mode: "acceptEdits", cc: "2.1.317", ccNewer: false });
 	const newerNoMode = view({ ...onSetup, mode: null, cc: "2.1.318", ccNewer: true });
 	const newerLongMode = view({ ...onSetup, mode: "someFutureModeWithALongName", cc: "2.1.318", ccNewer: true });
-	const options = (picked: string[] = []): QuestionItem[] => [
-		{ t: "option", label: "Red", description: "Warm", ticked: picked.includes("Red") },
-		{ t: "option", label: "Blue", description: null, ticked: picked.includes("Blue") },
-		{ t: "other" },
-	];
-	const multi = (picked: string[], send: boolean): QuestionItem[] => [
-		{ t: "option", label: "Apple", description: "Red or green", ticked: picked.includes("Apple") },
-		{ t: "option", label: "Pear, ripe", description: null, ticked: picked.includes("Pear, ripe") },
-		{ t: "other" },
-		{ t: "next", send, ready: picked.length > 0 },
-	];
-	const q = (fields: Partial<Extract<SlotScreen, { kind: "question" }>>): SlotScreen => ({
-		kind: "question",
-		slot: SLOT,
-		session: waiting,
-		request: 3,
-		index: 0,
-		count: 1,
-		header: "Color",
-		question: "Which colour should the test use for the session keys' amber outline on the deck?",
-		multi: false,
-		items: options(),
-		cursor: null,
-		picked: [],
-		...fields,
-	});
 	const out: [string, SlotScreen][] = [["empty", { kind: "empty", slot: SLOT }]];
 	const sessions = [
 		["working", working],
@@ -185,27 +195,16 @@ function screens(): [string, SlotScreen][] {
 	for (const [name, s] of sessions) {
 		for (let page = 0; page < 3; page++) out.push([`pages ${name} ${page}`, { kind: "pages", slot: SLOT, session: s, page, pages: 3 }]);
 	}
+	// While other loops are in a turn, their Agents pages come after Now (agents-and-wake.md, B2).
+	for (const [name, s] of AGENT_SESSIONS) {
+		const pages = 3 + agentPages(s.threads).length;
+		for (let page = 0; page < pages; page++) out.push([`pages ${name} ${page}`, { kind: "pages", slot: SLOT, session: s, page, pages }]);
+	}
 	for (const pick of [null, 0, 1]) out.push([`approval pick ${pick}`, { kind: "approval", slot: SLOT, session: approve, request: 1, tool: "Bash", summary: "rm -rf build && npm run build && npm test -- --test-name-pattern=slot", choices: APPROVAL_CHOICES, pick }]);
 	out.push(["approval mcp", { kind: "approval", slot: SLOT, session: approve, request: 1, tool: "mcp__ccd_session_mgmt__set_session_permission_mode", summary: "set session permission mode", choices: APPROVAL_CHOICES, pick: null }]);
-	out.push(["question before a turn", q({})]);
-	out.push(["question cursor on an option", q({ cursor: 0 })]);
-	out.push(["question cursor on an option without a description", q({ cursor: 1 })]);
-	out.push(["question cursor on Other…", q({ cursor: 2 })]);
-	out.push(["question 2 of 2, before a turn", q({ index: 1, count: 2, header: null, question: "Which size?" })]);
-	out.push(["question back on the first, picked", q({ count: 2, picked: ["Blue"], items: options(["Blue"]) })]);
-	out.push(["question ticked", q({ multi: true, items: multi(["Apple"], false), cursor: 0, picked: ["Apple"], count: 2 })]);
-	out.push(["question unticked", q({ multi: true, items: multi(["Apple"], false), cursor: 1, picked: ["Apple"], count: 2 })]);
-	out.push(["question next ready", q({ multi: true, items: multi(["Apple"], false), cursor: 3, picked: ["Apple"], count: 2 })]);
-	out.push(["question next not ready", q({ multi: true, items: multi([], false), cursor: 3, count: 2 })]);
-	out.push(["question send ready", q({ multi: true, items: multi(["Pear, ripe"], true), cursor: 3, picked: ["Pear, ripe"], index: 1, count: 2 })]);
-	out.push(["question send not ready", q({ multi: true, items: multi([], true), cursor: 3, index: 1, count: 2 })]);
-	for (const pick of [null, 0, 1, 2, 3]) out.push([`plan pick ${pick}`, { kind: "plan", slot: SLOT, session: plan, request: 4, firstLine: "Add the session keys and dials to the Stream Deck plugin", choices: PLAN_CHOICES, pick }]);
-	out.push(["plan without a file", { kind: "plan", slot: SLOT, session: plan, request: 4, firstLine: null, choices: PLAN_CHOICES, pick: null }]);
-	out.push(["in app, question unreadable", { kind: "inApp", slot: SLOT, session: waiting, request: 5, tool: "AskUserQuestion", summary: "Which colour should the test use for the session keys?", why: "unreadable" }]);
-	out.push(["in app, question too big", { kind: "inApp", slot: SLOT, session: waiting, request: 5, tool: "AskUserQuestion", summary: "Which colour?", why: "too big" }]);
-	out.push(["in app, plan too big", { kind: "inApp", slot: SLOT, session: plan, request: 6, tool: "ExitPlanMode", summary: "Plan ready", why: "too big" }]);
-	out.push(["in app, question scrubbed", { kind: "inApp", slot: SLOT, session: waiting, request: 7, tool: "AskUserQuestion", summary: "Red or blue?", why: "scrubbed" }]);
-	out.push(["in app, plan scrubbed", { kind: "inApp", slot: SLOT, session: plan, request: 8, tool: "ExitPlanMode", summary: "Plan ready", why: "scrubbed" }]);
+	out.push(["in app, question", { kind: "inApp", slot: SLOT, session: question, request: 5, tool: "AskUserQuestion", summary: "Which colour should the test use for th…" }]);
+	out.push(["in app, short question", { kind: "inApp", slot: SLOT, session: question, request: 6, tool: "AskUserQuestion", summary: "Red or blue?" }]);
+	out.push(["in app, plan", { kind: "inApp", slot: SLOT, session: plan, request: 7, tool: "ExitPlanMode", summary: "Plan ready" }]);
 	return out;
 }
 
@@ -246,7 +245,7 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		const all = new Map(screens());
 		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
 		const now = strip("pages working 0");
-		assert.deepEqual(strings(now, "name", "dots", "line1"), ["Stream Deck plu…", "●○○", "Working: npm test --w…"]);
+		assert.deepEqual(strings(now, "name", "dots", "line1"), ["Stream Deck p…", "●○○", "Working: npm test --w…"]);
 		assert.equal((now.line1 as { color: string }).color, "#4A9EFF");
 		// The summary, wrapped by approximate width over two lines, the second cut.
 		assert.deepEqual(strings(now, "line2", "line3"), ["Built the slot strip and", "its layouts, then ran t…"]);
@@ -267,7 +266,7 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		assert.deepEqual(strings(strip("pages blank 2"), "line1", "line2", "line3"), ["Model —", "Mode —", ""]);
 		// A session that isn't running: from its record, dimmed, and a press opens it.
 		const off = strip("pages not running 0");
-		assert.deepEqual(strings(off, "name", "line1", "line2"), ["Yesterday's ses…", "Not running", "Press to open it"]);
+		assert.deepEqual(strings(off, "name", "line1", "line2"), ["Yesterday's s…", "Not running", "Press to open it"]);
 		assert.equal((off.name as { color: string }).color, SLOT_STRIP_COLORS.dim);
 		assert.deepEqual(strings(strip("pages not running 2"), "line1", "line2", "line3"), ["Haiku 5.5 · low", "Manual mode", "notes"]);
 	});
@@ -294,6 +293,26 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		for (const page of [0, 1]) assert.equal((strip(`pages newer ${page}`).line2 as { color?: string }).color, caption, `page ${page}`);
 	});
 
+	test("the page dots fit their item at any count of pages, measured as the app's font draws ● and ○ (SF at weight 700, about 0.95 em each, with its tracking): smaller type than the layout's only when six or five would overflow it", () => {
+		const item = layoutOf("pages").items.find((i) => i.key === "dots");
+		const [width, size] = SLOT_TEXT.pages.dots;
+		assert.deepEqual([width, size, item?.font?.weight], [item?.rect[2], item?.font?.size, 700]);
+		assert.ok(DOT_EM >= 0.972, "at least SF's ○ at weight 700, the widest of the Mac's fonts, with SF's tracking");
+		const most = 3 + MAX_AGENT_PAGES;
+		for (let pages = 1; pages <= most; pages++) {
+			const px = dotsSize(pages);
+			assert.ok(pages * DOT_EM * px <= width, `${pages} dots at ${px} px take ${(pages * DOT_EM * px).toFixed(1)} px of ${width}`);
+			assert.ok(px >= 8 && px <= size, `${pages} dots at ${px} px`);
+		}
+		assert.deepEqual(Array.from({ length: most }, (_, i) => dotsSize(i + 1)), [12, 12, 12, 12, 10, 8]);
+		// The strip sends that size with the dots, and the layout's weight.
+		const s = view({ status: "background", threads: { running: 10, agents: agents(8), runs: [] } });
+		for (const [pages, px] of [[6, 8], [3, 12]] as const) {
+			const dots = slotStrip({ kind: "pages", slot: SLOT, session: s, page: 0, pages }, NOW).feedback.dots;
+			assert.deepEqual(dots, { value: pageDots(0, pages), font: { size: px, weight: 700 } }, `${pages} pages`);
+		}
+	});
+
 	test("the Now line for each status", () => {
 		const line = (fields: Partial<SessionView>) => nowLine(view({ since: NOW - 4 * 60_000, ...fields }), NOW).value;
 		assert.equal(line({ status: "working" }), "Working for 4m");
@@ -304,6 +323,67 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		assert.equal(line({ status: "approval", need: "approval" }), "Approval waiting for 4m");
 		assert.equal(line({ status: "needs-you", need: "plan", since: null }), "Plan waiting");
 		assert.deepEqual([pageDots(0, 3), pageDots(2, 3), pageDots(0, 0)], ["●○○", "○○●", "●"]);
+	});
+
+	test("the Now line while other loops are in a turn: Background or Working with the run in a turn or how many agents, as the key; working's tool only without them (agents-and-wake.md, B2)", () => {
+		const line = (fields: Partial<SessionView>) => nowLine(view({ since: NOW - 4 * 60_000, ...fields }), NOW);
+		const loops = (running: number, runs: ThreadRun[] = []) => ({ running, agents: [], runs });
+		assert.deepEqual(line({ status: "background", threads: loops(3, [run()]) }), { value: "Background: review 5/9", color: "#4A9EFF" });
+		assert.equal(line({ status: "background", threads: loops(3) }).value, "Background: 3 agents");
+		assert.equal(line({ status: "background", threads: loops(1) }).value, "Background: 1 agent");
+		assert.deepEqual(line({ status: "working", threads: loops(2, [run()]), doing: "npm test" }), { value: "Working: review 5/9", color: "#4A9EFF" });
+		assert.equal(line({ status: "working", threads: loops(2), doing: "npm test" }).value, "Working: 2 agents");
+		assert.equal(line({ status: "working", threads: loops(0, [run({ open: 0 })]), doing: "npm test" }).value, "Working: npm test");
+		assert.equal(line({ status: "background" }).value, "Background for 4m", "no picture to say why");
+		// A long run name is cut to the line, its counts whole.
+		assert.equal(line({ status: "background", threads: loops(3, [run({ name: "agents-and-wake-review" })]) }).value, "Background: agent… 5/9");
+	});
+
+	test("the Agents pages: after Now while other loops are in a turn, the run in a turn or how many in the accent colour, then two agents a page; the last of up to three ends +n more; Context and Setup follow; the dots count every page", () => {
+		const all = new Map(screens());
+		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
+		const first = strip("pages workflow 1");
+		assert.deepEqual(strings(first, "dots", "line1", "line2", "line3"), ["○●○○○", "review · 5/9 done", "● logs: Grep: Device", "● hardware"]);
+		assert.equal((first.line1 as { color: string }).color, SLOT_STRIP_COLORS.accent);
+		assert.equal((first.line2 as { color: string }).color, SLOT_STRIP_COLORS.caption, "the second line's colour goes on every page");
+		assert.deepEqual(first.bar, { value: 0, opacity: 0 });
+		// No description: the kind; the doing cut to the line.
+		assert.deepEqual(strings(strip("pages workflow 2"), "dots", "line1", "line2", "line3"), ["○○●○○", "review · 5/9 done", "● other: WebSearch: U27…", ""]);
+		assert.deepEqual(strings(strip("pages workflow 3"), "dots", "line1"), ["○○○●○", "Context 62%"]);
+		assert.deepEqual(strings(strip("pages workflow 4"), "dots"), ["○○○○●"]);
+		assert.deepEqual(strings(strip("pages workflow 0"), "dots", "line1"), ["●○○○○", "Background: review 5/9"]);
+		// Ten running, eight listed: three pages, the last line counting the five that don't fit.
+		assert.equal(agentPages(AGENT_SESSIONS[1][1].threads).length, 3);
+		assert.deepEqual(strings(strip("pages ten 1"), "dots", "line1", "line2", "line3"), ["○●○○○○", "10 agents running", "● agent 1: Grep: patter…", "● agent 2: Grep: patter…"]);
+		assert.deepEqual(strings(strip("pages ten 3"), "dots", "line2", "line3"), ["○○○●○○", "● agent 5: Grep: patter…", "+5 more"]);
+		assert.deepEqual(strings(strip("pages ten 4"), "line1"), ["Context —"]);
+		assert.deepEqual(strings(strip("pages subagent 1"), "dots", "line1", "line2", "line3"), ["○●○○", "1 agent running", "● Explore the tests", ""]);
+		assert.deepEqual(strings(strip("pages subagent 0"), "line1"), ["Working: 1 agent"]);
+		// A long run name is cut, its counts whole.
+		const long = view({ status: "background", threads: { running: 2, agents: agents(2), runs: [run({ name: "agents-and-wake-review" })] } });
+		assert.equal(value(slotStrip({ kind: "pages", slot: SLOT, session: long, page: 1, pages: 4 }, NOW).feedback, "line1"), "agents-and… · 5/9 done");
+	});
+
+	test("which agents the pages list (format.ts's agentPages): two a page, up to three pages, +n more for those running beyond what fits or what the snapshot lists; none while none is in a turn", () => {
+		const of = (running: number, listed: number) => agentPages({ running, agents: agents(listed), runs: [] }).map((p) => p.map((l) => l.replace(/: Grep: pattern \d+$/, "")));
+		assert.deepEqual(of(0, 2), [], "none in a turn");
+		assert.deepEqual(of(1, 1), [["● agent 1"]]);
+		assert.deepEqual(of(6, 6), [["● agent 1", "● agent 2"], ["● agent 3", "● agent 4"], ["● agent 5", "● agent 6"]]);
+		assert.deepEqual(of(7, 7), [["● agent 1", "● agent 2"], ["● agent 3", "● agent 4"], ["● agent 5", "+2 more"]]);
+		assert.deepEqual(of(4, 3), [["● agent 1", "● agent 2"], ["● agent 3", "+1 more"]], "running counts one the snapshot didn't list");
+		assert.deepEqual(of(2, 0), [["+2 more"]]);
+		assert.equal(agentPages(null).length, 0);
+		// The first line (agents-and-wake.md, B2): `<name> · <finished>/<started> done`, or with the failures in place of
+		// `done`; the counts are kept whole, and the name is cut.
+		assert.deepEqual(agentsHead({ running: 3, agents: [], runs: [run()] }), { text: "review · 5/9 done", keep: 11 });
+		assert.deepEqual(agentsHead({ running: 1, agents: [], runs: [run({ failed: 1 })] }), { text: "review · 5/9, 1 failed", keep: 16 });
+		assert.deepEqual(agentsHead({ running: 1, agents: [], runs: [run({ name: "agents-and-wake-review", started: 12, finished: 10, failed: 2 })] }), { text: "agents-and-wake-review · 10/12, 2 failed", keep: 18 });
+		assert.deepEqual(agentsHead({ running: 2, agents: [], runs: [run({ open: 0 })] }), { text: "2 agents running", keep: 0 }, "no run in a turn");
+		assert.deepEqual(agentsHead({ running: 1, agents: [], runs: [] }), { text: "1 agent running", keep: 0 });
+		// On the strip's line, of about 22 characters: a failure fits whole, and a long name is cut, never the counts.
+		const head = (r: ThreadRun) => value(slotStrip({ kind: "pages", slot: SLOT, session: view({ status: "background", threads: { running: 1, agents: agents(1), runs: [r] } }), page: 1, pages: 4 }, NOW).feedback, "line1");
+		assert.equal(head(run({ failed: 1 })), "review · 5/9, 1 failed");
+		assert.equal(head(run({ name: "agents-and-wake-review", started: 12, finished: 10, failed: 2 })), "age… · 10/12, 2 failed");
 	});
 
 	test("an approval: Allow <tool>?, its summary on two lines, and the chips, neither picked until a turn", () => {
@@ -319,55 +399,18 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		assert.equal(value(strip("approval mcp"), "head"), "Allow set sessi…");
 	});
 
-	test("a question: header and 1 of 2, the question wrapped on two lines, the place under the cursor with its description, and 2/3", () => {
+	test("Answer in app: the key's Question or Plan, the summary on up to two lines, and the chip; an empty slot says how to fill it", () => {
 		const all = new Map(screens());
 		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
-		const first = strip("question before a turn");
-		assert.deepEqual(strings(first, "head", "since", "q1", "q2"), ["Color", "4m", "Which colour should the", "test use for the sessio…"]);
-		assert.deepEqual(strings(first, "opt", "pos", "desc"), ["Turn to pick", "", "Or press to answer in app"]);
-		assert.deepEqual(strings(strip("question cursor on an option"), "opt", "pos", "desc"), ["Red", "1/3", "Warm"]);
-		assert.equal((strip("question cursor on an option").opt as { background: string }).background, SLOT_STRIP_COLORS.cursor);
-		assert.deepEqual(strings(strip("question cursor on an option without a description"), "opt", "desc"), ["Blue", "Press to pick"]);
-		assert.deepEqual(strings(strip("question cursor on Other…"), "opt", "pos", "desc"), ["Other…", "3/3", "Press to type it in the app"]);
-		// Later questions, or back on a picked one, a press with nothing under the cursor doesn't jump: no hint.
-		assert.deepEqual(strings(strip("question 2 of 2, before a turn"), "head", "q1", "opt", "desc"), ["Question · 2 of 2", "Which size?", "Turn to pick", ""]);
-		assert.deepEqual(strings(strip("question back on the first, picked"), "head", "desc"), ["Color · 1 of 2", ""]);
-		// Multi-select: ticks, then Next or Send, which need a tick.
-		assert.deepEqual(strings(strip("question ticked"), "opt", "pos", "desc"), ["✓ Apple", "1/4", "Red or green"]);
-		assert.deepEqual(strings(strip("question unticked"), "opt", "desc"), ["Pear, ripe", "Press to tick"]);
-		assert.deepEqual(strings(strip("question next ready"), "opt", "desc"), ["Next →", "On to question 2 of 2"]);
-		assert.deepEqual(strip("question next not ready").opt, { value: "Next", color: SLOT_STRIP_COLORS.dim, background: SLOT_STRIP_COLORS.chip });
-		assert.equal(value(strip("question next not ready"), "desc"), "Tick at least one first");
-		assert.deepEqual(strip("question send ready").opt, { value: "Send", color: "#FFFFFF", background: SLOT_STRIP_COLORS.yes });
-		assert.deepEqual(strings(strip("question send not ready"), "opt", "desc"), ["Send", "Tick at least one first"]);
-	});
-
-	test("a plan: Plan ready, its first line, and its choices as chips in PLAN_CHOICES' order, ✓ approving into a mode and ✗ rejecting", () => {
-		const all = new Map(screens());
-		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
-		const none = strip("plan pick null");
-		assert.deepEqual(strings(none, "head", "since", "line1"), ["Plan ready", "1m", "Add the session keys an…"]);
-		assert.deepEqual(strings(none, "c0", "c1", "c2", "c3"), ["✓ Auto", "✓ Accept edits", "✓ Manual", "✗ Reject"]);
-		const backgrounds = (f: Feedback) => ["c0", "c1", "c2", "c3"].map((k) => (f[k] as { background: string }).background);
-		const { chip, yes, no } = SLOT_STRIP_COLORS;
-		assert.deepEqual(backgrounds(none), [chip, chip, chip, chip]);
-		assert.deepEqual(backgrounds(strip("plan pick 0")), [yes, chip, chip, chip]);
-		assert.deepEqual(backgrounds(strip("plan pick 1")), [chip, yes, chip, chip]);
-		assert.deepEqual(backgrounds(strip("plan pick 2")), [chip, chip, yes, chip]);
-		assert.deepEqual(backgrounds(strip("plan pick 3")), [chip, chip, chip, no]);
-		assert.deepEqual(PLAN_CHOICES.map((c) => c.t === "approve" ? c.mode : c.t), ["auto", "acceptEdits", "default", "reject"], "the chips follow these");
-		assert.equal(value(strip("plan without a file"), "line1"), "Press to read it in app");
-	});
-
-	test("Answer in app: what it is, why the dial can't answer it, and the chip; an empty slot says how to fill it", () => {
-		const all = new Map(screens());
-		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
-		assert.deepEqual(strings(strip("in app, question unreadable"), "head", "line1", "line2", "chip"), ["Question", "Which colour should the…", "The deck can't read it", "Answer in app"]);
-		assert.deepEqual(strip("in app, question unreadable").chip, { value: "Answer in app", color: "#FFFFFF", background: SLOT_STRIP_COLORS.inApp });
-		assert.deepEqual(strings(strip("in app, question too big"), "line1", "line2"), ["Which colour?", "Too long for the deck"]);
-		assert.deepEqual(strings(strip("in app, plan too big"), "head", "line1", "line2"), ["Plan ready", "Too long for the deck", ""]);
-		assert.deepEqual(strings(strip("in app, question scrubbed"), "head", "line1", "line2", "chip"), ["Question", "Red or blue?", "Holds the deck's token", "Answer in app"]);
-		assert.deepEqual(strings(strip("in app, plan scrubbed"), "head", "line1", "line2", "chip"), ["Plan ready", "Holds the deck's token", "", "Answer in app"]);
+		const chip = { value: "Answer in app", color: "#FFFFFF", background: SLOT_STRIP_COLORS.inApp };
+		const question = strip("in app, question");
+		// A summary is at most 40 characters (PROTOCOL.md, Fingerprints and summaries), so two lines hold it.
+		assert.deepEqual(strings(question, "head", "since", "line1", "line2"), ["Question", "4m", "Which colour should the", "test use for th…"]);
+		assert.deepEqual(question.chip, chip);
+		assert.deepEqual(strings(strip("in app, short question"), "head", "line1", "line2"), ["Question", "Red or blue?", ""]);
+		const plan = strip("in app, plan");
+		assert.deepEqual(strings(plan, "head", "since", "line1", "line2"), ["Plan", "1m", "Plan ready", ""]);
+		assert.deepEqual(plan.chip, chip);
 		assert.deepEqual(strings(slotStrip({ kind: "empty", slot: SLOT }, NOW).feedback, "name", "line1", "line2"), ["No session", "Hold the key above", "to add the one on screen"]);
 	});
 });
@@ -443,40 +486,24 @@ describe("the Session Slot strip on a live dial (SlotDials with slotStrip)", () 
 		assert.ok(calls.length >= 5, "it still keeps up");
 	});
 
-	test("a question: its layout before its keys; the hint shows exactly while a press jumps; the since ticks alone", () => {
+	test("a question: Answer in app's layout before its keys; a turn changes nothing, a press jumps, and the since ticks alone", () => {
 		const { clock, dials, calls, sent, jumps, press, ask, alerts, at } = liveDial();
 		clock.advance(1000);
 		calls.length = 0;
-		ask({
-			questions: [
-				{ question: "Red or blue?", header: "Color", options: [{ label: "Red", description: "Warm" }, { label: "Blue", description: "Cool" }], multiSelect: false },
-				{ question: "Which size?", header: "Size", options: [{ label: "Small" }, { label: "Large" }], multiSelect: false },
-			],
-		});
-		const question = layoutOf("question").items.map((i) => i.key).sort().join(",");
-		assert.deepEqual(calls, ["layout layouts/slot-question.json", `feedback ${question}`]);
+		ask({ questions: [{ question: "Red or blue?", header: "Color", options: [{ label: "Red" }, { label: "Blue" }], multiSelect: false }] });
+		const inApp = layoutOf("inApp").items.map((i) => i.key).sort().join(",");
+		assert.deepEqual(calls, ["layout layouts/slot-inapp.json", `feedback ${inApp}`]);
 		const shown = () => {
 			const p = dials.painted("d") as Record<string, { value: unknown }>;
-			return [p.head?.value, p.opt?.value, p.desc?.value];
+			return [p.head?.value, p.line1?.value, p.chip?.value];
 		};
-		assert.deepEqual(shown(), ["Color · 1 of 2", "Turn to pick", "Or press to answer in app"]);
-		// The hint is right: a press now jumps.
-		press();
-		assert.deepEqual(jumps, ["local_a"]);
-		// Pick Red, which moves to the second question: no hint there, and a press with nothing under the cursor alerts.
+		assert.deepEqual(shown(), ["Question", "Red or blue?", "Answer in app"]);
+		calls.length = 0;
 		dials.rotate("d", 1, false);
-		clock.advance(1100);
+		clock.advance(1000);
+		assert.deepEqual(calls, [], "a turn changes nothing on the strip");
 		press();
-		clock.advance(200);
-		assert.deepEqual(shown(), ["Size · 2 of 2", "Turn to pick", ""]);
-		press();
-		assert.deepEqual([jumps.length, alerts()], [1, 1]);
-		// Back on the first, picked: still no hint, and still no jump.
-		dials.tap("d", true);
-		clock.advance(200);
-		assert.deepEqual(shown(), ["Color · 1 of 2", "Turn to pick", ""]);
-		press();
-		assert.deepEqual([jumps.length, alerts()], [1, 2]);
+		assert.deepEqual([jumps, alerts()], [["local_a"], 0]);
 		// A minute on, only the since changes.
 		clock.advance(1000);
 		sent.length = 0;

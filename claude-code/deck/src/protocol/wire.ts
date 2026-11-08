@@ -17,9 +17,8 @@ export const ROUTES = {
 } as const;
 
 /**
- * The hook's answers (PROTOCOL.md, Permission requests): Allow, Deny and no decision here, and the Answer and the
- * Approve plan, which only a Session Slot dial sends, from answerDecision and approvePlanDecision below. Only those
- * two carry updatedInput, and only an Approve plan carries updatedPermissions.
+ * The hook's answers (PROTOCOL.md, Permission requests): Allow, Deny and no decision. Every answer is exactly one of
+ * these three: the deck never sends `updatedInput` or `updatedPermissions` (Phase 9).
  */
 export const ALLOW_DECISION = {
 	hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } },
@@ -29,57 +28,21 @@ export const DENY_MESSAGE = "Denied from the Stream Deck.";
 export const DENY_DECISION = {
 	hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: DENY_MESSAGE, interrupt: true } },
 } as const;
-/** No decision: the app's own dialog decides. */
-export const NO_DECISION = {} as const;
+/** No decision: the app's own dialog decides. Typed so that no object with a field fits it. */
+export const NO_DECISION: Readonly<Record<string, never>> = {};
+/** The only bodies a held request is ever answered with: a body with any other field doesn't type-check. */
+export type HookAnswer = typeof ALLOW_DECISION | typeof DENY_DECISION | typeof NO_DECISION;
 
 /** The two tools that need the person: Claude Code ignores a plain Allow for them (the engine check, 2026-11-04). */
 export const ASK_QUESTION = "AskUserQuestion";
 export const EXIT_PLAN = "ExitPlanMode";
 
 /**
- * Kind `ask`: the Approve and Deny keys never answer these, and a press on them jumps to the session (kickoff answer
- * 3). Only the session's own Session Slot dial answers one: an Answer for a question, an Approve plan or a Deny for a
- * plan (PROTOCOL.md, Permission requests).
+ * Kind `ask`: the deck never answers these (Phase 9, at the user's word). The Approve and Deny keys and the session's
+ * Session Slot dial read "Answer in app", and a press on any of them jumps to the session (PROTOCOL.md, Permission
+ * requests).
  */
 export const ASK_TOOLS: ReadonlySet<string> = new Set([ASK_QUESTION, EXIT_PLAN]);
-
-/** The modes an Approve plan leaves Plan mode into, in the order the dial offers them (session-keys.md, Plans). */
-export const PLAN_MODES = ["auto", "acceptEdits", "default"] as const;
-export type PlanMode = (typeof PLAN_MODES)[number];
-
-export function isPlanMode(v: unknown): v is PlanMode {
-	return typeof v === "string" && (PLAN_MODES as readonly string[]).includes(v);
-}
-
-/** An Allow that carries `updatedInput`, and for a plan `updatedPermissions`: what Claude Code takes for the two tools. */
-export type UpdatedAllow = {
-	hookSpecificOutput: {
-		hookEventName: "PermissionRequest";
-		decision: { behavior: "allow"; updatedInput: unknown; updatedPermissions?: { type: "setMode"; mode: PlanMode; destination: "session" }[] };
-	};
-};
-
-/**
- * The Answer, for an AskUserQuestion: Allow with `updatedInput`, the request's `tool_input` exactly as it came with one
- * key added, `answers` (PROTOCOL.md, Permission requests). An `updatedInput` that fails the tool's schema becomes a
- * deny, so nothing else changes. `input` is never changed: the answered input is a copy.
- */
-export function answerDecision(input: Obj, answers: Readonly<Record<string, string>>): UpdatedAllow {
-	return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedInput: { ...input, answers: { ...answers } } } } };
-}
-
-/**
- * The Approve plan, for an ExitPlanMode: Allow with the request's `tool_input` unchanged, and one `setMode` for the
- * session. `destination` is always `session`: the others write settings files (PROTOCOL.md, Permission requests).
- */
-export function approvePlanDecision(input: unknown, mode: PlanMode): UpdatedAllow {
-	return {
-		hookSpecificOutput: {
-			hookEventName: "PermissionRequest",
-			decision: { behavior: "allow", updatedInput: input, updatedPermissions: [{ type: "setMode", mode, destination: "session" }] },
-		},
-	};
-}
 
 /**
  * The app's `local_…` ids, as its own `claude://code/continue` route accepts them (S5). Anything else, an
@@ -119,6 +82,11 @@ export type PermissionRequest = HookRequest & {
 	/** `permission_mode` and `effort.level`, the session's settings when the request was made. */
 	mode: string | null;
 	effort: string | null;
+	/**
+	 * `agent_id`, there only for another loop's request than the main one's, the same id as that loop's events' `agent`;
+	 * null for anything but a non-empty string, as for an event's `agent` (PROTOCOL.md, Permission requests).
+	 */
+	agent: string | null;
 };
 
 /** Null when the body isn't an object with a `tool_name`. */
@@ -127,7 +95,7 @@ export function parsePermission(body: unknown): PermissionRequest | null {
 	if (!hook || !isObj(body)) return null;
 	// `effort` is `{level}` in 2.1.309's hook input; a plain string is read too.
 	const effort = isObj(body.effort) ? text(body.effort.level, 40) : text(body.effort, 40);
-	return { ...hook, mode: text(body.permission_mode, 40), effort };
+	return { ...hook, mode: text(body.permission_mode, 40), effort, agent: text(body.agent_id) };
 }
 
 /** What the bridge reads from the hook's body: the session it says it's from, the tool and its input. */
@@ -181,7 +149,61 @@ export type ModEvent =
 	| { t: "measure"; percent: number | null; tokens: number | null; window: number | null; usd: number | null }
 	| { t: "settings"; model: string | null; mode: string | null; effort: string | null }
 	| { t: "attach" | "detach"; surface: string | null }
-	| { t: "end"; reason: string | null };
+	| { t: "end"; reason: string | null }
+	| { t: "threads"; threads: Threads };
+
+/** The kinds of loop a session runs beside its main one (PROTOCOL.md, Events: threads). */
+export const AGENT_KINDS = ["workflow", "teammate", "fork", "background", "subagent", "other"] as const;
+export type AgentKind = (typeof AGENT_KINDS)[number];
+/** One of the session's other loops in a turn: its kind, description and latest tool call. A workflow agent's `run` isn't kept. */
+export type ThreadAgent = { kind: AgentKind; desc: string; doing: string };
+/** A workflow run: its agents started, ended, ended failing, and in a turn now. */
+export type ThreadRun = { run: string; name: string; started: number; finished: number; failed: number; open: number };
+/** A `threads` snapshot: how many other loops are in a turn, some of them, the most recent first, and some runs. */
+export type Threads = { running: number; agents: ThreadAgent[]; runs: ThreadRun[] };
+
+/** What a snapshot keeps at most (PROTOCOL.md, Events: threads). */
+export const MAX_THREAD_AGENTS = 8;
+export const MAX_THREAD_RUNS = 3;
+const MAX_THREAD_TEXT = 60;
+
+/** A whole number from 0, else 0: `running` and a run's counts. */
+function count(v: unknown): number {
+	return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : 0;
+}
+
+/** A string cut to MAX_THREAD_TEXT, its last character an ellipsis; anything else is "". */
+function threadText(v: unknown): string {
+	if (typeof v !== "string") return "";
+	return v.length > MAX_THREAD_TEXT ? `${v.slice(0, MAX_THREAD_TEXT - 1)}…` : v;
+}
+
+/** The objects of an array, at most `max` of them; anything that isn't an array has none (PROTOCOL.md: "taken with care"). */
+function objects(v: unknown, max: number): Obj[] {
+	return (Array.isArray(v) ? v : []).filter(isObj).slice(0, max);
+}
+
+function parseThreads(e: Obj): Threads {
+	const kinds: readonly string[] = AGENT_KINDS;
+	return {
+		running: count(e.running),
+		agents: objects(e.agents, MAX_THREAD_AGENTS).map((a) => ({
+			kind: typeof a.kind === "string" && kinds.includes(a.kind) ? (a.kind as AgentKind) : "other",
+			desc: threadText(a.desc),
+			doing: threadText(a.doing),
+		})),
+		runs: objects(e.runs, MAX_THREAD_RUNS).map((r) => ({
+			run: threadText(r.run),
+			// On one line, as the log's THREADS lines name it; else the mod's own name for a run no Workflow result named
+			// (PROTOCOL.md, Events: threads).
+			name: threadText(r.name).replace(/\s+/g, " ").trim() || "workflow",
+			started: count(r.started),
+			finished: count(r.finished),
+			failed: count(r.failed),
+			open: count(r.open),
+		})),
+	};
+}
 
 export function parseEvent(e: unknown): ModEvent | null {
 	if (!isObj(e) || typeof e.t !== "string") return null;
@@ -213,6 +235,8 @@ export function parseEvent(e: unknown): ModEvent | null {
 			return { t: e.t, surface: text(e.surface, 40) };
 		case "end":
 			return { t: "end", reason: text(e.reason, 80) };
+		case "threads":
+			return { t: "threads", threads: parseThreads(e) };
 		default:
 			return null;
 	}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { StripPainter } from "../src/util/painter.js";
+import { KeyPainter, StripPainter } from "../src/util/painter.js";
 import { MAX_TICK_MS, RETRY_TICK_MS, TICK_SLACK_MS, Ticker } from "../src/util/ticker.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { RecordingLog } from "./helpers/recording-log.js";
@@ -54,6 +54,60 @@ describe("the strip painter's shown (what a press on a Session Slot dial acts on
 		painter.update({ a: { value: 1 }, b: { value: 3 } });
 		assert.deepEqual(sent, [{ a: { value: 1 }, b: { value: 2 } }, { b: { value: 3 } }]);
 		assert.equal(painter.shown, undefined);
+	});
+
+	test("while no Stream Deck is connected, it sends nothing and nothing changes: no onShown, the same shown and since; once one is, the latest goes (agents-and-wake.md, C3)", () => {
+		const clock = new FakeClock();
+		const sent: unknown[] = [];
+		const shown: unknown[] = [];
+		let live = true;
+		const painter = new StripPainter<number>((p) => sent.push(p), { clock, minIntervalMs: 0, onShown: (s) => shown.push(s), live: () => live });
+		painter.update({ a: { value: 1 } }, 1);
+		const since = clock.now();
+		live = false;
+		clock.advance(5000);
+		painter.update({ a: { value: 2 } }, 2);
+		painter.update({ a: { value: 3 } }, 3);
+		assert.deepEqual([sent.length, shown, painter.shown, painter.shownSince, painter.painted], [1, [1], 1, since, { a: { value: 1 } }]);
+		live = true;
+		clock.advance(1000);
+		painter.update({ a: { value: 4 } }, 4);
+		assert.deepEqual([sent, shown, painter.shown, painter.shownSince], [[{ a: { value: 1 } }, { a: { value: 4 } }], [1, 4], 4, clock.now()], "4's since is its paint, not an update that reached nothing");
+		painter.dispose();
+	});
+});
+
+describe("the key painter (src/util/painter.ts)", () => {
+	test("while no Stream Deck is connected, it sends nothing and nothing changes; once one is, the latest goes, and what it shows is timed from that paint (agents-and-wake.md, C3)", () => {
+		const clock = new FakeClock();
+		const sent: string[] = [];
+		let live = false;
+		const painter = new KeyPainter<number>((svg) => sent.push(svg), { clock, minIntervalMs: 0, live: () => live });
+		painter.update("<a/>", 1);
+		clock.advance(5000);
+		painter.update("<b/>", 2);
+		assert.deepEqual([sent, painter.shown, painter.shownSince, painter.svg], [[], undefined, null, null]);
+		live = true;
+		clock.advance(1000);
+		painter.update("<b/>", 2);
+		assert.deepEqual([sent, painter.shown, painter.shownSince], [["<b/>"], 2, clock.now()]);
+		painter.dispose();
+	});
+
+	test("forget: the next update sends the image again, unchanged too, once; what it showed and since when stay (agents-and-wake.md, C2)", () => {
+		const clock = new FakeClock();
+		const sent: string[] = [];
+		const painter = new KeyPainter<number>((svg) => sent.push(svg), { clock, minIntervalMs: 0 });
+		painter.update("<a/>", 1);
+		const since = clock.now();
+		clock.advance(3000);
+		painter.update("<a/>", 1);
+		assert.deepEqual(sent, ["<a/>"], "unchanged: not sent");
+		painter.forget();
+		painter.update("<a/>", 1);
+		painter.update("<a/>", 1);
+		assert.deepEqual([sent, painter.shown, painter.shownSince], [["<a/>", "<a/>"], 1, since], "sent again once; the same thing, seen since its first paint");
+		painter.dispose();
 	});
 });
 

@@ -63,7 +63,7 @@ export type PlaceResult = { ok: true; host: string; from: SlotId | null; replace
  * (hardening.md, B6), when a `since` the slot keys, the slot dials or Others show next reads differently: the earliest
  * such moment over the running sessions on a showing slot and, while an Others key shows (`showsOthers`), the one
  * waiting longest off the slots. Nothing else they show changes with the time, so they repaint then and at no other
- * time.
+ * time. The tick runs only while a Stream Deck is connected (`setDeckConnected`).
  */
 export class Slots {
 	readonly #model: SlotsModel;
@@ -82,6 +82,8 @@ export class Slots {
 	readonly #othersShown = new Set<object>();
 	/** The repaint tick, at the next moment a `since` the slots' keys, dials or Others show reads differently. */
 	readonly #ticker: Ticker;
+	/** Whether a Stream Deck is connected: the tick runs only while one is (agents-and-wake.md, C3). */
+	#deckConnected = true;
 
 	/** `fillDelayMs`: FILL_DELAY_MS; 0 fills a slot as it appears. */
 	constructor(model: SlotsModel, opts: { store?: SlotStore; log?: Log; clock?: Clock; fillDelayMs?: number } = {}) {
@@ -142,6 +144,16 @@ export class Slots {
 	/** When the repaint tick is due, wall-clock ms; null for none: nothing the slots show changes with the time. For tests. */
 	get nextTick(): number | null {
 		return this.#ticker.next;
+	}
+
+	/**
+	 * Whether a Stream Deck is connected (agents-and-wake.md, C3). While none is, the repaint tick doesn't run: nothing
+	 * would show its labels. When one connects, the tick is timed afresh. True until told otherwise.
+	 */
+	setDeckConnected(connected: boolean): void {
+		if (connected === this.#deckConnected) return;
+		this.#deckConnected = connected;
+		this.#schedule();
 	}
 
 	/** That key or dial doesn't show `slot` any more. The slot keeps its session. */
@@ -294,9 +306,13 @@ export class Slots {
 	/**
 	 * Times the repaint tick afresh: at the first moment a `since` shown next reads differently (format.ts's
 	 * sinceChangesAt), that of each running session on a showing slot, which its key and its dial show, and, while an
-	 * Others key shows, that of the one waiting longest off the slots.
+	 * Others key shows, that of the one waiting longest off the slots. None while no Stream Deck is connected.
 	 */
 	#schedule(): void {
+		if (!this.#deckConnected) {
+			this.#ticker.stop();
+			return;
+		}
 		try {
 			const now = this.#model.wallNow();
 			const sinces: (number | null)[] = [];

@@ -126,52 +126,29 @@ export function scrubber(token) {
  * A parsed body with the token taken out of every string in it, names included, as the deck's bridge takes it out
  * (scrubJson in claude-code/deck/src/bridge/server.ts; PROTOCOL.md, "Transport"): after parsing, so a number that holds
  * a run of the token's digits is left alone, and a body that parses is never refused for the scrub. `scrub` is
- * secretScrubber's, for the token as it is. Also whether that changed anything inside the body's own top-level
- * `tool_input`, a value or a name at any depth, or the input itself when it's a string (`inputScrubbed`): such an input
- * can't go back as it came, so an ask request's is display-only. A change anywhere else, a transcript path say, doesn't
- * count. The body is changed in place, since nothing else holds it, and walked from a list of the objects and arrays
- * still to visit rather than by recursion, so no depth of nesting can overflow the stack. A renamed key is defined as
- * JSON.parse defines it, so a "__proto__" stays an ordinary key; of two names that scrub alike, the later value wins,
- * in the earlier's place.
+ * secretScrubber's, for the token as it is. The body is changed in place, since nothing else holds it, and walked from
+ * a list of the objects and arrays still to visit rather than by recursion, so no depth of nesting can overflow the
+ * stack. A renamed key is defined as JSON.parse defines it, so a "__proto__" stays an ordinary key; of two names that
+ * scrub alike, the later value wins, in the earlier's place.
  */
 export function scrubBody(body, scrub) {
-  if (typeof body === 'string') return { body: scrub(body), inputScrubbed: false }
-  let inputScrubbed = false
-  // Beside each object or array still to visit, whether it's the body's tool_input or inside it.
+  if (typeof body === 'string') return scrub(body)
   const todo = [body]
-  const inInput = [false]
   while (todo.length > 0) {
     const value = todo.pop()
-    const inside = inInput.pop() === true
     if (Array.isArray(value)) {
       for (let i = 0; i < value.length; i++) {
         const v = value[i]
-        if (typeof v === 'string') {
-          const s = scrub(v)
-          if (inside && s !== v) inputScrubbed = true
-          value[i] = s
-        } else if (v !== null && typeof v === 'object') {
-          todo.push(v)
-          inInput.push(inside)
-        }
+        if (typeof v === 'string') value[i] = scrub(v)
+        else if (v !== null && typeof v === 'object') todo.push(v)
       }
     } else if (isObject(value)) {
       let renamed = false
       for (const k of Object.keys(value)) {
         const v = value[k]
-        const input = inside || (value === body && k === 'tool_input')
-        if (typeof v === 'string') {
-          const s = scrub(v)
-          if (input && s !== v) inputScrubbed = true
-          value[k] = s
-        } else if (v !== null && typeof v === 'object') {
-          todo.push(v)
-          inInput.push(input)
-        }
-        if (scrub(k) !== k) {
-          renamed = true
-          if (inside) inputScrubbed = true
-        }
+        if (typeof v === 'string') value[k] = scrub(v)
+        else if (v !== null && typeof v === 'object') todo.push(v)
+        if (scrub(k) !== k) renamed = true
       }
       if (!renamed) continue
       const entries = Object.entries(value)
@@ -179,7 +156,7 @@ export function scrubBody(body, scrub) {
       for (const [k, v] of entries) Object.defineProperty(value, scrub(k), { value: v, writable: true, enumerable: true, configurable: true })
     }
   }
-  return { body, inputScrubbed }
+  return body
 }
 
 function clock(d = new Date()) {
@@ -503,7 +480,6 @@ export async function startFakeBridge(options = {}) {
           return
         }
         let body
-        let inputScrubbed = false
         if (method === 'POST' && !(isControl && text === '')) {
           let parsed
           try {
@@ -515,12 +491,8 @@ export async function startFakeBridge(options = {}) {
           // The token, and any run of it, is taken out of every string and name before anything reads the body, as
           // the deck takes it out (PROTOCOL.md, "Transport"): a summary cut short, the bridge's or the mod's, could
           // otherwise carry part of it into the state and the log. A request whose input held the token then gets
-          // another fp than the mod's, and is released by the other rules. A permission request whose tool_input the
-          // scrub changed can't be echoed back as it came, as an Answer or an Approve plan must be (PROTOCOL.md,
-          // "Permission requests"): the deck keeps no such input, and its dial shows Answer in app.
-          const scrubbed = scrubBody(parsed, scrubToken)
-          body = scrubbed.body
-          inputScrubbed = route === ROUTES.permission && scrubbed.inputScrubbed
+          // another fp than the mod's, and is released by the other rules.
+          body = scrubBody(parsed, scrubToken)
           entry.body = forLog(body, text)
           if (!isObject(body)) {
             reject(400, 'the body must be a JSON object')
@@ -540,7 +512,7 @@ export async function startFakeBridge(options = {}) {
         // Taken once it's answered or held: after the second reading of the registry, for a request that needs one.
         let pending
         try {
-          pending = dispatch(route, url, req, body, responder, watchClose, inputScrubbed)
+          pending = dispatch(route, url, req, body, responder, watchClose)
         } catch (err) {
           routeFailed(err)
         }
@@ -575,12 +547,12 @@ export async function startFakeBridge(options = {}) {
    * Hands a request to the deck. Returns a promise when the deck needs the registry read once more first
    * (PROTOCOL.md, "Desktop sessions only"), which settles once the request is answered or held; else nothing.
    */
-  function dispatch(route, url, req, body, responder, watchClose, inputScrubbed) {
+  function dispatch(route, url, req, body, responder, watchClose) {
     switch (route) {
       case ROUTES.permission: {
         const hostHeader = req.headers['x-deck-host']
         const take = () => {
-          const r = deck.permission({ body, hostHeader, responder, inputScrubbed })
+          const r = deck.permission({ body, hostHeader, responder })
           if (r.id) watchClose(() => deck.clientClosed(r.id))
         }
         // A hook's request from a session the latest reading doesn't confirm: the registry is read once more, and the
@@ -650,8 +622,13 @@ export async function startFakeBridge(options = {}) {
           send(200, deck.press(route.slice('/control/'.length), Object.hasOwn(b, 'shown') ? { shown: b.shown } : {}))
           return
         case '/control/dial':
-          // A Session Slot dial's press for its session's request: `shown` as for the keys, the request its strip showed.
-          send(200, deck.dial({ host: b.host, picks: b.picks, decision: b.decision, plan: b.plan, ...(Object.hasOwn(b, 'shown') ? { shown: b.shown } : {}) }))
+          // A Session Slot dial's press for its session's request, with a decision or nothing picked: `shown` as for the
+          // keys, the request its strip showed. Any other field is a press the dial can't make since Phase 9.
+          {
+            const stray = Object.keys(b).find((k) => !['host', 'decision', 'shown'].includes(k))
+            if (stray !== undefined) throw new BadRequest(`a dial press has a host, and at most a decision and the request its strip showed; got ${stray}`)
+          }
+          send(200, deck.dial({ host: b.host, decision: b.decision, ...(Object.hasOwn(b, 'shown') ? { shown: b.shown } : {}) }))
           return
         case '/control/prompt':
           send(200, deck.prompt({ host: b.host, text: b.text }))

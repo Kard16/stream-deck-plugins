@@ -6,6 +6,7 @@ import type { RouteAnswer } from "../src/bridge/server.js";
 import { HELLOS_KEPT, SessionModel } from "../src/model/sessions.js";
 import { sessionStatus } from "../src/model/status.js";
 import { fingerprint } from "../src/protocol/fingerprint.js";
+import { AGENT_KINDS, parseEvent, type ThreadRun, type Threads } from "../src/protocol/wire.js";
 import type { AppRecord } from "../src/records/records.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { idleCounts, resetIdleCounts } from "../src/util/idle.js";
@@ -97,7 +98,7 @@ function setup(registry: RegistrySession[] = [reg(1, A), reg(2, B)], opts: { res
 }
 
 describe("session status (PROTOCOL.md's order)", () => {
-	const base = { heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: 1000, firstReadingAt: 1000, turn: null, recordCategory: null };
+	const base = { heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: 1000, firstReadingAt: 1000, turn: null, recordCategory: null, running: 0 };
 	/** The main loop's last turn, whose `turn.start` the deck got at 3000, and its `turn.end` at 5000. */
 	const ended = (reason: string, failed = false) => ({ ended: true, reason, failed, startedAt: 3000, endedAt: 5000 });
 	/** An unfinished turn with no start time: rule 3's clause for a turn.start has nothing to compare. */
@@ -174,6 +175,27 @@ describe("session status (PROTOCOL.md's order)", () => {
 		assert.equal(sessionStatus({ ...idle, statusUpdatedAt: 4000, recordCategory: "blocked" }), "working");
 		assert.equal(sessionStatus({ ...idle, registry: "waiting", statusUpdatedAt: 4000 }), "needs-you");
 		assert.equal(sessionStatus({ ...idle, registry: null, statusUpdatedAt: 4000 }), "idle");
+	});
+
+	test("rule 3's background: other loops in a turn while the main loop isn't, whatever the registry says; after approval and needs-you, before failed, interrupted, the app's indicator, done and idle (Phase 9)", () => {
+		const bg = { ...base, running: 2 };
+		assert.equal(sessionStatus({ ...bg, turn: ended("error", true) }), "background", "before failed");
+		assert.equal(sessionStatus({ ...bg, turn: ended("aborted") }), "background", "before interrupted");
+		assert.equal(sessionStatus({ ...bg, turn: ended("answer"), recordCategory: "blocked" }), "background", "before the app's needs-input indicator");
+		assert.equal(sessionStatus({ ...bg, turn: ended("answer") }), "background", "before done");
+		assert.equal(sessionStatus(bg), "background", "the deck has seen no turn: the main loop isn't in one");
+		// Whatever the registry says: a busy from before the turn's end or after it, an idle that trails, or none.
+		for (const registry of ["busy", "idle", null]) {
+			for (const statusUpdatedAt of [4000, 6000]) assert.equal(sessionStatus({ ...bg, registry, statusUpdatedAt, turn: ended("answer") }), "background", `${registry} from ${statusUpdatedAt}`);
+		}
+		assert.equal(sessionStatus({ ...bg, heldTool: 1, turn: ended("answer") }), "approval");
+		assert.equal(sessionStatus({ ...bg, heldAsk: 1, turn: ended("answer") }), "needs-you");
+		assert.equal(sessionStatus({ ...bg, registry: "waiting", turn: ended("answer") }), "needs-you");
+		// While the main loop's turn runs, it's working.
+		const turnRuns = { ended: false, reason: null, failed: false, startedAt: 5000, endedAt: null };
+		assert.equal(sessionStatus({ ...bg, registry: "busy", turn: turnRuns }), "working");
+		assert.equal(sessionStatus({ ...bg, registry: "idle", statusUpdatedAt: 4000, turn: turnRuns }), "working");
+		assert.equal(sessionStatus({ ...base, turn: ended("answer") }), "done", "with no other loop, as before");
 	});
 });
 
@@ -464,9 +486,38 @@ describe("session model", () => {
 		const fp = fingerprint("Write", write);
 		events(B, { t: "tool.end", tool: "Write", use: "u1", fp, ok: true });
 		assert.equal(model.held.size, 2);
-		events(A, { t: "tool.end", tool: "Write", use: "u1", agent: "sub", fp, ok: true });
-		assert.deepEqual(first.answers, [{ status: 200, body: {} }], "subagents' calls count too");
+		events(A, { t: "tool.end", tool: "Write", use: "u1", fp, ok: true });
+		assert.deepEqual(first.answers, [{ status: 200, body: {} }]);
 		assert.deepEqual(second.answers, []);
+	});
+
+	test("rule 1 matches the loop (Phase 9): an agent's tool.end releases only that agent's request, and the main loop's only one with no agent_id", () => {
+		const { model, log, events, permission } = setup([reg(1, A, { status: "busy" })]);
+		const npm = { command: "npm test" };
+		const fp = fingerprint("Bash", npm);
+		const s1 = permission(A, "Bash", npm, { agent_id: "s1" });
+		const main = permission(A, "Bash", npm);
+		// agent_id is kept only as a non-empty string: anything else is the main loop's.
+		const empty = permission(A, "Bash", npm, { agent_id: "" });
+		assert.deepEqual(model.held.list().map((h) => h.agent), ["s1", null, null]);
+		assert.ok(log.at("info").includes(`info HELD #1 tool "Bash" "npm test" fp ${fp} from ${A} agent "s1"; 1 held`), log.at("info").join("\n"));
+		assert.ok(log.at("info").includes(`info HELD #2 tool "Bash" "npm test" fp ${fp} from ${A}; 2 held`), "no agent part for the main loop's");
+		// Another agent's identical call: nothing.
+		events(A, { t: "tool.end", tool: "Bash", use: "u1", agent: "s2", fp, ok: true });
+		assert.equal(model.held.size, 3);
+		// The main loop's: the oldest with no agent, though s1's is older.
+		events(A, { t: "tool.end", tool: "Bash", use: "u2", fp, ok: true });
+		assert.deepEqual([s1.answers, main.answers, empty.answers], [[], [NONE], []]);
+		// s1's own: its request, never a main-loop one.
+		events(A, { t: "tool.end", tool: "Bash", use: "u3", agent: "s1", fp, ok: true });
+		assert.deepEqual([s1.answers, empty.answers], [[NONE], []]);
+		assert.deepEqual(
+			log.at("info").filter((l) => l.includes("RELEASED")),
+			[
+				`info RELEASED #2 "Bash": the session reported the call's end (rule 1, fp ${fp}); 2 held`,
+				`info RELEASED #1 "Bash": the session reported the call's end (rule 1, fp ${fp}, agent "s1"); 1 held`,
+			],
+		);
 	});
 
 	test("rule 2: leaving waiting releases the session's only request, if it came before the change", () => {
@@ -1026,14 +1077,14 @@ describe("session model", () => {
 		assert.equal(model.events({ sid: "sid-x", host: "", inst: "ix", seq: 1, events: [] }).status, 400);
 	});
 
-	test("the target: the session picked on the dial; until then the one last on screen", () => {
+	test("the target: the session last jumped to; until then the one last on screen", () => {
 		const { model, events } = setup([reg(1, A), reg(2, B), reg(3, "local_c")]);
 		assert.equal(model.target(), null, "nothing has been on screen");
 		model.setRecords(new Map([[A, record(A, { lastFocusedAt: 9000 })], [B, record(B, { lastFocusedAt: 8000 })]]));
 		assert.equal(model.target()?.key, A);
 		events(B, { t: "attach", surface: "desktop" });
 		assert.equal(model.target()?.key, B, "B came on screen at 10000, after A's 9000");
-		model.pick("local_c");
+		model.pick("local_c", "slot key dev:1:0");
 		assert.equal(model.target()?.key, "local_c");
 		model.setRegistry([reg(1, A), reg(2, B)]);
 		const gone = model.target();
@@ -2250,5 +2301,265 @@ describe("what a change costs (hardening.md, B2)", () => {
 		assert.equal(model.slotView(C)?.title, "Unknown session");
 		model.setRecords(new Map([[C, record(C, { title: "Asleep" })]]));
 		assert.equal(model.slotView(C)?.title, "Asleep");
+	});
+});
+
+// ---- the session's other loops (PROTOCOL.md, Events: threads; agents-and-wake.md, B2) ----
+
+/** A run as a `threads` event lists it: `review`, 5 of 9 ended, one loop in a turn, unless the test says otherwise. */
+function run(fields: Partial<ThreadRun> = {}): ThreadRun {
+	return { run: "wf_1", name: "review", started: 9, finished: 5, failed: 0, open: 1, ...fields };
+}
+
+/** A `threads` event: `running` loops in a turn, with the runs given and no agents unless given. */
+function threadsEvent(running: number, runs: ThreadRun[] = [], agents: Threads["agents"] = []): Record<string, unknown> {
+	return { t: "threads", running, agents, runs };
+}
+
+describe("a threads event, read with care (PROTOCOL.md, Events: threads)", () => {
+	const parse = (fields: Record<string, unknown>): Threads => {
+		const e = parseEvent({ t: "threads", at: 1, ...fields });
+		assert.ok(e?.t === "threads");
+		return e.threads;
+	};
+
+	test("running and a run's counts are whole numbers from 0, anything else 0", () => {
+		assert.equal(parse({ running: 4 }).running, 4);
+		for (const running of [-1, 1.5, "3", Number.NaN, Number.POSITIVE_INFINITY, null, undefined, true, [2]]) assert.equal(parse({ running }).running, 0, String(running));
+		const [r] = parse({ runs: [{ run: "wf_2", name: "deck", started: -2, finished: 2.5, failed: "1", open: null }] }).runs;
+		assert.deepEqual(r, { run: "wf_2", name: "deck", started: 0, finished: 0, failed: 0, open: 0 });
+	});
+
+	test("agents and runs are arrays of objects: anything else is none, and an entry that isn't an object is skipped before the 8 and the 3 are counted", () => {
+		assert.deepEqual(parse({ running: 1, agents: "x", runs: { run: "wf_1" } }), { running: 1, agents: [], runs: [] });
+		assert.deepEqual(parse({}), { running: 0, agents: [], runs: [] });
+		const agents = Array.from({ length: 10 }, (_, i) => ({ kind: "subagent", desc: `a${i}`, doing: "" }));
+		assert.deepEqual(parse({ agents: [null, 7, "a", [], ...agents] }).agents.map((a) => a.desc), ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]);
+		const runs = parse({ runs: ["wf_0", run({ run: "wf_1" }), run({ run: "wf_2" }), [], run({ run: "wf_3" }), run({ run: "wf_4" })] }).runs;
+		assert.deepEqual(runs.map((r) => r.run), ["wf_1", "wf_2", "wf_3"]);
+	});
+
+	test("a kind it doesn't know reads as other; desc and doing are cut to 60, a run's missing name is workflow, and a workflow agent's run isn't kept", () => {
+		for (const kind of AGENT_KINDS) assert.equal(parse({ agents: [{ kind }] }).agents[0]?.kind, kind);
+		const long = "x".repeat(61);
+		const cut = `${"x".repeat(59)}…`;
+		assert.deepEqual(parse({ agents: [{ kind: "spirit", desc: long, doing: long, run: "wf_1" }, { desc: 5 }, { kind: "fork", desc: "y".repeat(60) }] }).agents, [
+			{ kind: "other", desc: cut, doing: cut },
+			{ kind: "other", desc: "", doing: "" },
+			{ kind: "fork", desc: "y".repeat(60), doing: "" },
+		]);
+		assert.equal(cut.length, 60);
+		assert.deepEqual(parse({ runs: [{ run: "wf_1", started: 2 }, { name: "" }, { name: " \n " }] }).runs.map((r) => r.name), ["workflow", "workflow", "workflow"]);
+		// A run's name goes into the log's THREADS lines: on one line.
+		assert.equal(parse({ runs: [{ name: "review\nINFO forged line" }] }).runs[0]?.name, "review INFO forged line");
+	});
+});
+
+describe("the session's other loops in the model (PROTOCOL.md, Events: threads; status rule 3; Phase 9)", () => {
+	test("kept only from the session's current instance; forgotten at another instance's hello and at the session's end; kept through its own hello after it stopped polling", () => {
+		const { model, clock, events, hello, view } = setup([reg(1, A, { status: "busy" })]);
+		events(A, threadsEvent(1));
+		assert.equal(view(A)?.threads, null, "no instance is current before a hello");
+		hello(A);
+		events(A, threadsEvent(2, [run()]));
+		assert.deepEqual(view(A)?.threads, { running: 2, agents: [], runs: [run()] });
+		assert.equal(model.events({ host: A, inst: "ib", seq: 1, events: [threadsEvent(5)] }).status, 204);
+		assert.equal(view(A)?.threads?.running, 2, "another instance's is dropped");
+		// Its current instance goes 60 s without a poll, then says hello again: not a new instance, so it's kept.
+		clock.advance(IN_FLIGHT_MS);
+		assert.equal(view(A)?.plugin, false);
+		hello(A);
+		assert.equal(view(A)?.threads?.running, 2);
+		// A new instance starts with an empty picture.
+		model.hello({ v: 1, sid: "sid-1", host: A, inst: "ib" });
+		assert.equal(view(A)?.threads, null);
+		model.events({ host: A, inst: "ib", seq: 2, events: [threadsEvent(1)] });
+		assert.equal(view(A)?.threads?.running, 1);
+		model.setRegistry([]);
+		model.setRegistry([reg(1, A, { status: "busy" })]);
+		assert.equal(view(A)?.threads, null, "the session's end forgets it");
+	});
+
+	test("background while the main loop is out of its turn and others are in one, whatever the registry says; since is the later of the turn's end and running going above 0", () => {
+		const { model, at, events, hello, view } = setup([reg(1, A, { status: "busy", statusUpdatedAt: 5000 })]);
+		hello(A);
+		at(20_000);
+		events(A, { t: "turn.start", turn: "t1" });
+		at(21_000);
+		events(A, threadsEvent(2, [run()]));
+		assert.equal(view(A)?.status, "working", "the main loop's turn runs");
+		at(30_000);
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual([view(A)?.status, view(A)?.since], ["background", 30_000], "the turn's end, after running went above 0");
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 31_000 })]);
+		assert.equal(view(A)?.status, "background", "an idle while others are in a turn trails");
+		at(40_000);
+		events(A, threadsEvent(0, [run({ open: 0, finished: 9 })]));
+		assert.equal(view(A)?.status, "done");
+		at(45_000);
+		events(A, threadsEvent(1));
+		assert.deepEqual([view(A)?.status, view(A)?.since], ["background", 45_000], "running went above 0 after the turn's end");
+		at(46_000);
+		events(A, threadsEvent(3));
+		assert.equal(view(A)?.since, 45_000, "it stays above 0: since stays");
+		// A session the deck saw no turn for: running going above 0.
+		const other = setup([reg(1, A, { status: "busy", statusUpdatedAt: 5000 })]);
+		other.hello(A);
+		other.at(50_000);
+		other.events(A, threadsEvent(1));
+		assert.deepEqual([other.view(A)?.status, other.view(A)?.since], ["background", 50_000]);
+	});
+
+	test("when the other loops' work ends after the main loop's turn, the done, failed or stopped that follows is timed from that end, and only a look after it sees it", () => {
+		for (const [end, status] of [
+			[{ t: "turn.end", turn: "t1", reason: "answer" }, "done"],
+			[{ t: "failed", error: "overloaded" }, "failed"],
+			[{ t: "turn.end", turn: "t1", reason: "aborted" }, "interrupted"],
+		] as const) {
+			const { model, at, events, hello, view } = setup([reg(1, A, { status: "busy", statusUpdatedAt: 5000 })]);
+			hello(A);
+			at(20_000);
+			events(A, { t: "turn.start", turn: "t1" }, threadsEvent(3, [run()]));
+			at(30_000);
+			events(A, end);
+			assert.deepEqual([view(A)?.status, view(A)?.since], ["background", 30_000], status);
+			// The user looks at the session while its agents work.
+			at(60_000);
+			events(A, { t: "attach", surface: "desktop" });
+			at(70_000);
+			events(A, { t: "detach", surface: "desktop" });
+			// Ten minutes on, the work ends, and the registry goes idle.
+			at(630_000);
+			events(A, threadsEvent(0, [run({ finished: 9, open: 0 })]));
+			at(631_000);
+			model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 631_000 })]);
+			assert.deepEqual([view(A)?.status, view(A)?.since, view(A)?.seen], [status, 630_000, false], `${status}: from the work's end, which the earlier look didn't see`);
+			at(640_000);
+			events(A, { t: "attach", surface: "desktop" });
+			assert.equal(view(A)?.seen, true, `${status}: a look after it does`);
+		}
+		// Work that ends before the main loop's turn does: the turn's end, as before.
+		const { model, at, events, hello, view } = setup([reg(1, A, { status: "busy", statusUpdatedAt: 5000 })]);
+		hello(A);
+		at(20_000);
+		events(A, { t: "turn.start", turn: "t1" }, threadsEvent(2));
+		at(25_000);
+		events(A, threadsEvent(0));
+		at(30_000);
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 31_000 })]);
+		assert.deepEqual([view(A)?.status, view(A)?.since, view(A)?.seen], ["done", 30_000, false]);
+		at(40_000);
+		events(A, { t: "attach", surface: "desktop" });
+		assert.equal(view(A)?.seen, true);
+	});
+
+	test("a snapshot sent again after a hello, running still 0, isn't the work's end: the done keeps its since, and stays seen", () => {
+		// The mod sends its snapshot again after each hello the deck answers (PROTOCOL.md, Events: threads), so only a fall
+		// of running from above 0 times the work's end.
+		for (const endsAfter of [false, true]) {
+			const { model, at, events, hello, view } = setup([reg(1, A, { status: "busy", statusUpdatedAt: 5000 })]);
+			const ended = threadsEvent(0, [run({ finished: 9, open: 0 })]);
+			hello(A);
+			at(20_000);
+			events(A, { t: "turn.start", turn: "t1" }, threadsEvent(2, [run()]));
+			if (!endsAfter) {
+				at(25_000);
+				events(A, ended);
+			}
+			at(30_000);
+			events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+			if (endsAfter) {
+				at(40_000);
+				events(A, ended);
+			}
+			at(41_000);
+			model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 41_000 })]);
+			at(100_000);
+			events(A, { t: "attach", surface: "desktop" });
+			const since = endsAfter ? 40_000 : 30_000;
+			const why = endsAfter ? "the work ended after the turn" : "the work ended within it";
+			assert.deepEqual([view(A)?.status, view(A)?.since, view(A)?.seen], ["done", since, true], why);
+			// The same instance says hello again, after a failed request say, and sends its snapshot again, unchanged.
+			at(500_000);
+			hello(A);
+			events(A, ended);
+			assert.deepEqual([view(A)?.status, view(A)?.since, view(A)?.seen], ["done", since, true], `${why}: still`);
+		}
+	});
+
+	test("THREADS lines: running leaving 0 at info, with the run's label if one has a loop in a turn, and coming back to 0 at info; every snapshot at debug; another instance's dropped at debug", () => {
+		const { model, log, events, hello } = setup([reg(1, A, { status: "busy" })]);
+		hello(A);
+		const lines = (): string[] => log.lines.filter((l) => l.message.startsWith("THREADS")).map((l) => `${l.level} ${l.message}`);
+		events(A, threadsEvent(0, [run({ started: 0, finished: 0, open: 0 })]));
+		events(A, threadsEvent(2, [run({ started: 2, finished: 0, open: 2 })]));
+		events(A, threadsEvent(3, [run({ started: 4, finished: 1, open: 3 }), run({ run: "wf_2", name: "deck", started: 2, finished: 2, open: 0 })]));
+		events(A, threadsEvent(0, [run({ started: 4, finished: 4, open: 0 })]));
+		events(A, threadsEvent(1));
+		model.events({ host: A, inst: "ib", seq: 1, events: [threadsEvent(1)] });
+		assert.deepEqual(lines(), [
+			`debug THREADS ${A}: running 0, runs review 0/0`,
+			`debug THREADS ${A}: running 2, runs review 0/2`,
+			`info THREADS ${A}: 2 in a turn (review 0/2)`,
+			`debug THREADS ${A}: running 3, runs review 1/4, deck 2/2`,
+			`debug THREADS ${A}: running 0, runs review 4/4`,
+			`info THREADS ${A}: none in a turn`,
+			`debug THREADS ${A}: running 1, runs none`,
+			`info THREADS ${A}: 1 in a turn`,
+			`debug THREADS ${A} from mod instance "ib", not the current one: dropped`,
+		]);
+		// A new instance forgets the picture, which counted loops in a turn: none now.
+		model.hello({ v: 1, sid: "sid-1", host: A, inst: "ib" });
+		assert.equal(lines().at(-1), `info THREADS ${A}: none in a turn`);
+	});
+});
+
+describe("the poll burst while other loops are at work (PROTOCOL.md, Commands; Phase 9)", () => {
+	test("a main-loop turn end while others are in a turn neither answers the open poll nor opens the window; nor does a reading that then turns busy", () => {
+		for (const end of [{ t: "turn.end", turn: "t1", reason: "answer" }, { t: "failed", error: "overloaded" }]) {
+			const { model, events, poll } = setup([reg(1, A, { status: "idle" })]);
+			const n1 = poll(A);
+			events(A, { t: "turn.start", turn: "t1" }, threadsEvent(2));
+			events(A, end);
+			assert.deepEqual(n1.answers, [], `${end.t}: held, since other loops keep the registry busy`);
+			model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: 2000 })]);
+			assert.deepEqual(n1.answers, [], `${end.t}: the reading turning busy answers nothing`);
+		}
+	});
+
+	test("a threads with running above 0 closes the window a turn's end opened: polls are held again, and a reading that turns busy answers none", () => {
+		const { model, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" }, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.deepEqual([n1.answers, poll(A).answers], [[NO_CMDS], [NO_CMDS]], "the window is open");
+		// A background agent starts after the turn.
+		events(A, threadsEvent(1));
+		const n3 = poll(A);
+		assert.deepEqual(n3.answers, [], "held: the window has closed");
+		model.setRegistry([reg(1, A, { status: "idle", statusUpdatedAt: 2000 })]);
+		model.setRegistry([reg(1, A, { status: "busy", statusUpdatedAt: 3000 })]);
+		assert.deepEqual(n3.answers, []);
+	});
+
+	test("running dropping to 0 while the main loop isn't in a turn answers the open poll at once and opens the window for 60 s; not while its turn runs", () => {
+		const { clock, events, poll } = setup([reg(1, A, { status: "busy" })]);
+		const n1 = poll(A);
+		events(A, { t: "turn.start", turn: "t1" }, threadsEvent(2), { t: "turn.end", turn: "t1", reason: "answer" });
+		events(A, threadsEvent(1));
+		assert.deepEqual(n1.answers, [], "one is still in a turn");
+		events(A, threadsEvent(0));
+		assert.deepEqual(n1.answers, [NO_CMDS], "the last left its turn");
+		assert.deepEqual(poll(A).answers, [NO_CMDS], "at once while the reading says busy");
+		// The mod polls about once a second, each answered at once, until the 60 s are up.
+		for (let i = 1; i < 60; i++) {
+			clock.advance(1000);
+			assert.deepEqual(poll(A).answers, [NO_CMDS], `${i} s after`);
+		}
+		clock.advance(1000);
+		const n3 = poll(A);
+		assert.deepEqual(n3.answers, [], "for 60 s");
+		events(A, { t: "turn.start", turn: "t2" }, threadsEvent(1), threadsEvent(0));
+		assert.deepEqual(n3.answers, [], "the main loop's turn runs");
 	});
 });

@@ -9,8 +9,9 @@
 //   of fake-claude's held for its session, so the person never presses on another session's request: a deck that takes
 //   the hook's requests only from sessions its registry confirms answers the fixture's {} at once (PROTOCOL.md,
 //   "Desktop sessions only"), and puts none of the fixture's sessions on a slot. Saved Prompt presses are always
-//   skipped: they go to the session picked on the Sessions dial, and no real deck lists a fixture's session, so the
-//   dial would be on one of the user's own, and the press would send it the fixture's prompt. Expect lines are always
+//   skipped: they go to the target, the session last jumped to from a slot or Other Sessions, else the one on screen,
+//   and no real deck lists a fixture's session, so the target would be one of the user's own, and the press would send
+//   it the fixture's prompt. Expect lines are always
 //   skipped too: they are the fixture's deck's state, and nothing of a fixture's session shows on a real deck. Each
 //   skip is reported.
 
@@ -191,15 +192,14 @@ export function againstFake({ url, token, expectMs = 1000, takenMs = 2000 }) {
     async press(line, ctx) {
       const [key] = Object.keys(line.value)
       const p = line.value[key]
-      // A dial line is pressed on its session's dial, for the request its strip showed last: the fake has no slots, so
-      // the line's session names the dial.
+      // A dial line is pressed on its session's dial, for the request its strip showed last, with its decision or
+      // nothing picked: the fake has no slots, so the line's session names the dial.
       const r =
         key === 'prompt' ? await call('POST', '/control/prompt', { host: p.session, text: p.text })
-        : key === 'dial' ? await call('POST', '/control/dial', { host: p.session, picks: p.picks, decision: p.decision, plan: p.plan })
+        : key === 'dial' ? await call('POST', '/control/dial', { host: p.session, decision: p.decision })
         : await call('POST', `/control/${key}`, {})
       if (r.cmd) ctx.created.push(r.cmd)
-      const answered = `${r.answered}${r.mode ? ` into ${r.mode}` : ''} ${r.request}`
-      ctx.say(`press ${key}: ${r.alert ? `alert (${r.error})` : r.cmd ? `queued ${r.cmd}` : r.jumped ? `jumped to ${r.jumped}` : answered}`)
+      ctx.say(`press ${key}: ${r.alert ? `alert (${r.error})` : r.cmd ? `queued ${r.cmd}` : r.jumped ? `jumped to ${r.jumped}` : `${r.answered} ${r.request}`}`)
     },
 
     async registry(line, ctx) {
@@ -266,18 +266,8 @@ export function terminalUi({ input = process.stdin, output = process.stdout } = 
   }
 }
 
-/** A plan's choices on a Session Slot dial's strip, by a dial line's `plan` (docs/claude-code/session-keys.md, "Plans"). */
-const PLAN_CHOICES = Object.freeze({ auto: 'Approve · Auto', acceptEdits: 'Approve · Accept edits', default: 'Approve · Manual', reject: 'Reject' })
-
-/** What a dial line does, in words: the picks for each question, a decision, or a plan's choice. */
-function describeDial(d) {
-  if (d.picks) {
-    const each = Object.entries(d.picks).map(([q, labels]) => `for ${JSON.stringify(q)} pick ${labels.map((l) => JSON.stringify(l)).join(' and ')}`)
-    return `${each.join('; ')}, then send`
-  }
-  if (d.decision) return `turn to ${d.decision === 'allow' ? 'Allow' : 'Deny'} and press`
-  return `turn to ${PLAN_CHOICES[d.plan] ?? d.plan} and press`
-}
+/** What a dial line does, in words: turn to its decision and press, or press with nothing picked, which jumps. */
+const describeDial = (d) => (d.decision ? `turn to ${d.decision === 'allow' ? 'Allow' : 'Deny'} and press` : 'press without turning, which jumps to the session')
 
 /**
  * What a person should press, in words: Approve or Deny, or a Session Slot dial, the only presses the interactive
@@ -335,10 +325,10 @@ export function interactive({ ui = terminalUi(), pressTimeoutMs = 300_000 } = {}
     async press(line, ctx) {
       const [key] = Object.keys(line.value)
       if (key === 'prompt') {
-        // A person is never asked to send a fixture's prompt: no real deck lists the fixture's session, so the
-        // Sessions dial could only be on one of the user's own.
-        ctx.skip({ line: line.n, press: key, why: "a Saved Prompt press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session, so it would send the fixture's prompt to one of your own sessions" })
-        ui.show("skip: press prompt: it would send the fixture's prompt to whichever of your own sessions the dial is on")
+        // A person is never asked to send a fixture's prompt: no real deck lists the fixture's session, so the target
+        // could only be one of the user's own.
+        ctx.skip({ line: line.n, press: key, why: "a Saved Prompt press goes to the target, the session last jumped to or on screen, and no real deck lists the fixture's session, so it would send the fixture's prompt to one of your own sessions" })
+        ui.show("skip: press prompt: it would send the fixture's prompt to whichever of your own sessions is the target")
         return
       }
       // What fake-claude sent that the deck holds: no answer within HOOK_AT_ONCE_MS of sending it, by fake-claude's own

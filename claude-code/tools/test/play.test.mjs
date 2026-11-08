@@ -14,7 +14,7 @@ import { EXPECT_SKIPPED, againstFake, interactive } from '../lib/drivers.mjs'
 import { fixtureFiles, parseFixture, readFixture } from '../lib/fixtures.mjs'
 import * as P from '../lib/play.mjs'
 import { play } from '../lib/play.mjs'
-import { ALLOW, DENY, ROUTES, answerBody, approvePlanBody, joinLabels } from '../lib/protocol.mjs'
+import { ALLOW, DENY, ROUTES } from '../lib/protocol.mjs'
 import { TOOLS, runLog, sleep, startBridge, tempEnv, writeRecord, writeRegistry } from './helpers.mjs'
 
 const NAMES = fixtureFiles().map((f) => readFixture(f).name)
@@ -27,8 +27,8 @@ async function playAgainstFake(t, fx, env = tempEnv(t)) {
   return { r, steps, bridge, env }
 }
 
-test('play: there are 23 fixtures to play', () => {
-  assert.equal(NAMES.length, 23)
+test('play: there are 21 fixtures to play', () => {
+  assert.equal(NAMES.length, 21)
 })
 
 for (const name of NAMES) {
@@ -45,7 +45,7 @@ for (const name of NAMES) {
   })
 }
 
-test('play: all 23 in a row against one fake bridge, reset between fixtures', async (t) => {
+test('play: all 21 in a row against one fake bridge, reset between fixtures', async (t) => {
   const env = tempEnv(t)
   const bridge = await startBridge(t, env)
   const driver = againstFake({ url: bridge.url, token: env.token })
@@ -69,7 +69,7 @@ test('play: all 23 in a row against one fake bridge, reset between fixtures', as
 // on how its own clock compares with them, or the fixtures would pass or fail by the date.
 const T0 = 1793600000000
 for (const [label, offset] of [['a week after', 7 * 86_400_000], ['a week before', -7 * 86_400_000]]) {
-  test(`play: all 23 pass with the bridge's clock ${label} the fixtures' times`, async (t) => {
+  test(`play: all 21 pass with the bridge's clock ${label} the fixtures' times`, async (t) => {
     const env = tempEnv(t)
     const started = Date.now()
     const bridge = await startBridge(t, env, { now: () => T0 + offset + (Date.now() - started) })
@@ -89,11 +89,15 @@ test('play: the fingerprints of both sides matched for every held request the fi
   const driver = againstFake({ url: bridge.url, token: env.token })
   for (const name of NAMES) await play(readFixture(name), { url: bridge.url, token: env.token, driver })
   const checks = runLog(env).filter((e) => e.kind === 'fp-check')
-  // A tool.start and a request each, in the fixtures' order: answer-question, answer-questions, answered-in-app-registry,
-  // answered-in-app, approve, deny, dial-gone, dial-next (its question, then its Bash), needs-you, plan-approve and
-  // plan-reject. dial-approve's sessions have no plugin, so there's no tool.start to compare.
-  assert.deepEqual(checks.map((c) => c.tool), ['AskUserQuestion', 'AskUserQuestion', 'Bash', 'Write', 'Write', 'Bash', 'AskUserQuestion', 'AskUserQuestion', 'Bash', 'AskUserQuestion', 'ExitPlanMode', 'ExitPlanMode'])
-  assert.deepEqual(checks.filter((c) => !c.match || c.bridgeSummary !== c.modSummary), [])
+  // A tool.start and a request each, in the fixtures' order: answered-in-app-registry, answered-in-app, approve, deny,
+  // dial-gone, dial-next (its question, then its Bash), needs-you and release-by-agent. dial-approve's sessions have no
+  // plugin, so there's no tool.start to compare.
+  assert.deepEqual(checks.map((c) => c.tool), ['Bash', 'Write', 'Write', 'Bash', 'Bash', 'AskUserQuestion', 'Bash', 'AskUserQuestion', 'Bash'])
+  // But release-by-agent's: a subagent's request, whose own tool.start the mod no longer sends, and the main loop's
+  // identical call isn't its, so it ends unpaired when its tool.end releases it.
+  assert.deepEqual(checks.filter((c) => !c.match || c.bridgeSummary !== c.modSummary).map((c) => [c.tool, c.agent, c.unpaired, c.doubt]), [
+    ['Bash', 's1', true, 'a tool.end with its fp released it, so its own tool.start never came'],
+  ])
 })
 
 test('play: against-fake won\'t play into a registry or records folder holding files it didn\'t write', async (t) => {
@@ -224,7 +228,7 @@ async function stubDeck(t, answer) {
   return { url: `http://127.0.0.1:${server.address().port}`, driver }
 }
 
-test("play: an answer to a permission request with anything beyond one of PROTOCOL.md's five fails at its reply, though the fixture's body is all in it", async (t) => {
+test("play: an answer to a permission request with anything beyond one of PROTOCOL.md's three fails at its reply, though the fixture's body is all in it", async (t) => {
   // The stub itself is sound: answering as PROTOCOL.md writes them, both fixtures pass.
   const exact = (key) => (key === 'deny' ? DENY : ALLOW)
   const sound = [
@@ -241,13 +245,16 @@ test("play: an answer to a permission request with anything beyond one of PROTOC
   const adding = (base, extra) => ({ hookSpecificOutput: { ...base.hookSpecificOutput, decision: { ...base.hookSpecificOutput.decision, ...extra } } })
   const cases = [
     // A deck that echoes the request's permission_suggestions: every Approve would raise the session to Accept
-    // edits, and ladder step 5 would still show ok. It reads as an Approve plan, which goes only to an ExitPlanMode.
-    ['approve', (key, body) => adding(ALLOW, { updatedPermissions: body.permission_suggestions }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision: an Approve plan goes only to an ExitPlanMode, and this request is for Write \(PROTOCOL\.md, "Permission requests"\)$/],
-    // One that rewrites the call it allows: an Answer, which goes only to an AskUserQuestion.
-    ['approve', (key, body) => adding(ALLOW, { updatedInput: { ...body.tool_input, content: 'five' } }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision: an Answer goes only to an AskUserQuestion, and this request is for Write/],
+    // edits, and ladder step 5 would still show ok.
+    ['approve', (key, body) => adding(ALLOW, { updatedPermissions: body.permission_suggestions }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedPermissions: the deck never sends updatedPermissions \(PROTOCOL\.md, "Permission requests"\), got \[\{"type":"setMode"/],
+    // One that rewrites the call it allows.
+    ['approve', (key, body) => adding(ALLOW, { updatedInput: { ...body.tool_input, content: 'five' } }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedInput: the deck never sends updatedInput/],
     // One whose Deny also writes a rule into the user's settings.
-    ['deny', () => adding(DENY, { updatedPermissions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'rm -rf build' }], behavior: 'deny', destination: 'userSettings' }] }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedPermissions: the deck sends updatedPermissions only in an Approve plan, in its allow's decision \(PROTOCOL\.md\), got \[\{"type":"addRules"/],
-    // Fields of its own beside the decision: an answer to a permission request is exactly one of the five.
+    ['deny', () => adding(DENY, { updatedPermissions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'rm -rf build' }], behavior: 'deny', destination: 'userSettings' }] }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedPermissions: the deck never sends updatedPermissions \(PROTOCOL\.md, "Permission requests"\), got \[\{"type":"addRules"/],
+    // One that answers a question itself, on a press that only jumps: the deck never answers an ask request (Phase 9).
+    ['needs-you', () => ALLOW, /^line \d+ \(reply\): p1: body\.hookSpecificOutput: the deck never answers AskUserQuestion: it reads Answer in app, and only a release rule's \{\} ends it \(PROTOCOL\.md, "Permission requests"\)$/],
+    ['needs-you', () => DENY, /p1: body\.hookSpecificOutput: the deck never answers AskUserQuestion/],
+    // Fields of its own beside the decision: an answer to a permission request is exactly one of the three.
     ['approve', () => ({ ...ALLOW, note: 'x' }), /^line \d+ \(reply\): p1: body\.note: not in any of PROTOCOL\.md's answers, got "x"/],
     ['deny', () => ({ ...DENY, extra: { nested: 1 } }), /^line \d+ \(reply\): p1: body\.extra: not in any of PROTOCOL\.md's answers/],
     // And beside no decision, where the line expects {}.
@@ -258,63 +265,6 @@ test("play: an answer to a permission request with anything beyond one of PROTOC
     const { url, driver } = await stubDeck(t, answer)
     const r = await play(fx, { url, token: 'stub', driver })
     assert.equal(r.ok, false, `${fx.name} should fail with ${why}`)
-    assert.match(r.error, why)
-  }
-})
-
-/**
- * The answer a dial line asks for, as PROTOCOL.md writes it, made from the request: the stub deck's sound answer for
- * the dial fixtures. The picks go in the order of the question's options.
- */
-function dialAnswer(key, body, press) {
-  if (key !== 'dial') return key === 'deny' ? DENY : ALLOW
-  if (press.decision) return press.decision === 'deny' ? DENY : ALLOW
-  if (press.plan) return press.plan === 'reject' ? DENY : approvePlanBody(body.tool_input, press.plan)
-  const answers = Object.fromEntries(body.tool_input.questions.map((q) => {
-    const labels = q.options.map((o) => o.label).filter((l) => press.picks[q.question].includes(l))
-    return [q.question, q.multiSelect ? joinLabels(labels) : labels[0]]
-  }))
-  return answerBody(body.tool_input, answers)
-}
-
-test("play: a dial's Answer or Approve plan must equal the line's body exactly, fit its request, and be one of PROTOCOL.md's five, though the line's body is all in it", async (t) => {
-  // The stub is sound: answering each dial line as PROTOCOL.md writes it, the fixtures pass.
-  for (const [name, replies] of [['answer-question', 2], ['answer-questions', 2], ['plan-approve', 2], ['plan-reject', 3]]) {
-    const { url, driver } = await stubDeck(t, dialAnswer)
-    const r = await play(readFixture(name), { url, token: 'stub', driver })
-    assert.deepEqual([r.ok, r.checked, r.error], [true, replies, undefined], name)
-  }
-  const sound = (key, body, press) => dialAnswer(key, body, press)
-  const decision = (out, extra) => ({ hookSpecificOutput: { ...out.hookSpecificOutput, decision: { ...out.hookSpecificOutput.decision, ...extra } } })
-  const input = (out) => out.hookSpecificOutput.decision.updatedInput
-  const cases = [
-    // A key of its own in the echoed input: Claude Code would fail it as a deny, and the question would be lost.
-    ['answer-question', (...a) => decision(sound(...a), { updatedInput: { ...input(sound(...a)), extra: 1 } }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedInput\.extra: not expected, got 1 \(an Answer's updatedInput is the request's tool_input exactly as it came, with answers added\)$/],
-    // An option changed on the way back.
-    ['answer-question', (...a) => decision(sound(...a), { updatedInput: { ...input(sound(...a)), questions: [{ ...input(sound(...a)).questions[0], multiSelect: true }] } }), /updatedInput\.questions\[0\]\.multiSelect: expected false, got true/],
-    // A plain Allow, which Claude Code ignores for a question: T5's plan stayed on the app's card.
-    ['answer-question', () => ALLOW, /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision: Claude Code ignores a plain Allow for AskUserQuestion, which needs the person/],
-    // An Answer with a setMode too reads as an Approve plan, which a question never gets.
-    ['answer-question', (...a) => decision(sound(...a), { updatedPermissions: [{ type: 'setMode', mode: 'auto', destination: 'session' }] }), /an Approve plan goes only to an ExitPlanMode, and this request is for AskUserQuestion/],
-    // The multi-select join, whose labels are Apple, `Pear, ripe` and `Plum "Victoria"`: a label holding ", " or a
-    // double quote not written as a JSON string, or the labels in the order the dial line picked them.
-    ['answer-questions', (...a) => answerBody(input(sound(...a)), { ...input(sound(...a)).answers, 'Which fruits?': 'Apple, Pear, ripe, "Plum \\"Victoria\\""' }), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.updatedInput\.answers\.Which fruits\?: expected "Apple, \\"Pear, ripe\\", \\"Plum \\\\\\"Victoria\\\\\\"\\"", got "Apple, Pear, ripe, \\"Plum \\\\\\"Victoria\\\\\\"\\"" \(an Answer or an Approve plan must equal the expected body exactly, updatedInput included\)$/],
-    ['answer-questions', (...a) => answerBody(input(sound(...a)), { ...input(sound(...a)).answers, 'Which fruits?': 'Apple, "Pear, ripe", Plum "Victoria"' }), /answers\.Which fruits\?: expected "Apple, \\"Pear, ripe\\", \\"Plum \\\\\\"Victoria\\\\\\"\\"", got "Apple, \\"Pear, ripe\\", Plum \\"Victoria\\""/],
-    ['answer-questions', (...a) => answerBody(input(sound(...a)), { ...input(sound(...a)).answers, 'Which fruits?': '"Plum \\"Victoria\\"", Apple, "Pear, ripe"' }), /answers\.Which fruits\?: expected "Apple, \\"Pear, ripe\\", \\"Plum \\\\\\"Victoria\\\\\\"\\"", got "\\"Plum \\\\\\"Victoria\\\\\\"\\", Apple, \\"Pear, ripe\\""/],
-    // A question left out reads as unanswered.
-    ['answer-questions', (...a) => answerBody(input(sound(...a)), { 'Which fruits?': 'Apple, "Pear, ripe", "Plum \\"Victoria\\""' }), /updatedInput\.answers: no answer for "Which size\?", and every question gets one$/],
-    // An Approve plan into another mode, one with the plan edited, and a plain Allow.
-    ['plan-approve', (...a) => decision(sound(...a), { updatedPermissions: [{ type: 'setMode', mode: 'auto', destination: 'session' }] }), /updatedPermissions\[0\]\.mode: expected "acceptEdits", got "auto" \(an Answer or an Approve plan must equal/],
-    ['plan-approve', (...a) => decision(sound(...a), { updatedInput: { ...input(sound(...a)), plan: '# Plan\n' } }), /updatedInput\.plan: expected "# Plan\\n\\n1\. Create s10\.txt containing: ten\.\\n", got "# Plan\\n" \(an Approve plan's updatedInput is the request's tool_input, unchanged\)$/],
-    ['plan-approve', (...a) => decision(sound(...a), { updatedPermissions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'localSettings' }] }), /updatedPermissions\[0\]\.destination: expected "session", got "localSettings"/],
-    ['plan-approve', () => ALLOW, /Claude Code ignores a plain Allow for ExitPlanMode/],
-    // A reject sent as an approval.
-    ['plan-reject', (key, body) => approvePlanBody(body.tool_input, 'default'), /^line \d+ \(reply\): p1: body\.hookSpecificOutput\.decision\.behavior: expected "deny", got "allow" \(an Answer or an Approve plan must equal/],
-  ]
-  for (const [name, answer, why] of cases) {
-    const { url, driver } = await stubDeck(t, answer)
-    const r = await play(readFixture(name), { url, token: 'stub', driver })
-    assert.equal(r.ok, false, `${name} should fail with ${why}`)
     assert.match(r.error, why)
   }
 })
@@ -359,20 +309,24 @@ const expectLines = (fx) => fx.lines.filter((l) => l.kind === 'expect').map((l) 
 function scriptedPerson(control, { dials = [] } = {}) {
   const shown = []
   const asked = []
+  // The presses made and not yet done: asked for Enter, the person presses first, as "Press Enter once you have" asks.
+  const pressing = []
+  const press = (route, body) => pressing.push(sleep(30).then(() => control.call('POST', route, body)))
   const ui = {
     show(text) {
       shown.push(text)
       const key = /^PRESS: press (Approve|Deny)\b/.exec(text)
-      if (key) setTimeout(() => void control.call('POST', `/control/${key[1].toLowerCase()}`, {}), 30)
+      if (key) press(`/control/${key[1].toLowerCase()}`, {})
       const dial = /^PRESS: on the Session Slot dial of (\S+),/.exec(text)
       if (dial) {
-        const { session, ...press } = dials.shift()
+        const { session, ...line } = dials.shift()
         assert.equal(dial[1], session, 'the dial PRESS names')
-        setTimeout(() => void control.call('POST', '/control/dial', { host: session, ...press }), 30)
+        press('/control/dial', { host: session, ...line })
       }
     },
     async ask(question) {
       asked.push(question)
+      await Promise.all(pressing.splice(0))
       return ''
     },
   }
@@ -400,7 +354,7 @@ test('play: the interactive driver, with a scripted person pressing on a fake br
   assert.equal(shown.filter((s) => s.startsWith('CHECK')).length, 0)
   // The poll after the turn's end is answered at once only while the registry says busy, which the skipped lines
   // would have said: the deck holds it, and its reply is skipped and reported.
-  assert.deepEqual(repliesAndPresses(r).map((s) => [s.reply, s.why]), [['n2', 'the deck answers it at once only while the registry says busy after the turn ended, and this mode skips registry lines']])
+  assert.deepEqual(repliesAndPresses(r).map((s) => [s.reply, s.why]), [['n2', 'the deck answers it at once only while the registry says busy after the turn ended or its other loops finished, and this mode skips registry lines']])
   assert.ok(shown.some((s) => s === '  skip: reply n2, answered at once only while the skipped registry says busy'))
 
   r = await play(readFixture('answered-in-app-registry'), { url: bridge.url, token: env.token, driver, say })
@@ -422,7 +376,7 @@ test('play: the interactive driver, with a scripted person pressing on a fake br
     assert.equal(r.ok, true, `${name}: ${r.error}\n${shown.join('\n')}`)
     assert.deepEqual(repliesAndPresses(r).map((s) => s.reply ?? s.press), skipped, name)
   }
-  assert.ok(shown.includes("skip: press prompt: it would send the fixture's prompt to whichever of your own sessions the dial is on"))
+  assert.ok(shown.includes("skip: press prompt: it would send the fixture's prompt to whichever of your own sessions is the target"))
   assert.deepEqual(shown.filter((s) => s.startsWith('PRESS:') && !/^PRESS: press (Approve|Deny)\./.test(s)), [], 'no other press asked for')
   assert.deepEqual(runLog(env).filter((e) => e.kind === 'command'), [], 'and nothing queued')
   assert.deepEqual(asked, [], 'and still nothing asked')
@@ -443,7 +397,7 @@ test('play: the interactive driver, with a scripted person pressing on a fake br
   assert.equal(sent[1].body.inst, 'ia', "Claude Code's, untouched")
 })
 
-test("play: the interactive driver asks for a Session Slot dial press only when something fake-claude sent is held for the dial's session, says what to pick, and checks the answer", async (t) => {
+test("play: the interactive driver asks for a Session Slot dial press only when something fake-claude sent is held for the dial's session, says what to do, and checks the answer", async (t) => {
   // A fake bridge whose registry lists the fixtures' sessions, as no real deck's does: it confirms their requests and
   // holds them, so a person can press their dials. The driver still skips the fixtures' registry lines.
   const env = tempEnv(t)
@@ -451,21 +405,23 @@ test("play: the interactive driver asks for a Session Slot dial press only when 
   const bridge = await startBridge(t, env)
   const control = controlClient(bridge.url, env.token)
   const cases = [
-    // [fixture, what PRESS says, replies checked, what's skipped]
-    ['answer-question', ['PRESS: on the Session Slot dial of local_test-a, for "Red or blue?" pick "Blue", then send. Its strip should show the session\'s oldest held request: local_test-a: AskUserQuestion Red or blue?.'], 2, []],
-    // The picks as the line gives them, out of the options' order: ticked in any order, the Answer joins them in theirs.
-    ['answer-questions', ['PRESS: on the Session Slot dial of local_test-a, for "Which fruits?" pick "Plum \\"Victoria\\"" and "Apple" and "Pear, ripe"; for "Which size?" pick "Large", then send. Its strip should show the session\'s oldest held request: local_test-a: AskUserQuestion Which fruits?.'], 2, []],
-    ['plan-approve', ['PRESS: on the Session Slot dial of local_test-a, turn to Approve · Accept edits and press. Its strip should show the session\'s oldest held request: local_test-a: ExitPlanMode Plan ready.'], 2, []],
-    ['plan-reject', ['PRESS: on the Session Slot dial of local_test-a, turn to Reject and press. Its strip should show the session\'s oldest held request: local_test-a: ExitPlanMode Plan ready.'], 3, []],
+    // [fixture, what PRESS says, replies checked, what's skipped, how many times a person is asked for Enter]
     // B asked first, so the Approve key would show B's; A's dial shows A's, which it allows.
     ['dial-approve', [
       'PRESS: on the Session Slot dial of local_test-a, turn to Allow and press. Its strip should show the session\'s oldest held request: local_test-a: Write s9.txt.',
       'PRESS: on the Session Slot dial of local_test-b, turn to Deny and press. Its strip should show the session\'s oldest held request: local_test-b: Bash npm test.',
-    ], 2, []],
-    // Answered in the app before the press: nothing of fake-claude's is held for the session, so nobody is asked.
-    ['dial-gone', [], 2, ['dial']],
+    ], 2, [], 0],
+    // The question goes, answered in the app, and the Bash after it takes the strip.
+    ['dial-next', ['PRESS: on the Session Slot dial of local_test-a, turn to Allow and press. Its strip should show the session\'s oldest held request: local_test-a: Bash npm test.'], 3, [], 0],
+    // A question is display-only: a press with nothing picked, then the Approve key, each jump, and no reply follows.
+    ['needs-you', [
+      'PRESS: on the Session Slot dial of local_test-a, press without turning, which jumps to the session. Its strip should show the session\'s oldest held request: local_test-a: AskUserQuestion Red or blue?.',
+      'PRESS: press Approve. The key should show the oldest held request: local_test-a: AskUserQuestion Red or blue?.',
+    ], 2, [], 2],
+    // Allowed in the app before the press: nothing of fake-claude's is held for the session, so nobody is asked.
+    ['dial-gone', [], 2, ['dial'], 0],
   ]
-  for (const [name, said, checked, skipped] of cases) {
+  for (const [name, said, checked, skipped, enters] of cases) {
     const fx = readFixture(name)
     const dials = fx.lines.filter((l) => l.kind === 'press' && l.value.dial).map((l) => l.value.dial)
     const { ui, shown, asked, say } = scriptedPerson(control, { dials })
@@ -473,7 +429,7 @@ test("play: the interactive driver asks for a Session Slot dial press only when 
     assert.equal(r.ok, true, `${name}: ${r.error}\n${shown.join('\n')}`)
     assert.deepEqual(shown.filter((s) => s.startsWith('PRESS:')), said, name)
     assert.deepEqual([r.checked, repliesAndPresses(r).map((s) => s.reply ?? s.press)], [checked, skipped], name)
-    assert.deepEqual(asked, [], `${name}: a reply follows each press, so nothing is asked`)
+    assert.equal(asked.length, enters, `${name}: Enter only after a press no reply follows`)
     if (skipped.length) {
       assert.ok(shown.includes('skip: press dial: nothing fake-claude sent is held for local_test-a'), name)
       assert.match(repliesAndPresses(r)[0].why, /^nothing fake-claude sent is held for local_test-a, so no dial's strip shows a request of the fixture's/)
@@ -481,9 +437,10 @@ test("play: the interactive driver asks for a Session Slot dial press only when 
       assert.equal(dials.length, 0, `${name}: every dial pressed`)
     }
   }
-  // Each answer went by the dial, none by a key.
-  const answered = runLog(env).filter((e) => e.kind === 'answered')
-  assert.deepEqual(answered.map((e) => [e.by, e.decision]), [['dial', 'answer'], ['dial', 'answer'], ['dial', 'approve plan'], ['dial', 'deny'], ['dial', 'allow'], ['dial', 'deny']])
+  // Each answer went by the dial, none by a key, and the presses on the question jumped.
+  const log = runLog(env)
+  assert.deepEqual(log.filter((e) => e.kind === 'answered').map((e) => [e.by, e.decision]), [['dial', 'allow'], ['dial', 'deny'], ['dial', 'allow']])
+  assert.deepEqual(log.filter((e) => e.kind === 'press' && e.jumped).map((e) => e.key), ['dial', 'approve'])
 })
 
 test("play: the interactive driver skips a Session Slot dial press when what fake-claude sent is held for another session only, and shows no PRESS", async (t) => {
@@ -533,7 +490,7 @@ test('play: the interactive driver against a deck whose registry doesn\'t list t
   // session. A hello's 409 hangs on the registry.
   r = await play(readFixture('needs-you'), { url: bridge.url, token: env.token, driver, say })
   assert.equal(r.ok, true, r.error)
-  assert.deepEqual(repliesAndPresses(r).map((s) => s.press ?? s.reply), ['approve'])
+  assert.deepEqual(repliesAndPresses(r).map((s) => s.press ?? s.reply), ['dial', 'approve'])
   r = await play(readFixture('not-desktop'), { url: bridge.url, token: env.token, driver, say })
   assert.equal(r.ok, true, r.error)
   assert.deepEqual(repliesAndPresses(r).map((s) => [s.reply, s.why]), [['h1', "the deck refuses a hello only from a host its registry lists under another sessionId, and this mode skips registry lines: no registry it reads lists the fixture's host"]])
@@ -593,9 +550,93 @@ test('play: with registry lines skipped, only the reply to a poll answered at on
   assert.deepEqual(r.skipped.map((s) => [s.line, s.reply]), [[12, 'n3']])
 })
 
+test("play: with registry lines skipped, a poll after a turn end while other loops are in a turn is checked, and only the one after their running drops to 0 is skipped", async (t) => {
+  // threads, and PROTOCOL.md, "Commands", Phase 9: the turn ends with two agents in a turn, so the deck holds the polls
+  // after it (n2) whatever the registry says, until their running drops to 0, which answers the open one and has the
+  // next (n3) answered at once only while the registry says busy.
+  const SID = '3fa86955-0000-4000-8000-00000000000a'
+  const HOST = 'local_test-a'
+  const next = (as) => ({ plugin: { as, method: 'GET', path: `/v1/next?sid=${SID}&host=${HOST}&inst=ia&wait=20` } })
+  const none = (to) => ({ reply: { to, status: 200, body: { cmds: [] } } })
+  const ev = (seq, e) => ({ plugin: { method: 'POST', path: '/v1/events', body: { sid: SID, host: HOST, inst: 'ia', seq, events: [{ ...e, at: T0 + seq }] } } })
+  const threads = (running) => ({ t: 'threads', running, agents: [], runs: [] })
+  const lines = [
+    { setup: { session: { sid: SID, host: HOST, model: 'm', cwd: '/s', token: 't' }, registry: [{ pid: 101, sessionId: SID, hostSessionId: HOST, name: 'A', cwd: '/s', status: 'idle', statusUpdatedAt: T0 }] } },
+    { plugin: { as: 'h', method: 'POST', path: '/v1/hello', body: { v: 1, sid: SID, host: HOST, inst: 'ia', cwd: '/s', model: 'm', plugin: '*', cc: '*' } } },
+    { reply: { to: 'h', status: 200, body: { v: 1, ok: true } } },
+    next('n1'),
+    ev(1, { t: 'turn.start', turn: 't1' }),
+    { registry: { pid: 101, status: 'busy', statusUpdatedAt: T0 + 1000 } },
+    ev(2, threads(2)),
+    ev(3, { t: 'turn.end', turn: 't1', reason: 'answer' }),
+    next('n2'),
+    none('n1'),
+    ev(4, threads(0)),
+    none('n2'),
+    next('n3'),
+    none('n3'),
+  ]
+  const fx = parseFixture(lines.map((l) => JSON.stringify(l)).join('\n'), 'at-once-threads.jsonl')
+  let { r } = await playAgainstFake(t, fx)
+  assert.equal(r.ok, true, r.error)
+  assert.deepEqual([r.checked, r.skipped], [4, []])
+  const env = tempEnv(t)
+  const bridge = await startBridge(t, env)
+  r = await play(fx, { url: bridge.url, token: env.token, driver: interactive({ ui: { show: () => {}, ask: async () => '' }, pressTimeoutMs: 1000 }) })
+  assert.equal(r.ok, true, r.error)
+  assert.equal(r.checked, 3, 'the replies to hello, n1 and n2')
+  assert.deepEqual(r.skipped.map((s) => [s.line, s.reply]), [[14, 'n3']])
+})
+
+test("play: with registry lines skipped, threads count only from the session's current instance: a new instance's hello forgets the old one's, and a stray's never count", async (t) => {
+  // PROTOCOL.md, "Events", threads: the deck keeps a session's threads from its current instance only, and forgets them
+  // at a new one. Here the old instance's two agents, or a stray's, are no agents for the deck, so the main loop's turn
+  // end opens the 60 s, and the poll after it (n3) is answered at once only while the registry says busy.
+  const SID = '3fa86955-0000-4000-8000-00000000000a'
+  const HOST = 'local_test-a'
+  const next = (as, inst) => ({ plugin: { as, method: 'GET', path: `/v1/next?sid=${SID}&host=${HOST}&inst=${inst}&wait=20` } })
+  const none = (to) => ({ reply: { to, status: 200, body: { cmds: [] } } })
+  const hello = (as, inst) => ({ plugin: { as, method: 'POST', path: '/v1/hello', body: { v: 1, sid: SID, host: HOST, inst, cwd: '/s', model: 'm', plugin: '*', cc: '*' } } })
+  const ev = (inst, seq, e) => ({ plugin: { method: 'POST', path: '/v1/events', body: { sid: SID, host: HOST, inst, seq, events: [{ ...e, at: T0 + seq }] } } })
+  const threads = (running) => ({ t: 'threads', running, agents: [], runs: [] })
+  const setup = { setup: { session: { sid: SID, host: HOST, model: 'm', cwd: '/s', token: 't' }, registry: [{ pid: 101, sessionId: SID, hostSessionId: HOST, name: 'A', cwd: '/s', status: 'idle', statusUpdatedAt: T0 }] } }
+  const start = [setup, hello('h1', 'ia'), { reply: { to: 'h1', status: 200, body: { v: 1, ok: true } } }, next('n1', 'ia'), ev('ia', 1, { t: 'turn.start', turn: 't1' }), { registry: { pid: 101, status: 'busy', statusUpdatedAt: T0 + 1000 } }]
+  const cases = [
+    // The mod reloads: its new instance's hello answers n1, and its picture of the other loops starts empty.
+    ['restart', [...start, ev('ia', 2, threads(2)), hello('h2', 'ib'), { reply: { to: 'h2', status: 200, body: { v: 1, ok: true } } }, none('n1'), next('n2', 'ib'), ev('ib', 1, { t: 'turn.end', turn: 't1', reason: 'answer' }), none('n2'), next('n3', 'ib'), none('n3')]],
+    // An instance that never said hello sends threads: the deck drops them.
+    ['stray', [...start, ev('ic', 1, threads(2)), ev('ia', 2, { t: 'turn.end', turn: 't1', reason: 'answer' }), none('n1'), next('n3', 'ia'), none('n3')]],
+    // The mod reloads, then the replaced instance says hello again, which the deck answers ok and which changes nothing
+    // (PROTOCOL.md, Identity), and sends threads: the deck drops them too.
+    ['replaced', [...start, hello('h2', 'ib'), { reply: { to: 'h2', status: 200, body: { v: 1, ok: true } } }, none('n1'), next('n2', 'ib'), hello('h3', 'ia'), { reply: { to: 'h3', status: 200, body: { v: 1, ok: true } } }, ev('ia', 2, threads(2)), ev('ib', 1, { t: 'turn.end', turn: 't1', reason: 'answer' }), none('n2'), next('n3', 'ib'), none('n3')]],
+  ]
+  for (const [name, lines] of cases) {
+    const fx = parseFixture(lines.map((l) => JSON.stringify(l)).join('\n'), `threads-${name}.jsonl`)
+    const { r: fake } = await playAgainstFake(t, fx)
+    assert.equal(fake.ok, true, `${name}: ${fake.error}`)
+    assert.deepEqual(fake.skipped, [], name)
+    const env = tempEnv(t)
+    const bridge = await startBridge(t, env)
+    const r = await play(fx, { url: bridge.url, token: env.token, driver: interactive({ ui: { show: () => {}, ask: async () => '' }, pressTimeoutMs: 1000 }) })
+    assert.equal(r.ok, true, `${name}: ${r.error}`)
+    assert.deepEqual(r.skipped.filter((s) => s.reply).map((s) => [s.reply, s.why]), [['n3', 'the deck answers it at once only while the registry says busy after the turn ended or its other loops finished, and this mode skips registry lines']], name)
+  }
+  // The current instance's own threads still hold the window shut, after its hello said again too: the poll after the
+  // turn's end (n2) waits for their running to drop to 0, and only the one after that (n3) is answered at once.
+  const own = [...start, ev('ia', 2, threads(2)), hello('h2', 'ia'), { reply: { to: 'h2', status: 200, body: { v: 1, ok: true } } }, ev('ia', 3, { t: 'turn.end', turn: 't1', reason: 'answer' }), next('n2', 'ia'), none('n1'), ev('ia', 4, threads(0)), none('n2'), next('n3', 'ia'), none('n3')]
+  const fx = parseFixture(own.map((l) => JSON.stringify(l)).join('\n'), 'threads-own.jsonl')
+  const { r: fake } = await playAgainstFake(t, fx)
+  assert.deepEqual([fake.ok, fake.error, fake.skipped], [true, undefined, []])
+  const env = tempEnv(t)
+  const bridge = await startBridge(t, env)
+  const r = await play(fx, { url: bridge.url, token: env.token, driver: interactive({ ui: { show: () => {}, ask: async () => '' }, pressTimeoutMs: 1000 }) })
+  assert.equal(r.ok, true, r.error)
+  assert.deepEqual(r.skipped.filter((s) => s.reply).map((s) => s.reply), ['n3'])
+})
+
 test('play: the interactive driver skips and reports every Saved Prompt press, and the replies that expect its command, so no person sends a fixture\'s prompt', async (t) => {
-  // No real deck lists a fixture's session, so its Sessions dial is on one of the user's own: a press would send the
-  // fixture's prompt there. The fake bridge here reads an empty registry, as no real deck's lists them.
+  // No real deck lists a fixture's session, so its target is one of the user's own: a press would send the fixture's
+  // prompt there. The fake bridge here reads an empty registry, as no real deck's lists them.
   const env = tempEnv(t)
   const bridge = await startBridge(t, env)
   const shown = []
@@ -614,7 +655,7 @@ test('play: the interactive driver skips and reports every Saved Prompt press, a
     const r = await play(readFixture(name), { url: bridge.url, token: env.token, driver, say: (s) => shown.push(s) })
     assert.equal(r.ok, true, `${name}: ${r.error}\n${shown.join('\n')}`)
     assert.deepEqual([repliesAndPresses(r).map((s) => s.reply ?? s.press), r.checked], [skipped, checked], name)
-    for (const s of r.skipped.filter((x) => x.press)) assert.match(s.why, /^a Saved Prompt press goes to the session picked on the Sessions dial, and no real deck lists the fixture's session/, name)
+    for (const s of r.skipped.filter((x) => x.press)) assert.match(s.why, /^a Saved Prompt press goes to the target, the session last jumped to or on screen, and no real deck lists the fixture's session/, name)
     const cmd = r.skipped.find((x) => x.reply && /command/.test(x.why))
     assert.equal(cmd?.why, 'it expects a command that only a Saved Prompt press queues, and the press was skipped', name)
     // A skipped press gives no reply after it a person's time: nothing here waits on one.

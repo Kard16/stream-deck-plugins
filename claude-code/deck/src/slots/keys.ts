@@ -2,7 +2,7 @@ import type { KeySurface } from "../keys/decision.js";
 import type { SessionView } from "../model/sessions.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
-import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
+import { KeyPainter, type Live, PAINT_INTERVAL_MS } from "../util/painter.js";
 import type { SlotId } from "./ids.js";
 import { type JumpModel, jumpTo } from "./jump.js";
 import type { Slots } from "./slots.js";
@@ -37,6 +37,8 @@ export type SlotKeysOptions = {
 	open?: (host: string) => void;
 	paintIntervalMs?: number;
 	holdMs?: number;
+	/** Whether a Stream Deck is connected; the keys' painters send nothing while none is (agents-and-wake.md, C3). */
+	live?: Live;
 };
 
 type Key = {
@@ -45,6 +47,12 @@ type Key = {
 	surface: KeySurface;
 	painter: KeyPainter<string | null>;
 	down: boolean;
+	/**
+	 * The session the key's image showed at its key-down (undefined: no paint yet), which the press at the key-up acts
+	 * on. A repaint in between can't stand in for it: plugin.ts's press handler, which runs after the key-down, repaints
+	 * every key when the press shows the deck a device it had as away (Devices' `pressed`).
+	 */
+	shownAtDown: string | null | undefined;
 	holdTimer: TimerHandle | null;
 	/** The hold fired: the key-up after it does nothing. */
 	held: boolean;
@@ -53,10 +61,11 @@ type Key = {
 /**
  * The Session Slot keys, without the SDK (session-keys.md, Slots). Each shows the session on its slot. A press jumps
  * to that session in the app and makes it the target (jumpTo); an empty slot alerts. A press acts only on the session
- * the key showed: one that came onto the slot since the key's last paint, or a press before its first paint, alerts and
- * does nothing. Held HOLD_MS, it puts the session on screen in the app on its slot, swapping with the slot that one was
- * on (Slots' `takeOnScreen`), and shows OK, or an alert when no session is known to be on screen; the key-up after it
- * does nothing. While it has a key with a slot, it tells the model that something shows `seen` (the key face does).
+ * the key showed at its key-down: one that came onto the slot since, or a press before its first paint, alerts and
+ * does nothing, even when a repaint before the key-up shows it. Held HOLD_MS, it puts the session on screen in the app
+ * on its slot, swapping with the slot that one was on (Slots' `takeOnScreen`), and shows OK, or an alert when no
+ * session is known to be on screen; the key-up after it does nothing. While it has a key with a slot, it tells the
+ * model that something shows `seen` (the key face does).
  * It repaints whenever the slots change, which they also do when a `since` the keys show next reads differently (Slots'
  * repaint tick, hardening.md B6).
  *
@@ -74,6 +83,7 @@ export class SlotKeys {
 	readonly #open: (host: string) => void;
 	readonly #paintIntervalMs: number;
 	readonly #holdMs: number;
+	readonly #live: Live | undefined;
 	readonly #keys = new Map<string, Key>();
 
 	constructor(slots: Slots, model: SlotKeysModel, opts: SlotKeysOptions) {
@@ -86,12 +96,21 @@ export class SlotKeys {
 		this.#open = opts.open ?? (() => {});
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
 		this.#holdMs = opts.holdMs ?? HOLD_MS;
+		this.#live = opts.live;
 		slots.onChange(() => this.repaintAll());
 	}
 
 	add(id: string, slot: SlotId | null, surface: KeySurface): void {
 		this.remove(id);
-		const key: Key = { slot, surface, painter: new KeyPainter<string | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs }), down: false, holdTimer: null, held: false };
+		const key: Key = {
+			slot,
+			surface,
+			painter: new KeyPainter<string | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs, live: this.#live }),
+			down: false,
+			shownAtDown: undefined,
+			holdTimer: null,
+			held: false,
+		};
 		this.#keys.set(id, key);
 		this.#showsSeen();
 		if (slot !== null) this.#slots.appear(slot, id);
@@ -113,6 +132,7 @@ export class SlotKeys {
 		if (!key || key.slot === null) return;
 		if (key.holdTimer !== null) this.#clock.clearTimeout(key.holdTimer);
 		key.down = true;
+		key.shownAtDown = key.painter.shown;
 		key.held = false;
 		key.holdTimer = this.#clock.setTimeout(() => {
 			key.holdTimer = null;
@@ -139,6 +159,12 @@ export class SlotKeys {
 		for (const key of this.#keys.values()) this.#paint(key);
 	}
 
+	/** A device connected, or the Mac woke: every key sends its image again, the same one too (agents-and-wake.md, C2). */
+	repaintInFull(): void {
+		for (const key of this.#keys.values()) key.painter.forget();
+		this.repaintAll();
+	}
+
 	/** What a key shows now, for tests and painters. */
 	look(id: string): SlotKeyLook | null {
 		const key = this.#keys.get(id);
@@ -153,8 +179,8 @@ export class SlotKeys {
 	#press(key: Key): void {
 		if (key.slot === null) return;
 		const host = this.#slots.host(key.slot);
-		// The session the key's image showed; undefined only before its first paint.
-		const shown = key.painter.shown;
+		// The session the key's image showed when pressed down; undefined only before its first paint.
+		const shown = key.shownAtDown;
 		if (shown !== host) {
 			this.#log.info(`slot key ${key.slot}: press: nothing done: the key showed ${shown === undefined ? "nothing yet" : (shown ?? "no session")}, but the slot holds ${host ?? "none"} now`);
 			key.surface.showAlert();

@@ -710,6 +710,29 @@ describe("the slots' repaint tick (hardening.md, B6)", () => {
 		assert.equal(keys.painted("k0"), "3h", "on time by the wall clock");
 		slots.dispose();
 	});
+
+	test("no tick while no Stream Deck is connected, a change to the model included; a connect times it afresh (agents-and-wake.md, C3)", () => {
+		const clock = new FakeClock();
+		const wallNow = (): number => 70_000 + (clock.now() - 1_000_000);
+		const model = new SessionModel({ clock, wallNow });
+		model.setRegistry([reg(1, A, { status: "busy" })]);
+		const slots = new Slots(model, { store: new MemorySlotStore(new Map([[BOTTOM[0] ?? "", A]])), clock, fillDelayMs: 0 });
+		let drawn = 0;
+		const art = slotKeyArt();
+		const keys = new SlotKeys(slots, model, { art: (look) => (drawn++, art(look)), clock, wallNow, paintIntervalMs: 0 });
+		keys.add("k0", BOTTOM[0] ?? "", keySurface);
+		assert.equal(slots.nextTick, 121_000, "A's Working 1m reads 2m at 121 s");
+		slots.setDeckConnected(false);
+		assert.deepEqual([slots.nextTick, clock.pendingTimers], [null, 0]);
+		model.setRegistry([reg(1, A, { status: "busy", name: "Renamed" })]);
+		assert.equal(slots.nextTick, null, "a change repaints, and asks for no tick");
+		const before = drawn;
+		clock.advance(200_000);
+		assert.equal(drawn, before, "nothing ticked in 200 s");
+		slots.setDeckConnected(true);
+		assert.equal(slots.nextTick, 301_000, "from now, 4m29s: it reads 5m at 301 s");
+		slots.dispose();
+	});
 });
 
 describe("the slot file's place", () => {

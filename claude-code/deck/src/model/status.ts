@@ -1,8 +1,9 @@
 /**
  * A session's status on the deck (PROTOCOL.md, "The deck's session model"), the first that applies:
- * approval, needs-you, working, failed, interrupted, needs-you (the app's own needs-input indicator), done, idle.
+ * approval, needs-you, background or working, failed, interrupted, needs-you (the app's own needs-input indicator),
+ * done, idle.
  */
-export type SessionStatus = "approval" | "needs-you" | "working" | "failed" | "interrupted" | "done" | "idle";
+export type SessionStatus = "approval" | "needs-you" | "background" | "working" | "failed" | "interrupted" | "done" | "idle";
 
 /** What the status is worked out from. Times are this Mac's wall clock, in ms. */
 export type StatusInput = {
@@ -29,6 +30,8 @@ export type StatusInput = {
 	 * indicator ignores the record, or there's none (turnCategory, src/records/records.ts).
 	 */
 	recordCategory: string | null;
+	/** How many loops other than the main one are in a turn, by the latest `threads` the deck keeps; 0 without one. */
+	running: number;
 };
 
 export function sessionStatus(i: StatusInput): SessionStatus {
@@ -39,11 +42,12 @@ export function sessionStatus(i: StatusInput): SessionStatus {
  * Which rule a status came from, so the session view can say when it began (`since`) and what the session waits on:
  * - `held-tool`, `held-ask`: rules 1 and 2, a held request;
  * - `waiting`: rule 2, the registry's `waiting` with nothing held;
+ * - `background`: rule 3, other loops in a turn while the main loop isn't;
  * - `busy`: rule 3, the registry's `busy`; `started`: rule 3, the main loop's `turn.start` before the registry says so;
  * - `failed`, `interrupted`: rules 4 and 5; `record`: rule 6, the app's own needs-input indicator; `done`: rule 7;
  * - `idle`: rule 8.
  */
-export type StatusSource = "held-tool" | "held-ask" | "waiting" | "busy" | "started" | "failed" | "interrupted" | "record" | "done" | "idle";
+export type StatusSource = "held-tool" | "held-ask" | "waiting" | "background" | "busy" | "started" | "failed" | "interrupted" | "record" | "done" | "idle";
 
 export type SessionState = { status: SessionStatus; from: StatusSource };
 
@@ -53,6 +57,10 @@ export function sessionState(i: StatusInput): SessionState {
 	if (i.heldAsk > 0) return { status: "needs-you", from: "held-ask" };
 	// Nothing is held here: a session without the plugin, or a request lost when the deck restarted.
 	if (i.registry === "waiting") return { status: "needs-you", from: "waiting" };
+	// Other loops are in a turn and the main loop isn't, whatever the registry says: they keep it busy, and an idle
+	// while they're counted is a reading that trails (PROTOCOL.md, status rule 3). The main loop isn't in a turn once its
+	// latest turn.start has an end, or when the deck has seen none.
+	if (i.running > 0 && (i.turn === null || i.turn.ended)) return { status: "background", from: "background" };
 	// A `busy` from before the main loop's turn ended with `aborted` doesn't count, and the rules below take the
 	// session as idle.
 	const staleBusy = i.registry === "busy" && beganBeforeAbort(i);

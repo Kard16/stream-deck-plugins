@@ -5,8 +5,8 @@
 // - Arrays match when they have the same length and each element matches, in order.
 // - `at` is never compared.
 // - A path with a query matches when the route is equal and each listed parameter is present and equal.
-// - An Answer or an Approve plan, a permission answer with updatedInput, must equal the expected body exactly
-//   (exactMismatch): no field missing or extra at any depth.
+// - exactMismatch holds a value to another with no field missing or extra at any depth: a permission answer's decision
+//   is Allow or Deny exactly (play.mjs).
 // - Names a fixture gives to values the other side picks bind at their first appearance and hold from then
 //   on: the deck's command ids ("c1", "c2"…), the mod's inst. See Bindings.
 //
@@ -70,18 +70,15 @@ export const matches = (expected, actual, opts) => mismatch(expected, actual, op
 
 /**
  * Why `actual` isn't exactly `expected`, or null: as mismatch(), but every field of an object, at any depth, must be on
- * both sides, and no key is skipped, `at` included. PROTOCOL.md, "Matching": an Answer or an Approve plan must equal
- * the expected body exactly, updatedInput included, since Claude Code fails an updatedInput that doesn't fit the tool's
- * schema as a deny. `"*"` matches any value that's there, as a fixture writes it, unless `wildcard` is false: an echo
- * compared with the request it echoes is compared literally.
+ * both sides, and no key is skipped, `at` included. `"*"` matches any value that's there, as a fixture writes it.
  */
-export function exactMismatch(expected, actual, at = '', { wildcard = true } = {}) {
-  if (wildcard && expected === ANY) return actual === undefined ? `${where(at)}: missing` : null
+export function exactMismatch(expected, actual, at = '') {
+  if (expected === ANY) return actual === undefined ? `${where(at)}: missing` : null
   if (Array.isArray(expected)) {
     if (!Array.isArray(actual)) return `${where(at)}: expected a list of ${expected.length}, got ${show(actual)}`
     if (actual.length !== expected.length) return `${where(at)}: expected ${expected.length} item(s), got ${actual.length}: ${show(actual)}`
     for (let i = 0; i < expected.length; i++) {
-      const r = exactMismatch(expected[i], actual[i], `${at}[${i}]`, { wildcard })
+      const r = exactMismatch(expected[i], actual[i], `${at}[${i}]`)
       if (r) return r
     }
     return null
@@ -91,7 +88,7 @@ export function exactMismatch(expected, actual, at = '', { wildcard = true } = {
     for (const k of Object.keys(expected)) {
       const p = at ? `${at}.${k}` : k
       if (!Object.hasOwn(actual, k)) return `${p}: missing (expected ${show(expected[k])})`
-      const r = exactMismatch(expected[k], actual[k], p, { wildcard })
+      const r = exactMismatch(expected[k], actual[k], p)
       if (r) return r
     }
     const extra = Object.keys(actual).find((k) => !Object.hasOwn(expected, k))
@@ -158,7 +155,9 @@ export function commandIdHook(bindings) {
  *
  * `sessions` is exact in any order; `held` is an exact list of partial objects; `status`, `doing`,
  * `context` and `settings` are partial maps by host; `cmds` maps labels to states; `jumped` and `alert` are
- * values. An unknown field fails, so a typo in a fixture can't pass.
+ * values; `threads` is a partial map by host of each session's latest threads, whose `runs` is an exact list of
+ * partial runs, as arrays are (PROTOCOL.md, "Fixtures", Phase 9). An unknown field fails, so a typo in a fixture can't
+ * pass.
  */
 export function expectMismatch(expected, deck, { commandId = (label) => label } = {}) {
   for (const [key, want] of Object.entries(expected)) {
@@ -177,6 +176,7 @@ export function expectMismatch(expected, deck, { commandId = (label) => label } 
       case 'settings':
       case 'jumped':
       case 'alert':
+      case 'threads':
         r = mismatch(want, deck[key], { at: key })
         break
       case 'cmds':

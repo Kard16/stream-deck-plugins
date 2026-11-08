@@ -5,7 +5,7 @@
 		{
 			"key": "name",
 			"type": "text",
-			"rect": [8, 2, 150, 24],
+			"rect": [8, 2, 130, 24],
 			"value": "",
 			"alignment": "left",
 			"color": "#F2F2F2",
@@ -15,7 +15,7 @@
 		{
 			"key": "dots",
 			"type": "text",
-			"rect": [160, 2, 32, 24],
+			"rect": [140, 2, 52, 24],
 			"value": "",
 			"alignment": "right",
 			"color": "#8A8F99",

@@ -155,7 +155,7 @@ export const REGISTRY_FIELDS = Object.freeze([
   },
   {
     field: 'startedAt', expect: 'number', need: 'optional', reads: [REGISTRY_TS, 'startedAt: num(o.startedAt)'],
-    why: 'It orders the Sessions dial; without it the order goes by pid.',
+    why: 'The slots fill with the newest first, and of two files for one host the later shows; without it the order goes by pid.',
     check: aNumber,
   },
 ])
@@ -261,7 +261,7 @@ const S5_JUMP = [PLAN, 'Jump route: `claude://code/continue?session=<local_id>`'
 export const BUNDLE_CHECKS = Object.freeze([
   {
     id: 'jump', name: 'jump route',
-    why: "The Sessions dial, the Session key and a question's key open claude://code/continue?session=<local_ id>.",
+    why: "The slot keys and dials, Others and a question's key open claude://code/continue?session=<local_ id>.",
     needles: [
       // What the deck opens, and the URL the app builds for its own desktop actions; the Dock menu and Spotlight
       // build the same route (S5).

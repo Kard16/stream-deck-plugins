@@ -158,7 +158,7 @@ describe("30 sessions at once (Phase 6)", () => {
 			);
 
 			// A prompt for session 17 reaches its poll only.
-			model.pick(hostOf(17));
+			model.pick(hostOf(17), "the test");
 			prompts.press("prompt", { text: "Only for 17." });
 			const reached = await within(polls[17] as Promise<Outcome>, 2000);
 			const cmds = (json(reached) as { cmds: { id: string; t: string; text: string }[] }).cmds;

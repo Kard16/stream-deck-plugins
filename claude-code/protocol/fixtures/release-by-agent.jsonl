@@ -1,0 +1,23 @@
+{"note":"Two subagents run the same command (Phase 9). s1's call needs permission, and its PermissionRequest carries agent_id. s2's identical call ends first: its tool.end comes from another loop, so it doesn't release s1's request. Nor does the main loop's identical call. s1's own tool.end does, once the user has allowed it in the app. Neither subagent's turn start reached this mod, so their calls change nothing in threads."}
+{"setup":{"session":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","model":"claude-haiku-5-5","cwd":"/Users/me/sandbox","token":"fixture-token"},"registry":[{"pid":101,"sessionId":"3fa86955-0000-4000-8000-00000000000a","hostSessionId":"local_test-a","name":"Deck test A","cwd":"/Users/me/sandbox","status":"idle","statusUpdatedAt":1793600000000}],"records":{"local_test-a":{"model":"claude-haiku-5-5","effort":"low","permissionMode":"default","lastFocusedAt":1793600000000}}}}
+{"mod":{"on":"session.start","e":{"cwd":"/Users/me/sandbox","surface":null,"isInteractive":false}}}
+{"plugin":{"as":"h","method":"POST","path":"/v1/hello","body":{"v":1,"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","cwd":"/Users/me/sandbox","model":"claude-haiku-5-5","plugin":"*","cc":"*"}}}
+{"reply":{"to":"h","status":200,"body":{"v":1,"ok":true}}}
+{"plugin":{"as":"n1","method":"GET","path":"/v1/next?sid=3fa86955-0000-4000-8000-00000000000a&host=local_test-a&inst=ia&wait=20"}}
+{"mod":{"on":"turn.start","e":{"turnId":"t1","text":"Test it twice"}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":1,"events":[{"t":"turn.start","turn":"t1","at":1793600000100}]}}}
+{"registry":{"pid":101,"status":"busy","statusUpdatedAt":1793600001000}}
+{"mod":{"on":"tool.call","e":{"tool":"Bash","tool_use_id":"u13","agentId":"s1","command":"npm test","description":"Run the tests"},"result":{"isError":false}}}
+{"plugin":{"as":"p1","method":"POST","path":"/v1/permission","headers":{"X-Deck-Host":"local_test-a"},"body":{"session_id":"3fa86955-0000-4000-8000-00000000000a","transcript_path":"/Users/me/.claude/projects/-Users-me-sandbox/3fa86955-0000-4000-8000-00000000000a.jsonl","cwd":"/Users/me/sandbox","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"npm test","description":"Run the tests"},"permission_mode":"default","effort":{"level":"low"},"prompt_id":"prompt-1","agent_id":"s1","agent_type":"general-purpose"}}}
+{"registry":{"pid":101,"status":"waiting","statusUpdatedAt":1793600002000}}
+{"expect":{"held":[{"host":"local_test-a","tool":"Bash","kind":"tool","summary":"npm test"}],"status":{"local_test-a":"approval"}}}
+{"mod":{"on":"tool.call","e":{"tool":"Bash","tool_use_id":"u14","agentId":"s2","command":"npm test","description":"Run the tests"},"result":{"isError":false}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":2,"events":[{"t":"tool.end","tool":"Bash","use":"u14","agent":"s2","fp":"85db07b2","ok":true,"at":1793600000200}]}}}
+{"expect":{"held":[{"host":"local_test-a","tool":"Bash","kind":"tool","summary":"npm test"}]}}
+{"mod":{"on":"tool.call","e":{"tool":"Bash","tool_use_id":"u15","command":"npm test","description":"Run the tests"},"result":{"isError":false}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":3,"events":[{"t":"tool.start","tool":"Bash","use":"u15","summary":"npm test","fp":"85db07b2","at":1793600000300}]}}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":4,"events":[{"t":"tool.end","tool":"Bash","use":"u15","fp":"85db07b2","ok":true,"at":1793600000400}]}}}
+{"expect":{"held":[{"host":"local_test-a","tool":"Bash","kind":"tool","summary":"npm test"}]}}
+{"plugin":{"method":"POST","path":"/v1/events","body":{"sid":"3fa86955-0000-4000-8000-00000000000a","host":"local_test-a","inst":"ia","seq":5,"events":[{"t":"tool.end","tool":"Bash","use":"u13","agent":"s1","fp":"85db07b2","ok":true,"at":1793600000500}]}}}
+{"reply":{"to":"p1","status":200,"body":{}}}
+{"expect":{"held":[]}}

@@ -2,7 +2,7 @@ import { type Command, type CommandSpec, FINAL_STATES } from "../bridge/commands
 import type { QueueResult, SessionView } from "../model/sessions.js";
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
 import { type Log, nullLog, quote } from "../util/log.js";
-import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
+import { KeyPainter, type Live, PAINT_INTERVAL_MS } from "../util/painter.js";
 import { type PromptLook, promptKeySvg } from "./art.js";
 import type { KeySurface } from "./decision.js";
 
@@ -36,7 +36,7 @@ function queueForTarget(model: CommandModel, log: Log, what: string, spec: Comma
 	}
 	const target = model.target();
 	if (!target) {
-		log.info(`${what}: no target session: pick one on the Sessions dial, or open one in the app`);
+		log.info(`${what}: no target session: jump to one from a Session Slot or Other Sessions, or open one in the app`);
 		return null;
 	}
 	const result = model.queue(target.key, spec);
@@ -70,19 +70,22 @@ export class PromptKeys {
 	readonly #log: Log;
 	readonly #clock: Clock;
 	readonly #paintIntervalMs: number;
+	readonly #live: Live | undefined;
 	readonly #keys = new Map<string, PromptKey>();
 
-	constructor(model: CommandModel, opts: { log?: Log; clock?: Clock; paintIntervalMs?: number } = {}) {
+	/** `live`: whether a Stream Deck is connected; the keys' painters send nothing while none is (agents-and-wake.md, C3). */
+	constructor(model: CommandModel, opts: { log?: Log; clock?: Clock; paintIntervalMs?: number; live?: Live } = {}) {
 		this.#model = model;
 		this.#log = opts.log ?? nullLog;
 		this.#clock = opts.clock ?? realClock;
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
+		this.#live = opts.live;
 		model.onChange(() => this.repaintAll());
 	}
 
 	add(id: string, surface: KeySurface, settings: PromptSettings): void {
 		this.remove(id);
-		const painter = new KeyPainter<null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs });
+		const painter = new KeyPainter<null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs, live: this.#live });
 		const key: PromptKey = { surface, painter, settings, cmd: null, finalAt: null, timer: null };
 		this.#keys.set(id, key);
 		this.#paint(key);
@@ -135,6 +138,12 @@ export class PromptKeys {
 
 	repaintAll(): void {
 		for (const key of this.#keys.values()) this.#paint(key);
+	}
+
+	/** A device connected, or the Mac woke: every key sends its image again, the same one too (agents-and-wake.md, C2). */
+	repaintInFull(): void {
+		for (const key of this.#keys.values()) key.painter.forget();
+		this.repaintAll();
 	}
 
 	/** What a key shows now, for tests. */

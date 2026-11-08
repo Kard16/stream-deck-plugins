@@ -6,6 +6,15 @@ export const PAINT_INTERVAL_MS = 100;
 export type Feedback = Record<string, unknown>;
 
 /**
+ * Whether a Stream Deck is connected to take paints (agents-and-wake.md, C3). While it says no, a painter sends
+ * nothing and changes nothing: the latest update waits, and what the key or strip showed, and since when, stays what
+ * last reached it. Always yes by default.
+ */
+export type Live = () => boolean;
+
+const always: Live = () => true;
+
+/**
  * Sends one dial's strip to the app: only the layout keys whose content changed since the last update, and at
  * most one update per interval. Updates that arrive in between are merged; the latest wins.
  * (The same painter as lightroom/deck/src/dial/painter.ts, at 10 a second.)
@@ -26,6 +35,7 @@ export class StripPainter<T = undefined> {
 	#shownSince: number | null = null;
 	readonly #onShown: ((shown: T | undefined) => void) | null;
 	readonly #equals: (a: T | undefined, b: T | undefined) => boolean;
+	readonly #live: Live;
 
 	/**
 	 * `onShown` runs at the paint that changes what the strip shows, with the new value. `equals` says whether two
@@ -33,12 +43,13 @@ export class StripPainter<T = undefined> {
 	 */
 	constructor(
 		send: (payload: Feedback) => void,
-		opts: { clock?: Clock; minIntervalMs?: number; onShown?: (shown: T | undefined) => void; equals?: (a: T | undefined, b: T | undefined) => boolean } = {},
+		opts: { clock?: Clock; minIntervalMs?: number; onShown?: (shown: T | undefined) => void; equals?: (a: T | undefined, b: T | undefined) => boolean; live?: Live } = {},
 	) {
 		this.#send = send;
 		this.#clock = opts.clock ?? realClock;
 		this.#onShown = opts.onShown ?? null;
 		this.#equals = opts.equals ?? Object.is;
+		this.#live = opts.live ?? always;
 		this.#throttle = new Throttle(() => this.#flush(), { clock: this.#clock, minIntervalMs: opts.minIntervalMs });
 	}
 
@@ -61,7 +72,7 @@ export class StripPainter<T = undefined> {
 		return this.#shownSince;
 	}
 
-	/** The app forgot the strip (the dial reappeared): the next update sends every key. */
+	/** The app forgot the strip (the dial reappeared, or a device connected): the next update sends every key. */
 	forget(): void {
 		this.#painted.clear();
 	}
@@ -79,7 +90,7 @@ export class StripPainter<T = undefined> {
 
 	/** Returns whether anything was sent, so the throttle only counts real paints. */
 	#flush(): boolean {
-		if (!this.#desired) return false;
+		if (!this.#desired || !this.#live()) return false;
 		const showsNew = this.#shown === null || !this.#equals(this.#shown.value, this.#desiredShown);
 		if (showsNew) this.#shownSince = this.#clock.now();
 		this.#shown = { value: this.#desiredShown };
@@ -107,14 +118,18 @@ export class KeyPainter<T> {
 	readonly #send: (svg: string) => void;
 	readonly #clock: Clock;
 	readonly #throttle: Throttle;
+	readonly #live: Live;
 	#desired: { svg: string; shown: T } | null = null;
 	#painted: { svg: string; shown: T } | null = null;
 	#shownSince: number | null = null;
+	/** The app may have lost the last image: the next flush sends, even the same one. */
+	#forgotten = false;
 
-	constructor(send: (svg: string) => void, opts: { clock?: Clock; minIntervalMs?: number } = {}) {
+	constructor(send: (svg: string) => void, opts: { clock?: Clock; minIntervalMs?: number; live?: Live } = {}) {
 		this.#send = send;
 		this.#clock = opts.clock ?? realClock;
-		this.#throttle = new Throttle(() => this.#flush(), { ...opts, clock: this.#clock });
+		this.#live = opts.live ?? always;
+		this.#throttle = new Throttle(() => this.#flush(), { clock: this.#clock, minIntervalMs: opts.minIntervalMs });
 	}
 
 	update(svg: string, shown: T): void {
@@ -139,17 +154,26 @@ export class KeyPainter<T> {
 		return this.#painted?.svg ?? null;
 	}
 
+	/**
+	 * The app may have lost the image (a device connected; agents-and-wake.md, C2): the next update sends it, even
+	 * unchanged. What the key showed, and since when, stay.
+	 */
+	forget(): void {
+		this.#forgotten = true;
+	}
+
 	dispose(): void {
 		this.#throttle.dispose();
 	}
 
 	#flush(): boolean {
 		const desired = this.#desired;
-		if (!desired) return false;
-		const same = this.#painted?.svg === desired.svg;
+		if (!desired || !this.#live()) return false;
+		const same = !this.#forgotten && this.#painted?.svg === desired.svg;
 		if (this.#painted === null || !Object.is(this.#painted.shown, desired.shown)) this.#shownSince = this.#clock.now();
 		this.#painted = desired;
 		if (same) return false;
+		this.#forgotten = false;
 		this.#send(desired.svg);
 		return true;
 	}

@@ -37,7 +37,7 @@
 			"rect": [8, 48, 184, 19],
 			"value": "",
 			"alignment": "left",
-			"color": "#A7ADB8",
+			"color": "#E8E8E8",
 			"font": { "size": 14, "weight": 500 },
 			"text-overflow": "ellipsis"
 		},

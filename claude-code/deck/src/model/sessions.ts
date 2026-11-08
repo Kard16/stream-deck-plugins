@@ -3,7 +3,6 @@ import path from "node:path";
 import { type Command, CommandQueue, type CommandSpec, IN_FLIGHT_MS, type PollReply } from "../bridge/commands.js";
 import { type Held, HeldRequests } from "../bridge/held.js";
 import type { BridgeRoutes, BridgeState, RouteAnswer } from "../bridge/server.js";
-import { heldAsk } from "../protocol/ask.js";
 import { fingerprint, summary } from "../protocol/fingerprint.js";
 import {
 	ASK_TOOLS,
@@ -23,6 +22,7 @@ import {
 	type PermissionRequest,
 	PROTOCOL_VERSION,
 	ROUTES,
+	type Threads,
 } from "../protocol/wire.js";
 import type { AppRecord } from "../records/records.js";
 import { compareSessions, type RegistrySession } from "../registry/registry.js";
@@ -30,7 +30,7 @@ import { type Clock, realClock } from "../util/clock.js";
 import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import { QuietLog } from "../util/quiet-log.js";
-import { projectName } from "./format.js";
+import { activeRun, projectName, runLabel } from "./format.js";
 import { type FrontCheck, FrontWatcher } from "./front.js";
 import { type SessionState, type SessionStatus, sessionState } from "./status.js";
 import { asVersion, type VersionCheck } from "./versions.js";
@@ -38,8 +38,8 @@ import { asVersion, type VersionCheck } from "./versions.js";
 /**
  * What a session waits on (session-keys.md, What each session shows): `approval`, a held `tool` request; `question`,
  * a held AskUserQuestion; `plan`, a held ExitPlanMode; `input`, the registry's `waiting` with nothing held, or the
- * app's own needs-input sign. It follows the session's oldest held request, which its Session Slot dial shows and
- * answers, so with several held it can differ from the status, which puts a `tool` request first.
+ * app's own needs-input sign. It follows the session's oldest held request, which its Session Slot dial shows, so with
+ * several held it can differ from the status, which puts a `tool` request first.
  */
 export type Need = "approval" | "question" | "plan" | "input";
 
@@ -55,6 +55,11 @@ export type SessionView = {
 	status: SessionStatus;
 	/** The summary of the main loop's latest unfinished tool, from the mod. */
 	doing: string | null;
+	/**
+	 * The session's other loops, the latest `threads` its current mod instance sent, `running` 0 included; null before
+	 * one, and from a new instance's hello until it sends one (PROTOCOL.md, Events: threads).
+	 */
+	threads: Threads | null;
 	/** Context use, %, from the mod's latest `measure`. */
 	context: number | null;
 	model: string | null;
@@ -81,7 +86,8 @@ export type SessionView = {
 	/**
 	 * Wall-clock ms when the current status began: the held request's arrival (the oldest one), the registry's
 	 * `statusUpdatedAt` (or the deck's first reading of that status without it), the `turn.start` the deck got before
-	 * the registry said busy, or the turn's end, whichever the status came from. For a session that isn't running, its
+	 * the registry said busy, or the turn's end, whichever the status came from; for background, the later of the main
+	 * loop's last turn end and the moment other loops' `running` last went above 0. For a session that isn't running, its
 	 * record's `lastActivityAt`. Null when unknown. Shown as `30s`, `4m`… (format.ts's sinceText).
 	 */
 	since: number | null;
@@ -176,10 +182,17 @@ type BridgeSession = {
 	turn: Turn | null;
 	/**
 	 * Until when, by the monotonic clock, the session's polls are answered at once while the registry says `busy`:
-	 * AT_ONCE_MS after the main loop's turn ended. Null before the first turn end and from each main-loop `turn.start`;
-	 * a time that has passed stays until then.
+	 * AT_ONCE_MS after the main loop's turn ended with no other loop in a turn, or after the last of them left their
+	 * turn once it had. Null before the first, from each main-loop `turn.start`, and while other loops are in a turn; a
+	 * time that has passed stays until then.
 	 */
 	pollsAtOnceUntil: number | null;
+	/**
+	 * The latest `threads` from the instance named, the current one when it came, and by the wall clock when its
+	 * `running` last went above 0 (background's `since`) and when it last came back to 0 (the work's end: workEndedAt);
+	 * null before one, and once another instance is made current.
+	 */
+	threads: { inst: string; latest: Threads; runningSince: number | null; runningEndedAt: number | null } | null;
 	/** The main loop's unfinished tool calls, oldest first. */
 	tools: RunningTool[];
 	/** The latest `measure`'s percent and tokens, null while the engine has none; its window; the latest cost it had. */
@@ -252,10 +265,10 @@ export type SessionModelOptions = {
 	rescan?: () => Promise<void>;
 	/**
 	 * Whether Claude is the app in front (front.ts's lsappinfoCheck in the plugin), for `seen`. It's asked only while
-	 * some session whose last turn ended unseen is on screen in the app, and something on the deck shows `seen`
-	 * (showsSeen): every second at first, less often the longer that lasts (front.ts's frontIntervalMs), and every second
-	 * again after an attach, a detach, a press on the deck or a wake (userPresent). Without it, nothing asks, and a turn's
-	 * end is seen only by an attach, the record's `lastFocusedAt` or a press.
+	 * some session whose last turn ended unseen is on screen in the app, and something on a connected Stream Deck shows
+	 * `seen` (showsSeen, setDeckConnected): every second at first, less often the longer that lasts (front.ts's
+	 * frontIntervalMs), and every second again after an attach, a detach, a press on the deck or a wake (userPresent).
+	 * Without it, nothing asks, and a turn's end is seen only by an attach, the record's `lastFocusedAt` or a press.
 	 */
 	front?: FrontCheck;
 	/**
@@ -324,6 +337,8 @@ export class SessionModel implements BridgeRoutes {
 	readonly #front: FrontWatcher | null;
 	/** What on the deck shows `seen` now (the slot keys, the Others keys): the front-app check runs only while one does. */
 	readonly #seenShown = new Set<object>();
+	/** Whether a Stream Deck is connected: the front-app check runs only while one is (agents-and-wake.md, C3). */
+	#deckConnected = true;
 	readonly #versions: VersionCheck | null;
 
 	constructor(opts: SessionModelOptions = {}) {
@@ -493,9 +508,9 @@ export class SessionModel implements BridgeRoutes {
 
 	/**
 	 * `POST /v1/permission`, held, from a confirmed session only. A request from any other process gets no decision
-	 * at once. `inputScrubbed`: the bridge's token scrub changed something inside the body's `tool_input` (BridgeRoutes).
+	 * at once.
 	 */
-	permission(body: unknown, deckHost: string | undefined, reply: PollReply, inputScrubbed = false): void | Promise<void> {
+	permission(body: unknown, deckHost: string | undefined, reply: PollReply): void | Promise<void> {
 		// When it arrived, for release rules 2 and 3, before any second reading of the registry.
 		const at = this.#wallNow();
 		const p = parsePermission(body);
@@ -504,7 +519,7 @@ export class SessionModel implements BridgeRoutes {
 			reply.send(400, JSON.stringify({ error: "not a PermissionRequest" }));
 			return;
 		}
-		return this.#fromConfirmed(ROUTES.permission, deckHost, p.sid, reply, (host) => this.#takePermission(p, host, at, reply, inputScrubbed));
+		return this.#fromConfirmed(ROUTES.permission, deckHost, p.sid, reply, (host) => this.#takePermission(p, host, at, reply));
 	}
 
 	/**
@@ -544,9 +559,10 @@ export class SessionModel implements BridgeRoutes {
 			const e = parseEvent(raw);
 			if (!e) continue;
 			if (e.t === "tool.start" || e.t === "tool.end") this.#log.debug(`EVENT ${b.host} ${e.t} ${quote(e.tool, 60)} fp ${e.fp ?? "none"}${e.agent ? ` agent ${quote(e.agent, 40)}` : ""}`);
-			else this.#log.debug(`EVENT ${b.host} ${e.t}`);
+			// A threads event has its own line (#takeThreads).
+			else if (e.t !== "threads") this.#log.debug(`EVENT ${b.host} ${e.t}`);
 			try {
-				this.#apply(b, e);
+				this.#apply(b, e, ref.inst);
 			} catch (err) {
 				this.#log.error(`event ${e.t} from ${b.host} failed: ${describeError(err)}`);
 			}
@@ -626,9 +642,10 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
-	 * The session prompts go to: the one last picked on the Sessions dial, even after it has ended
-	 * (presses then do nothing but alert, kickoff answer 4); until one is picked, the one most recently on
-	 * screen in the app, by its latest `attach` or its record's `lastFocusedAt`, whichever is later.
+	 * The session prompts go to (PROTOCOL.md, The deck's session model): the one last jumped to from a Session Slot or
+	 * Other Sessions (`pick`), even after it has ended (presses then do nothing but alert, kickoff answer 4); until one
+	 * is, the one most recently on screen in the app, by its latest `attach` or its record's `lastFocusedAt`, whichever
+	 * is later.
 	 */
 	target(): SessionView | null {
 		if (this.#picked !== null) {
@@ -643,7 +660,7 @@ export class SessionModel implements BridgeRoutes {
 	/**
 	 * The session on screen in the app: of the running sessions, the one with the latest of its last `attach` (when the
 	 * deck got it) and its record's `lastFocusedAt`; null when none has either. A long press on a slot key takes it
-	 * (session-keys.md, Slots), and until a session is picked it's the target.
+	 * (session-keys.md, Slots), and until a session is jumped to it's the target.
 	 */
 	onScreen(): SessionView | null {
 		const best = this.#onScreenSession();
@@ -693,6 +710,20 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
+	 * Whether a Stream Deck is connected (agents-and-wake.md, C3). While none is, nothing on the deck shows `seen`, so
+	 * the front-app check doesn't run; the sessions' state keeps up all the same. True until told otherwise.
+	 */
+	setDeckConnected(connected: boolean): void {
+		if (connected === this.#deckConnected) return;
+		this.#deckConnected = connected;
+		try {
+			this.#front?.want(this.#wantsFront(this.sessions()));
+		} catch (err) {
+			this.#log.error(`starting or stopping the front-app check threw: ${describeError(err)}`);
+		}
+	}
+
+	/**
 	 * The user pressed the session's slot key, or jumped to it from its dial: a turn's end before now counts as seen
 	 * (session-keys.md, `seen`). Only for a session the registry lists.
 	 */
@@ -716,16 +747,16 @@ export class SessionModel implements BridgeRoutes {
 		return this.#wallNow();
 	}
 
-	/** Whether a session was picked on the Sessions dial (rather than the target following the app). */
+	/** The session last jumped to (`pick`), which is the target; null while the target follows the app. */
 	get picked(): string | null {
 		return this.#picked;
 	}
 
 	/**
-	 * A session was picked: on the Sessions dial, or by a press on its slot key or a jump from its dial. It's the target
-	 * from now on. `via` names where, for the log.
+	 * A jump to a session: from its slot key or dial, or from Other Sessions (slots/jump.ts). It's the target from now on.
+	 * `via` names where, for the log.
 	 */
-	pick(key: string, via = "the Sessions dial"): void {
+	pick(key: string, via: string): void {
 		const s = this.#registry.get(key);
 		if (s) this.#pickedTitle = this.#title(s);
 		else if (this.#picked !== key) this.#pickedTitle = this.slotView(key)?.title ?? null;
@@ -757,7 +788,7 @@ export class SessionModel implements BridgeRoutes {
 
 	// ---- internals ----
 
-	#apply(b: BridgeSession, e: ModEvent): void {
+	#apply(b: BridgeSession, e: ModEvent, inst: string | null): void {
 		switch (e.t) {
 			case "turn.start":
 				if (e.agent !== null) return;
@@ -780,8 +811,7 @@ export class SessionModel implements BridgeRoutes {
 					failedAt: same ? (b.turn?.failedAt ?? null) : null,
 				};
 				b.tools = [];
-				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
-				this.#answerPoll(b, "the turn ended");
+				this.#turnOver(b, "the turn ended");
 				return;
 			}
 			case "failed":
@@ -789,8 +819,10 @@ export class SessionModel implements BridgeRoutes {
 				b.turn = { id: b.turn?.id ?? null, ended: true, reason: b.turn?.reason ?? null, failed: true, startedAt: b.turn?.startedAt ?? null, endedAt: b.turn?.endedAt ?? null, failedAt: this.#wallNow() };
 				b.tools = [];
 				this.#log.info(`FAILED turn in ${b.host}${e.error ? `: ${quote(e.error, 120)}` : ""}`);
-				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
-				this.#answerPoll(b, "the turn failed");
+				this.#turnOver(b, "the turn failed");
+				return;
+			case "threads":
+				this.#takeThreads(b, e.threads, inst);
 				return;
 			case "tool.start":
 				if (e.agent !== null) return;
@@ -802,10 +834,11 @@ export class SessionModel implements BridgeRoutes {
 					const i = e.use !== null ? b.tools.findIndex((t) => t.use === e.use) : b.tools.findIndex((t) => t.fp !== null && t.fp === e.fp);
 					if (i >= 0) b.tools.splice(i, 1);
 				}
-				// Rule 1, for the main loop and subagents alike: the call a held request was for has ended.
+				// Rule 1: the call a held request was for has ended, in the same loop. A request with no agent, the main loop's,
+				// matches only an event with none, so one agent's finished call can't release another's identical request.
 				if (e.fp !== null) {
-					const match = this.held.forHost(b.host).find((h) => h.fp === e.fp);
-					if (match) this.held.release(match.id, `the session reported the call's end (rule 1, fp ${e.fp})`);
+					const match = this.held.forHost(b.host).find((h) => h.fp === e.fp && h.agent === e.agent);
+					if (match) this.held.release(match.id, `the session reported the call's end (rule 1, fp ${e.fp}${e.agent === null ? "" : `, agent ${quote(e.agent, 40)}`})`);
 				}
 				return;
 			}
@@ -852,6 +885,55 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
+	 * The main loop's turn ended, with a `turn.end` or a `failed`: its open poll is answered with none, and its polls
+	 * at once for AT_ONCE_MS while the registry says busy. Not while other loops are in a turn: they keep the registry
+	 * busy whatever the mod has open, so answering at once would only spin the mod, and the window closes instead,
+	 * until they leave their turn (#takeThreads; PROTOCOL.md, Commands: "While other loops are at work").
+	 */
+	#turnOver(b: BridgeSession, why: string): void {
+		if ((b.threads?.latest.running ?? 0) > 0) {
+			b.pollsAtOnceUntil = null;
+			return;
+		}
+		b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
+		this.#answerPoll(b, why);
+	}
+
+	/**
+	 * A `threads` snapshot, kept only from the session's current mod instance (PROTOCOL.md, Events: threads). Other
+	 * loops coming into a turn close the poll window and are timed for background's `since`; the last of them leaving it
+	 * is timed as the work's end, for the done that follows (workEndedAt), and while the main loop isn't in a turn it
+	 * answers the open poll and opens the window, as a turn's end does, so the registry can go idle (PROTOCOL.md,
+	 * Commands). Each is logged at debug, and running leaving 0 or coming back at info.
+	 */
+	#takeThreads(b: BridgeSession, t: Threads, inst: string | null): void {
+		if (inst === null || inst !== b.inst) {
+			this.#log.debug(`THREADS ${b.host} from mod instance ${quote(inst, 40)}, not the current one: dropped`);
+			return;
+		}
+		const before = b.threads?.latest.running ?? 0;
+		const now = this.#wallNow();
+		b.threads = {
+			inst,
+			latest: t,
+			runningSince: t.running > 0 && before === 0 ? now : (b.threads?.runningSince ?? null),
+			runningEndedAt: t.running === 0 && before > 0 ? now : (b.threads?.runningEndedAt ?? null),
+		};
+		this.#log.debug(`THREADS ${b.host}: running ${t.running}, runs ${t.runs.length === 0 ? "none" : t.runs.map(runLabel).join(", ")}`);
+		if (t.running > 0) {
+			b.pollsAtOnceUntil = null;
+			const run = activeRun(t);
+			if (before === 0) this.#log.info(`THREADS ${b.host}: ${t.running} in a turn${run === null ? "" : ` (${runLabel(run)})`}`);
+		} else if (before > 0) {
+			this.#log.info(`THREADS ${b.host}: none in a turn`);
+			if (b.turn === null || b.turn.ended) {
+				b.pollsAtOnceUntil = this.#clock.now() + AT_ONCE_MS;
+				this.#answerPoll(b, "the session's other loops left their turns");
+			}
+		}
+	}
+
+	/**
 	 * Whether the session's poll is answered at once, with its queued commands or none: the main loop's turn ended
 	 * less than AT_ONCE_MS ago, no main-loop `turn.start` has come since, and the registry still says `busy`. A poll
 	 * held then would keep the session `busy` until it ran out, since Claude Code waits for a moment after the turn
@@ -859,7 +941,7 @@ export class SessionModel implements BridgeRoutes {
 	 * gives it that moment (PROTOCOL.md, Commands). The deck reads the registry a moment after it changes (about 50 ms
 	 * after its watch's event, B4), so after a turn shorter than that, or while its reading still says `waiting` after
 	 * a Deny, a poll can come before the reading says `busy`: it's held, and answered with none once the reading does
-	 * (`setRegistry`).
+	 * (`setRegistry`). While other loops are in a turn the window is closed, so neither applies (#turnOver, #takeThreads).
 	 */
 	#answersAtOnce(b: BridgeSession): boolean {
 		return b.pollsAtOnceUntil !== null && this.#clock.now() < b.pollsAtOnceUntil && this.#registry.get(b.host)?.status === "busy";
@@ -981,6 +1063,11 @@ export class SessionModel implements BridgeRoutes {
 			b.tools = [];
 			this.commands.restarted(b.host, inst, "the mod restarted");
 		}
+		// Another instance's picture of the other loops: a mod starts with an empty one (PROTOCOL.md, Events: threads).
+		if (b.threads !== null && b.threads.inst !== inst) {
+			if (b.threads.latest.running > 0) this.#log.info(`THREADS ${b.host}: none in a turn`);
+			b.threads = null;
+		}
 		b.inst = inst;
 		// The newest place, for one that said hello before too: the list forgets its oldest first.
 		b.hellos.delete(inst);
@@ -1085,24 +1172,15 @@ export class SessionModel implements BridgeRoutes {
 
 	/**
 	 * A PermissionRequest from a confirmed session. Its mode and effort are the session's, the engine's own at that
-	 * moment, which no hello replaces (`take`). It's held (PROTOCOL.md, Permission requests). `inputScrubbed`: as for
-	 * `permission`.
+	 * moment, which no hello replaces (`take`). It's held (PROTOCOL.md, Permission requests), and nothing of its
+	 * `tool_input` is kept beyond its summary and fingerprint (Held requests).
 	 */
-	#takePermission(p: PermissionRequest, host: string, at: number, reply: PollReply, inputScrubbed: boolean): void {
+	#takePermission(p: PermissionRequest, host: string, at: number, reply: PollReply): void {
 		const b = this.#bridgeFor(host);
 		take(b, "mode", p.mode, "permission");
 		take(b, "effort", p.effort, "permission");
-		// An ask keeps its tool_input, while it's at most 64 KiB of JSON, so its session's dial can show the form or the
-		// plan and echo it back; over that, a form the deck can't read, or an input the token scrub changed, which can't
-		// go back as it came, it's display-only (PROTOCOL.md, Held requests). A tool's request keeps nothing: Allow and
-		// Deny echo no input, so the scrub changes nothing for it.
 		const kind = ASK_TOOLS.has(p.tool) ? "ask" : "tool";
-		const ask = kind === "ask" ? heldAsk(p.tool, p.input, { scrubbed: inputScrubbed }) : null;
-		if (ask?.t === "inApp") {
-			const why = ask.why === "scrubbed" ? "scrubbed: the bridge took a run of its token out of the tool_input, so an answer couldn't echo it as it came" : ask.why;
-			this.#log.info(`ASK ${quote(p.tool, 40)} from ${host} is display-only (${why}): its dial reads "Answer in app"`);
-		}
-		const held = this.held.hold({ at, host, tool: p.tool, kind, summary: summary(p.tool, p.input), fp: fingerprintOrNull(p.tool, p.input), ask }, reply);
+		const held = this.held.hold({ at, host, tool: p.tool, kind, summary: summary(p.tool, p.input), fp: fingerprintOrNull(p.tool, p.input), agent: p.agent }, reply);
 		reply.onClose(() => this.held.close(held.id));
 	}
 
@@ -1123,6 +1201,7 @@ export class SessionModel implements BridgeRoutes {
 				from: { mode: null, effort: null },
 				turn: null,
 				pollsAtOnceUntil: null,
+				threads: null,
 				tools: [],
 				context: null,
 				tokens: null,
@@ -1184,6 +1263,7 @@ export class SessionModel implements BridgeRoutes {
 			firstReadingAt,
 			turn: b?.turn ?? null,
 			recordCategory: rec?.turnCategory ?? null,
+			running: b?.threads?.latest.running ?? 0,
 		});
 		const oldest = held[0] ?? null;
 		return {
@@ -1193,6 +1273,7 @@ export class SessionModel implements BridgeRoutes {
 			title: this.#title(s),
 			status: state.status,
 			doing: b?.tools.at(-1)?.summary ?? null,
+			threads: b?.threads?.latest ?? null,
 			context: b?.context ?? null,
 			model: b?.settings.model ?? rec?.model ?? null,
 			effort: b?.settings.effort ?? rec?.effort ?? null,
@@ -1203,7 +1284,7 @@ export class SessionModel implements BridgeRoutes {
 			listed: true,
 			running: true,
 			need: needOf(state, oldest),
-			since: since(state, s.statusUpdatedAt ?? firstReadingAt, b?.turn ?? null, oldest),
+			since: since(state, s.statusUpdatedAt ?? firstReadingAt, b?.turn ?? null, oldest, b?.threads ?? null),
 			seen: this.#seen(state, host, b, rec),
 			tokens: b?.tokens ?? null,
 			window: b?.window ?? null,
@@ -1218,8 +1299,9 @@ export class SessionModel implements BridgeRoutes {
 
 	/**
 	 * Whether the user has looked at the session since its last turn ended (session-keys.md, `seen`), for a done,
-	 * failed or interrupted session, and for an idle one; null for any other status. A turn's end is seen once, at or
-	 * after it, by any of:
+	 * failed or interrupted session, and for an idle one; null for any other status. When the session's other loops
+	 * worked on past the turn, their work's end stands for the turn's (workEndedAt): a look while they worked doesn't see
+	 * it. A turn's end is seen once, at or after it, by any of:
 	 * - an `attach` the deck got, or the record's `lastFocusedAt`: the session came on screen;
 	 * - the front-app check finding the session on screen (its last `attach` after its last `detach`) with Claude in
 	 *   front (#claudeInFront);
@@ -1229,7 +1311,7 @@ export class SessionModel implements BridgeRoutes {
 	 */
 	#seen(state: SessionState, host: string | null, b: BridgeSession | undefined, rec: AppRecord | undefined): boolean | null {
 		let unseenSince: number | null;
-		if (state.status === "done" || state.status === "failed" || state.status === "interrupted") unseenSince = b?.turn ? endedAt(b.turn) : null;
+		if (state.status === "done" || state.status === "failed" || state.status === "interrupted") unseenSince = b?.turn ? workEndedAt(b.turn, b.threads) : null;
 		else if (state.status === "idle") {
 			const activity = rec?.lastActivityAt ?? null;
 			unseenSince = activity !== null && activity > (rec?.lastFocusedAt ?? -Infinity) ? activity : null;
@@ -1262,10 +1344,10 @@ export class SessionModel implements BridgeRoutes {
 
 	/**
 	 * Whether the front-app check is needed: some session whose last turn ended unseen is on screen in the app, and
-	 * something on the deck shows `seen`.
+	 * something on a connected Stream Deck shows `seen`.
 	 */
 	#wantsFront(views: readonly SessionView[]): boolean {
-		return this.#seenShown.size > 0 && views.some((v) => v.seen === false && this.#onScreenNow(v.host));
+		return this.#deckConnected && this.#seenShown.size > 0 && views.some((v) => v.seen === false && this.#onScreenNow(v.host));
 	}
 
 	/**
@@ -1346,6 +1428,7 @@ function notRunning(key: string, title: string): SessionView {
 		title,
 		status: "idle",
 		doing: null,
+		threads: null,
 		context: null,
 		model: null,
 		effort: null,
@@ -1375,17 +1458,35 @@ function endedAt(turn: Turn): number | null {
 	return times.length === 0 ? null : Math.max(...times);
 }
 
+/** The later of the times given, ignoring nulls; null with none. */
+function latest(...times: (number | null)[]): number | null {
+	const known = times.filter((t): t is number => t !== null);
+	return known.length === 0 ? null : Math.max(...known);
+}
+
+/**
+ * When the session's work ended, for the done, failed or stopped that follows, by the deck's wall clock: the main loop's
+ * last turn end, or the other loops' later end, when their `running` came back to 0 after it. So a workflow that ends
+ * ten minutes after the turn reads Done 0s then, unseen, not Done 10m and seen by a look while it ran.
+ */
+function workEndedAt(turn: Turn, threads: { runningEndedAt: number | null } | null): number | null {
+	return latest(endedAt(turn), threads?.runningEndedAt ?? null);
+}
+
 /**
  * When the status began, by the rule it came from (SessionView's `since`): the oldest held request's arrival; the
  * registry's `registryAt` (its `statusUpdatedAt`, else the deck's first reading of that status); the `turn.start`
- * the deck got; or the turn's end. For the app's needs-input sign, the turn's end when the deck saw one, else the
- * registry's idle.
+ * the deck got; or the work's end (workEndedAt). For the app's needs-input sign, the turn's end when the deck saw one,
+ * else the registry's idle. For background, the later of the main loop's last turn end and `runningSince`, when other
+ * loops' `running` last went above 0 (PROTOCOL.md, status rule 3).
  */
-function since(state: SessionState, registryAt: number | null, turn: Turn | null, oldest: Held | null): number | null {
+function since(state: SessionState, registryAt: number | null, turn: Turn | null, oldest: Held | null, threads: { runningSince: number | null; runningEndedAt: number | null } | null): number | null {
 	switch (state.from) {
 		case "held-tool":
 		case "held-ask":
 			return oldest?.at ?? null;
+		case "background":
+			return latest(turn ? endedAt(turn) : null, threads?.runningSince ?? null);
 		case "waiting":
 		case "busy":
 		case "idle":
@@ -1395,7 +1496,7 @@ function since(state: SessionState, registryAt: number | null, turn: Turn | null
 		case "failed":
 		case "interrupted":
 		case "done":
-			return turn ? endedAt(turn) : null;
+			return turn ? workEndedAt(turn, threads) : null;
 		case "record":
 			return (turn?.ended ? endedAt(turn) : null) ?? registryAt;
 	}

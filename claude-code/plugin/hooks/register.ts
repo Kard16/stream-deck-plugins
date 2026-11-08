@@ -1,6 +1,6 @@
 // streamdeck-bridge: the mod, one instance per session (PROTOCOL.md, "Parties"). It says hello to the Stream Deck
-// bridge, reports the session's events, and fetches and runs the deck's commands. The PermissionRequest hook in
-// hooks.json is the plugin's other half.
+// bridge, reports the session's events, its other loops among them (threads.ts), and fetches and runs the deck's
+// commands. The PermissionRequest hook in hooks.json is the plugin's other half.
 //
 // Every Claude Code process that reads ~/.claude/settings.json loads this mod, but it talks to the bridge only in a
 // desktop session of its own (desktop.ts). Anywhere else it sends nothing, logs once why, and its hooks pass through.
@@ -18,10 +18,11 @@ import type { EngineInterface, Register } from 'claude-code'
 import { createBridge, type Bridge, type BridgeHost } from './bridge'
 import { runCommand, type CommandHost } from './commands'
 import * as ev from './events'
+import { createThreads, type Threads } from './threads'
 
 type Dollar = EngineInterface
 
-let bridge: Bridge | undefined
+let made: { bridge: Bridge; threads: Threads } | undefined
 
 /** Every call this plugin makes on the engine. `$.env.get` takes string literals only: one closure per variable. */
 function adapter($: Dollar): BridgeHost & CommandHost {
@@ -46,16 +47,24 @@ function adapter($: Dollar): BridgeHost & CommandHost {
   }
 }
 
-/** The bridge, made and started by the first hook to run. */
-function link($: Dollar): Bridge {
-  if (bridge === undefined) {
+/**
+ * The bridge, made and started by the first hook to run, and the picture of the session's other loops, whose
+ * snapshots go out on the bridge's line while it's up, and again after each hello the deck answers.
+ */
+function make($: Dollar): { bridge: Bridge; threads: Threads } {
+  if (made === undefined) {
     const host = adapter($)
-    const made: Bridge = createBridge(host, cmd => void runCommand(cmd, host, made))
-    bridge = made
-    made.start()
+    const bridge: Bridge = createBridge(host, cmd => void runCommand(cmd, host, bridge))
+    const threads = createThreads({ after: host.after, emit: bridge.emit, up: bridge.up })
+    bridge.onHello(threads.hello)
+    made = { bridge, threads }
+    bridge.start()
   }
-  return bridge
+  return made
 }
+
+const link = ($: Dollar): Bridge => make($).bridge
+const track = ($: Dollar): Threads => make($).threads
 
 /** Runs a hook's reporting. What fails there is dropped: the session goes on as if this plugin weren't loaded. */
 function attempt<T>(f: () => T): T | undefined {
@@ -88,7 +97,7 @@ export const register: Register = on => {
     return ended
   })
 
-  // Which session is on screen in the app (S3): the deck's target until one is picked on the dial.
+  // Which session is on screen in the app (S3): the deck's target until one is jumped to from the deck.
   on('session.attach', ($, e, next) => {
     attempt(() => link($).emit(ev.attach(e)))
     return next(e)
@@ -107,34 +116,68 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Another loop starts: its id is what next(e) resolves to (PROTOCOL.md, "Events", threads).
+  on('agent.spawn', ($, e, next) => {
+    const spawned = next(e)
+    spawned.then(
+      r => attempt(() => track($).spawned(e as unknown as Record<string, unknown>, r.agentId)),
+      () => {},
+    )
+    return spawned
+  }).catch(($, e, next) => next(e))
+
+  // Another loop's turns go into threads, not on the line (PROTOCOL.md, "Events").
   on('turn.start', ($, e, next) => {
     attempt(() => {
+      const agent = ev.agentOf(e.agentId)
+      if (agent !== undefined) {
+        track($).turnStarted(agent)
+        return
+      }
       const b = link($)
       b.emit(ev.turnStart(e))
-      if (ev.mainLoop(e.agentId)) b.sidMayHaveChanged()
+      b.sidMayHaveChanged()
     })
     return next(e)
   })
 
   on('turn.complete', ($, e, next) => {
     attempt(() => {
+      const agent = ev.agentOf(e.agentId)
+      if (agent !== undefined) {
+        track($).turnEnded(agent, e.reason)
+        return
+      }
+      // What threads holds back goes first, so the deck knows at the turn's end whether work goes on.
+      track($).flush()
       const b = link($)
       b.emit(ev.turnEnd(e))
       // The model: `$.session.model()` after each of the main loop's turns (PROTOCOL.md, "Events").
-      if (ev.mainLoop(e.agentId)) b.checkModel()
+      b.checkModel()
     })
     return next(e)
   })
 
   // tool.start before next, tool.end once next settles: the call may wait on a permission dialog in between,
-  // and the held request's fingerprint is the call's.
+  // and the held request's fingerprint is the call's. Another loop's call sends only its tool.end, for release
+  // rule 1, and shows in threads as what that loop is doing.
   on('tool.call', ($, e, next) => {
-    const call = attempt(() => ev.toolCall(e as unknown as Record<string, unknown>))
-    if (call !== undefined) attempt(() => link($).emit(ev.toolStart(call)))
+    const input = e as unknown as Record<string, unknown>
+    const call = attempt(() => ev.toolCall(input))
+    if (call !== undefined) {
+      attempt(() => {
+        if (call.agent === undefined) link($).emit(ev.toolStart(call))
+        else track($).called(call)
+      })
+    }
     const ran = next(e)
     if (call !== undefined) {
       ran.then(
-        r => attempt(() => link($).emit(ev.toolEnd(call, r))),
+        r => {
+          attempt(() => link($).emit(ev.toolEnd(call, r)))
+          // The main loop's Workflow call: its result names the run (PROTOCOL.md, "Events", threads).
+          if (call.agent === undefined && call.tool === 'Workflow') attempt(() => track($).workflow(r.result, input.name))
+        },
         () => attempt(() => link($).emit(ev.toolEnd(call, undefined))),
       )
     }
@@ -163,9 +206,11 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // A turn that died on an API error: the deck shows the session as failed.
+  // A turn that died on an API error: the deck shows the session as failed. The main loop's flushes threads first, as
+  // its turn.end does.
   on('classic.StopFailure', ($, e, next) => {
     attempt(() => {
+      if (ev.mainLoop(e.agent_id)) track($).flush()
       const b = link($)
       b.emit(ev.failed(e))
       b.observe(ev.settingsOf(e))

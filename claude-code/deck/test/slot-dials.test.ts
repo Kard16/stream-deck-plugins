@@ -4,11 +4,9 @@ import { describe, test } from "node:test";
 import type { PollReply } from "../src/bridge/commands.js";
 import { DecisionKeys, SETTLE_MS } from "../src/keys/decision.js";
 import { SessionModel } from "../src/model/sessions.js";
-import { KEEP_INPUT_BYTES } from "../src/protocol/ask.js";
-import { ALLOW_DECISION, answerDecision, approvePlanDecision, DENY_DECISION } from "../src/protocol/wire.js";
+import { ALLOW_DECISION, DENY_DECISION } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
-import { COALESCE_MS } from "../src/sessions/dials.js";
-import { GONE_MS, PAGES, PICK_SETTLE_MS, PLAN_CHOICES, type SlotDialsOptions, SlotDials, type SlotScreen } from "../src/slots/dials.js";
+import { COALESCE_MS, GONE_MS, PICK_SETTLE_MS, type SlotDialsOptions, SlotDials, type SlotScreen } from "../src/slots/dials.js";
 import { dialSlotId } from "../src/slots/ids.js";
 import { Slots } from "../src/slots/slots.js";
 import { MemorySlotStore } from "../src/slots/store.js";
@@ -37,8 +35,6 @@ function reg(pid: number, host: string, fields: Partial<RegistrySession> = {}): 
 }
 
 const COLOR = { question: "Red or blue?", header: "Color", options: [{ label: "Red", description: "Warm" }, { label: "Blue", description: "Cool" }], multiSelect: false };
-const FRUIT = { question: "Which fruits?", header: "Fruit", options: [{ label: "Apple", description: "Red or green" }, { label: "Pear, ripe", description: "Soft" }, { label: "Plum", description: "Purple" }], multiSelect: true };
-const SIZE = { question: "Which size?", header: "Size", options: [{ label: "Small", description: "A little one" }, { label: "Large", description: "A big one" }], multiSelect: false };
 
 /**
  * A on the first dial's slot and B on the second's, both shown, with the 1 s rule and the gone guard as given. The
@@ -61,7 +57,7 @@ function setup(opts: Partial<SlotDialsOptions> = {}, registry: RegistrySession[]
 		render: (screen, now) => {
 			renders.push({ screen, now });
 			const what = "request" in screen ? `#${screen.request}` : screen.kind === "pages" ? `page ${screen.page}` : "";
-			return { layout: `layouts/slot-${screen.kind}.json`, feedback: { what: { value: what }, pick: { value: "pick" in screen ? screen.pick : "cursor" in screen ? screen.cursor : null } } };
+			return { layout: `layouts/slot-${screen.kind}.json`, feedback: { what: { value: what }, pick: { value: "pick" in screen ? screen.pick : null } } };
 		},
 		clock,
 		wallNow: () => wall,
@@ -97,15 +93,17 @@ function setup(opts: Partial<SlotDialsOptions> = {}, registry: RegistrySession[]
 		assert.ok(s);
 		return s;
 	};
-	/** Long enough after a turn for its repaint, and for the choice to be in sight PICK_SETTLE_MS after it. */
+	/** Long enough after a turn for its repaint, and for the chip to be in sight PICK_SETTLE_MS after it. */
 	const seePick = (): void => clock.advance(COALESCE_MS + PICK_SETTLE_MS);
-	/** What the strip last painted in the test render's `pick` key: the chip or the cursor. */
+	/** What the strip last painted in the test render's `pick` key: the chip. */
 	const paintedPick = (id = "d0"): unknown => (dials.painted(id)?.pick as { value?: unknown } | undefined)?.value;
 	return { clock, model, slots, dials, log, renders, events, alerts, jumps, permission, press, turn, screen, seePick, paintedPick, surface, at: (t: number) => (wall = t) };
 }
 
+/** The pages while no other loop is in a turn: Now, Context, Setup. */
+const PAGES = 3;
+
 const pickOf = (s: SlotScreen): number | null => ("pick" in s ? s.pick : null);
-const cursorOf = (s: SlotScreen): number | null => (s.kind === "question" ? s.cursor : null);
 
 describe("a Session Slot dial with nothing to answer: the pages", () => {
 	test("turning moves a page, wrapping both ways; a long touch goes back to the first; a press or tap jumps and makes it the target", () => {
@@ -153,6 +151,45 @@ describe("a Session Slot dial with nothing to answer: the pages", () => {
 		dials.rotate("d0", 1, true);
 		dials.up("d0");
 		assert.deepEqual(jumps, []);
+	});
+});
+
+describe("the Agents pages on a Session Slot dial (agents-and-wake.md, B2)", () => {
+	test("while other loops are in a turn their pages come after Now and turning goes through them; the page stays put while they come and go, and when the one shown goes, the strip goes to Now", () => {
+		const { model, turn, screen } = setup();
+		model.hello({ v: 1, sid: "sid-1", host: A, inst: "ia" });
+		let seq = 0;
+		/** `running` workflow agents in a turn, all listed: two a page. */
+		const running = (n: number): void => {
+			const agents = Array.from({ length: n }, (_, i) => ({ kind: "workflow", desc: `agent ${i + 1}`, doing: "" }));
+			assert.equal(model.events({ host: A, inst: "ia", seq: ++seq, events: [{ t: "threads", at: 1, running: n, agents, runs: [] }] }).status, 204);
+		};
+		const pages = (): number[] => {
+			const s = screen();
+			return s.kind === "pages" ? [s.page, s.pages] : [];
+		};
+		turn();
+		assert.deepEqual(pages(), [1, PAGES], "Context");
+		running(3);
+		assert.deepEqual(pages(), [3, 5], "still Context, now after two Agents pages");
+		turn(2);
+		assert.deepEqual(pages(), [0, 5], "Setup, then round to Now");
+		turn();
+		assert.deepEqual(pages(), [1, 5], "the first Agents page");
+		turn();
+		assert.deepEqual(pages(), [2, 5], "the second");
+		turn(-3);
+		assert.deepEqual(pages(), [4, 5], "back through Now to Setup");
+		turn(3);
+		// One finishes: the second Agents page goes while it shows.
+		running(2);
+		assert.deepEqual(pages(), [0, 4], "Now");
+		running(5);
+		assert.deepEqual(pages(), [0, 6], "it stays on Now as more come");
+		turn();
+		assert.deepEqual(pages(), [1, 6]);
+		running(0);
+		assert.deepEqual(pages(), [0, PAGES], "all done while one showed: Now");
 	});
 });
 
@@ -281,12 +318,12 @@ describe("an approval on its session's dial", () => {
 
 	test("a request answered elsewhere makes the press alert only while nothing newer is on the strip: once the strip paints the session's next request, a press acts on it, under the 1 s rule and PICK_SETTLE_MS (dial-next)", () => {
 		// Every length real, GONE_MS included. A send waits 1 s from p2's first paint, which comes after p1 left, so no send
-		// can fall within GONE_MS of that; a pick that moves on waits only for PICK_SETTLE_MS, so it can, and it shows the
-		// guard gone once the strip paints p2. (Where the 1 s rule is off, as in the fixture runner, whose clock never
-		// moves, a send can too: dial-next.jsonl.)
-		assert.ok(PAINT_INTERVAL_MS + PICK_SETTLE_MS < GONE_MS);
+		// can fall within GONE_MS of that; a press with nothing picked jumps at once, so it can, and it shows the guard gone
+		// once the strip paints p2. (Where the 1 s rule is off, as in the fixture runner, whose clock never moves, a send
+		// can too: dial-next.jsonl.)
+		assert.ok(PAINT_INTERVAL_MS < GONE_MS);
 		const { clock, model, dials, permission, press, turn, screen, alerts, jumps } = setup({ paintIntervalMs: PAINT_INTERVAL_MS });
-		// p1, a question, is held and painted on A's strip.
+		// p1, a question, is held and painted on A's strip: Answer in app.
 		const p1 = permission(A, "AskUserQuestion", { questions: [COLOR] });
 		const p1Id = model.held.oldestFor(A)?.id ?? -1;
 		clock.advance(PAINT_INTERVAL_MS);
@@ -298,36 +335,32 @@ describe("an approval on its session's dial", () => {
 		assert.deepEqual([p1.sent, screen().kind], [[{}], "pages"]);
 		press();
 		assert.deepEqual([alerts, jumps], [["d0"], []], "nothing newer on the strip: the pages' press alerts rather than jumping");
-		// p2, a form of two questions for the same session, is held; its paint waits out the paint interval from the pages'.
+		// p2, a Bash for the same session, is held; its paint waits out the paint interval from the pages'.
 		clock.advance(50);
-		const input = { questions: [COLOR, SIZE] };
-		const p2 = permission(A, "AskUserQuestion", input);
+		const p2 = permission(A, "Bash", { command: "npm test" });
 		const p2Id = model.held.oldestFor(A)?.id ?? -1;
 		assert.ok(p2Id > p1Id);
-		assert.equal(screen().kind, "question");
+		assert.equal(screen().kind, "approval");
 		press();
-		assert.deepEqual([alerts, jumps, p2.sent], [["d0", "d0"], [], []], "before p2 is painted: an alert, where a press before any turn would jump");
-		turn();
+		assert.deepEqual([alerts, jumps, p2.sent], [["d0", "d0"], [], []], "before p2 is painted: an alert, where a press with nothing picked would jump");
 		clock.advance(leftAt + PAINT_INTERVAL_MS - 1 - clock.now());
 		assert.equal(dials.lastShown("d0"), p1Id, "p2 not painted yet");
 		clock.advance(1);
 		const firstPaint = clock.now();
-		assert.equal(dials.lastShown("d0"), p2Id, "p2 painted, the cursor on Red");
-		// Red in sight PICK_SETTLE_MS, within GONE_MS of p1 leaving: the press picks it and moves on.
-		clock.advance(PICK_SETTLE_MS);
+		assert.equal(dials.lastShown("d0"), p2Id, "p2 painted");
+		// Within GONE_MS of p1 leaving, a press with nothing picked jumps: the guard has done its part.
 		assert.ok(clock.now() - leftAt < GONE_MS, `${clock.now() - leftAt} ms after p1 left`);
 		press();
-		const second = screen();
-		assert.deepEqual([second.kind === "question" ? [second.index, second.question] : second.kind, alerts.length], [[1, "Which size?"], 2], "on to question 2, no alert");
-		// Sending waits out the 1 s from p2's first paint: Small has been in sight long enough, p2 only 999 ms.
+		assert.deepEqual([alerts.length, jumps, p2.sent], [2, [A], []], "a jump, no alert");
+		// Sending waits out the 1 s from p2's first paint: Allow has been in sight long enough, p2 only 999 ms.
 		turn();
 		clock.advance(firstPaint + SETTLE_MS - 1 - clock.now());
 		press();
 		assert.deepEqual([alerts.length, p2.sent], [3, []], "999 ms after p2's first paint: an alert, nothing sent");
 		clock.advance(SETTLE_MS);
 		press();
-		assert.deepEqual(p2.sent, [JSON.parse(JSON.stringify(answerDecision(input, { "Red or blue?": "Red", "Which size?": "Small" })))]);
-		assert.deepEqual([alerts.length, jumps], [3, []]);
+		assert.deepEqual(p2.sent, [ALLOW_DECISION]);
+		assert.deepEqual([alerts.length, jumps], [3, [A]]);
 	});
 
 	test("the dial's own answer isn't a request gone unanswered, and a request the strip never painted sets nothing", () => {
@@ -359,201 +392,36 @@ describe("an approval on its session's dial", () => {
 	});
 });
 
-describe("a question on its session's dial", () => {
-	test("single-select: the cursor runs over the options, then Other…; a press picks, and after the last question it sends the Answer", () => {
-		const { clock, permission, turn, press, screen, jumps } = setup();
-		const input = { questions: [COLOR] };
-		const reply = permission(A, "AskUserQuestion", input);
-		const s = screen();
-		assert.equal(s.kind, "question");
-		assert.deepEqual(
-			s.kind === "question" ? { index: s.index, count: s.count, header: s.header, question: s.question, multi: s.multi, cursor: s.cursor, items: s.items } : null,
-			{
-				index: 0,
-				count: 1,
-				header: "Color",
-				question: "Red or blue?",
-				multi: false,
-				cursor: null,
-				items: [
-					{ t: "option", label: "Red", description: "Warm", ticked: false },
-					{ t: "option", label: "Blue", description: "Cool", ticked: false },
-					{ t: "other" },
-				],
-			},
-		);
-		press();
-		assert.deepEqual([jumps, reply.sent], [[A], []], "a press before any turn jumps");
-		assert.equal(cursorOf(turn(-1)), 2, "counter-clockwise first: the last place, Other…");
-		assert.equal(cursorOf(turn()), 0, "wraps");
-		assert.equal(cursorOf(turn()), 1);
-		clock.advance(SETTLE_MS);
-		press();
-		assert.deepEqual(reply.sent, [JSON.parse(JSON.stringify(answerDecision(input, { "Red or blue?": "Blue" })))]);
-		assert.equal(screen().kind, "pages");
-	});
-
-	test("Other… jumps, typing goes in the app, and nothing is sent", () => {
-		const { clock, permission, turn, press, jumps, seePick } = setup();
+describe("a question or a plan on its session's dial: Answer in app (Phase 9)", () => {
+	test("a question reads Answer in app with its summary; turns and a long touch change nothing, and a press or tap jumps and answers nothing", () => {
+		const { clock, model, dials, permission, turn, press, screen, jumps, alerts } = setup();
 		const reply = permission(A, "AskUserQuestion", { questions: [COLOR] });
-		clock.advance(SETTLE_MS);
-		turn(3);
-		seePick();
+		const id = model.held.oldestFor(A)?.id;
+		const want = { kind: "inApp", slot: SLOT0, session: model.slotView(A), request: id, tool: "AskUserQuestion", summary: "Red or blue?" };
+		assert.deepEqual(screen(), want);
 		press();
-		assert.deepEqual([jumps, reply.sent], [[A], []]);
+		assert.deepEqual([jumps, reply.sent], [[A], []], "at once: a jump needs no wait");
+		// However the dial turns, and however long the strip has shown it, a press only jumps.
+		turn();
+		turn(-3);
+		dials.tap("d0", true);
+		clock.advance(2 * SETTLE_MS);
+		assert.deepEqual(screen(), want);
+		press();
+		dials.tap("d0", false);
+		assert.deepEqual([jumps, reply.sent, alerts], [[A, A, A], [], []]);
+		assert.equal(model.held.oldestFor(A)?.id, id, "still held, until the app's answer releases it");
 	});
 
-	test("multi-select: a press ticks or unticks; Next needs a tick; the last question's list ends with Send; a long touch goes back, or clears the first's picks", () => {
-		const { clock, dials, alerts, permission, turn, press, screen, seePick } = setup();
-		const input = { questions: [FRUIT, SIZE] };
-		const reply = permission(A, "AskUserQuestion", input);
-		clock.advance(SETTLE_MS);
-		const q = (): Extract<SlotScreen, { kind: "question" }> => {
-			const s = screen();
-			assert.equal(s.kind, "question");
-			return s as Extract<SlotScreen, { kind: "question" }>;
-		};
-		assert.deepEqual(q().items.at(-1), { t: "next", send: false, ready: false });
-		turn(-1);
-		seePick();
-		press();
-		assert.deepEqual([alerts, q().index], [["d0"], 0], "Next with no tick");
-		clock.advance(SETTLE_MS);
-		turn();
-		seePick();
-		press();
-		turn();
-		seePick();
-		press();
-		assert.deepEqual(q().picked, ["Apple", "Pear, ripe"]);
-		press();
-		assert.deepEqual(q().picked, ["Apple"], "unticked: the place the strip shows hasn't changed, so a second press needs no wait");
-		turn();
-		seePick();
-		press();
-		assert.deepEqual(q().picked, ["Apple", "Plum"]);
-		assert.deepEqual(q().items.at(-1), { t: "next", send: false, ready: true });
-		turn();
-		turn();
-		seePick();
-		press();
-		assert.deepEqual([q().index, q().question, q().cursor], [1, "Which size?", null], "Next");
-		press();
-		assert.deepEqual(alerts, ["d0", "d0"], "nothing under the cursor after turns: an alert, not a jump");
-		dials.tap("d0", true);
-		assert.deepEqual([q().index, q().picked], [0, ["Apple", "Plum"]], "back a question, the picks kept");
-		dials.tap("d0", true);
-		assert.deepEqual([q().index, q().picked, q().cursor], [0, [], null], "on the first, its picks cleared");
-		turn();
-		seePick();
-		press();
-		turn();
-		seePick();
-		press();
-		turn(3);
-		seePick();
-		press();
-		turn(2);
-		clock.advance(SETTLE_MS);
-		press();
-		assert.deepEqual(reply.sent, [JSON.parse(JSON.stringify(answerDecision(input, { "Which fruits?": 'Apple, "Pear, ripe"', "Which size?": "Large" })))]);
-	});
-
-	test("on a multi-select last question, Send needs a tick and sends", () => {
-		const { clock, alerts, permission, turn, press, screen, seePick } = setup();
-		const input = { questions: [FRUIT] };
-		const reply = permission(A, "AskUserQuestion", input);
-		clock.advance(SETTLE_MS);
-		const last = turn(-1);
-		assert.deepEqual(last.kind === "question" ? last.items[last.cursor ?? 0] : null, { t: "next", send: true, ready: false });
-		seePick();
-		press();
-		assert.deepEqual([alerts, reply.sent], [["d0"], []]);
-		clock.advance(SETTLE_MS);
-		turn(-2);
-		seePick();
-		press();
-		turn(2);
-		seePick();
-		press();
-		assert.deepEqual(reply.sent, [JSON.parse(JSON.stringify(answerDecision(input, { "Which fruits?": "Plum" })))]);
-		assert.equal(screen().kind, "pages");
-	});
-
-	test("a question the dial can't answer, or a form too big, shows Answer in app; a press jumps, and turns do nothing", () => {
-		const { clock, dials, permission, press, screen, jumps } = setup();
-		const reply = permission(A, "AskUserQuestion", { questions: [{ question: "Free text?", options: [] }] });
-		assert.deepEqual(
-			(({ kind, why }) => ({ kind, why }))(screen() as Extract<SlotScreen, { kind: "inApp" }>),
-			{ kind: "inApp", why: "unreadable" },
-		);
-		dials.rotate("d0", 3, false);
-		dials.tap("d0", true);
-		clock.advance(SETTLE_MS);
-		press();
-		assert.deepEqual([jumps, reply.sent], [[A], []]);
-		const big = permission(B, "ExitPlanMode", { plan: "x".repeat(KEEP_INPUT_BYTES) });
-		assert.equal((screen("d1") as Extract<SlotScreen, { kind: "inApp" }>).why, "too big");
+	test("a plan reads the same, Plan ready, whatever its tool_input, one over Phase 7's 64 KiB included; a press jumps and answers nothing", () => {
+		const { clock, permission, turn, press, screen, jumps } = setup();
+		const reply = permission(B, "ExitPlanMode", { plan: `# Tidy the deck\n${"x".repeat(64 * 1024)}`, planFilePath: "/p.md" });
+		const s = screen("d1");
+		assert.deepEqual(s.kind === "inApp" ? [s.kind, s.tool, s.summary] : [s.kind], ["inApp", "ExitPlanMode", "Plan ready"]);
+		turn(1, "d1");
+		clock.advance(2 * SETTLE_MS);
 		press("d1");
-		assert.deepEqual([jumps, big.sent], [[A, B], []]);
-	});
-
-	test("a question or a plan whose tool_input the token scrub changed shows Answer in app: turns do nothing, and a press jumps and sends nothing", () => {
-		const { clock, model, dials, press, screen, jumps } = setup();
-		const flagged = (host: string, tool: string, input: unknown): FakeReply => {
-			const reply = new FakeReply();
-			model.permission({ session_id: host === A ? "sid-1" : "sid-2", tool_name: tool, tool_input: input }, host, reply, true);
-			return reply;
-		};
-		const question = flagged(A, "AskUserQuestion", { questions: [COLOR] });
-		const plan = flagged(B, "ExitPlanMode", { plan: "# Tidy the deck\n", planFilePath: "/p.md" });
-		for (const id of ["d0", "d1"]) {
-			const s = screen(id);
-			assert.deepEqual(s.kind === "inApp" ? [s.kind, s.why] : [s.kind], ["inApp", "scrubbed"], id);
-		}
-		dials.rotate("d0", 2, false);
-		dials.rotate("d1", -1, false);
-		clock.advance(SETTLE_MS);
-		press();
-		press("d1");
-		assert.deepEqual([jumps, question.sent, plan.sent], [[A, B], [], []]);
-	});
-});
-
-describe("a plan on its session's dial", () => {
-	test("Plan ready, its first line, and the chips Approve · Auto, Approve · Accept edits, Approve · Manual and Reject, in that order", () => {
-		const { clock, jumps, permission, turn, press, screen, seePick } = setup();
-		const input = { plan: "# Tidy the deck\n\n1. Do it.\n", planFilePath: "/Users/me/.claude/plans/tidy-otter.md" };
-		const reply = permission(A, "ExitPlanMode", input);
-		const s = screen();
-		assert.deepEqual(s.kind === "plan" ? [s.firstLine, s.choices.map((c) => c.label), s.pick] : null, ["Tidy the deck", ["Approve · Auto", "Approve · Accept edits", "Approve · Manual", "Reject"], null]);
-		assert.deepEqual(
-			PLAN_CHOICES.map((c) => (c.t === "approve" ? c.mode : c.t)),
-			["auto", "acceptEdits", "default", "reject"],
-		);
-		press();
-		assert.deepEqual([jumps, reply.sent], [[A], []], "nothing picked: a jump, where the whole plan is");
-		clock.advance(SETTLE_MS);
-		turn(2);
-		seePick();
-		press();
-		assert.deepEqual(reply.sent, [JSON.parse(JSON.stringify(approvePlanDecision(input, "acceptEdits")))]);
-	});
-
-	test("each Approve sends its mode; Reject sends the keys' Deny; a plan without a file approves its {} as it came", () => {
-		for (const [ticks, want] of [
-			[1, approvePlanDecision({}, "auto")],
-			[3, approvePlanDecision({}, "default")],
-			[-1, DENY_DECISION],
-		] as const) {
-			const { clock, permission, turn, press, seePick } = setup();
-			const reply = permission(A, "ExitPlanMode", {});
-			clock.advance(SETTLE_MS);
-			turn(ticks);
-			seePick();
-			press();
-			assert.deepEqual(reply.sent, [JSON.parse(JSON.stringify(want))], String(ticks));
-		}
+		assert.deepEqual([jumps, reply.sent], [[B], []]);
 	});
 });
 
@@ -592,57 +460,37 @@ describe("a press acts only on the choice the strip shows (PICK_SETTLE_MS)", () 
 		}
 	});
 
-	test("the chips stop at either end, so a stray tick past Deny, Reject or Allow leaves the chip the strip shows, and a push sends it", () => {
-		for (const [tool, input, first, stray, want] of [
-			["Bash", { command: "ls" }, -1, 1, DENY_DECISION],
-			["ExitPlanMode", {}, -1, 1, DENY_DECISION],
-			["Bash", { command: "ls" }, 1, -1, ALLOW_DECISION],
-			["ExitPlanMode", {}, 1, -1, approvePlanDecision({}, "auto")],
+	test("the chips stop at either end, so a stray tick past Deny or Allow leaves the chip the strip shows, and a push sends it", () => {
+		for (const [first, stray, want] of [
+			[-1, 1, DENY_DECISION],
+			[1, -1, ALLOW_DECISION],
 		] as const) {
 			const { clock, alerts, permission, turn, press } = setup();
-			const reply = permission(A, tool, input);
+			const reply = permission(A, "Bash", { command: "ls" });
 			const before = pickOf(turn(first));
 			clock.advance(2 * SETTLE_MS);
-			assert.equal(pickOf(turn(stray)), before, `${tool}: the tick past the end changes nothing`);
+			assert.equal(pickOf(turn(stray)), before, `${first}: the tick past the end changes nothing`);
 			press();
-			assert.deepEqual([reply.sent, alerts], [[JSON.parse(JSON.stringify(want))], []], `${tool} ${first}`);
+			assert.deepEqual([reply.sent, alerts], [[want], []], String(first));
 		}
 	});
 
-	test("a plan with nothing picked: one stray tick and a push at once neither approves it nor jumps", () => {
+	test("an approval with nothing picked: one stray tick and a push at once neither allows it nor jumps", () => {
 		const { clock, alerts, jumps, permission, turn, press } = setup();
-		const reply = permission(A, "ExitPlanMode", { plan: "# Tidy the deck\n" });
+		const reply = permission(A, "Bash", { command: "rm -rf build" });
 		clock.advance(2 * SETTLE_MS);
-		assert.equal(pickOf(turn()), 0, "Approve · Auto, at once");
+		assert.equal(pickOf(turn()), 0, "Allow, at once");
 		press();
 		assert.deepEqual([reply.sent, jumps, alerts], [[], [], ["d0"]]);
-	});
-
-	test("a question: a tick just before a push neither picks nor sends, on a last question or on one the pick would move on from", () => {
-		const { clock, alerts, permission, turn, press, screen } = setup();
-		const one = permission(A, "AskUserQuestion", { questions: [COLOR] });
-		clock.advance(2 * SETTLE_MS);
-		assert.equal(cursorOf(turn()), 0, "Red, at once, from nothing under the cursor");
-		press();
-		assert.deepEqual([one.sent, alerts], [[], ["d0"]], "a single-select last question: nothing sent");
-		// B's form of two, on the second dial: the cursor on Red, shown; a tick to Blue and a push at once.
-		const two = permission(B, "AskUserQuestion", { questions: [COLOR, SIZE] });
-		turn(1, "d1");
-		clock.advance(2 * SETTLE_MS);
-		assert.equal(cursorOf(turn(1, "d1")), 1);
-		press("d1");
-		const s = screen("d1");
-		assert.deepEqual(s.kind === "question" ? [s.index, s.picked, s.cursor] : null, [0, [], 1], "still question 1, with nothing picked");
-		assert.deepEqual([two.sent, alerts], [[], ["d0", "d1"]]);
 	});
 });
 
 describe("nothing sends without a press", () => {
-	test("a pick, a tick or a cursor waits however long: no timeout, no default", () => {
+	test("a pick waits however long, and so does a question: no timeout, no default", () => {
 		const { clock, permission, turn, at, alerts, jumps } = setup();
 		const tool = permission(A, "Bash", { command: "ls" });
 		turn();
-		const question = permission(B, "AskUserQuestion", { questions: [FRUIT] });
+		const question = permission(B, "AskUserQuestion", { questions: [COLOR] });
 		turn(1, "d1");
 		turn(1, "d1");
 		for (let minute = 1; minute <= 30; minute++) {
@@ -667,7 +515,7 @@ describe("starting over, painting, and the strip's layouts", () => {
 		assert.deepEqual([screen().kind, pickOf(screen())], ["approval", null], "the next approval, with nothing picked");
 		turn();
 		key.press("k");
-		assert.deepEqual([screen().kind, cursorOf(screen())], ["question", null], "the next request, from its start");
+		assert.equal(screen().kind, "inApp", "the next request, the question");
 		key.remove("k");
 		turn();
 		model.setRecords(new Map([[B, { host: B, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: 99_999, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null }]]));
@@ -698,33 +546,6 @@ describe("starting over, painting, and the strip's layouts", () => {
 		press("d1");
 		assert.deepEqual([a.sent, b.sent, alerts], [[], [], []], "nothing sent");
 		assert.deepEqual(jumps, [B, A], "with nothing picked, each press jumps");
-	});
-
-	test("a new session on the slot starts a question over too: its question, cursor, picks and turn", () => {
-		const { clock, model, slots, permission, turn, press, screen, seePick, jumps, alerts } = setup();
-		const a = permission(A, "AskUserQuestion", { questions: [FRUIT, SIZE] });
-		const b = permission(B, "AskUserQuestion", { questions: [SIZE] });
-		clock.advance(SETTLE_MS);
-		// On A's form: Apple ticked, Next, then the cursor on Large in question 2.
-		turn();
-		seePick();
-		press();
-		turn(-1);
-		seePick();
-		press();
-		turn(2);
-		const before = screen("d0");
-		assert.deepEqual(before.kind === "question" ? [before.index, before.cursor] : null, [1, 1]);
-		// A long press with B on screen in the app: B onto the first slot, A onto the second.
-		model.setRecords(new Map([[B, { host: B, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: 99_999, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null }]]));
-		assert.equal(slots.takeOnScreen(SLOT0).ok, true);
-		const s0 = screen("d0");
-		assert.deepEqual(s0.kind === "question" ? [s0.request, s0.index, s0.cursor, s0.picked] : null, [model.held.oldestFor(B)?.id, 0, null, []], "B's form from its start");
-		const s1 = screen("d1");
-		assert.deepEqual(s1.kind === "question" ? [s1.request, s1.index, s1.cursor, s1.picked] : null, [model.held.oldestFor(A)?.id, 0, null, []], "and A's, on the other dial, from its start: the picks went too");
-		clock.advance(2 * SETTLE_MS);
-		press("d0");
-		assert.deepEqual([a.sent, b.sent, alerts, jumps], [[], [], [], [B]], "no turn on B's form yet: a press jumps");
 	});
 
 	test("ticks apply at once, one step each; their repaint waits COALESCE_MS and comes once", () => {

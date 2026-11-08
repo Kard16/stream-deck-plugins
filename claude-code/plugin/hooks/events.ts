@@ -28,8 +28,11 @@ const loop = (agentId: unknown): { agent?: string } => {
   return agent === undefined ? {} : { agent }
 }
 
+/** Another loop's agent id, or undefined for the main loop's. */
+export const agentOf = (agentId: unknown): string | undefined => text(agentId)
+
 /** Whether an engine's agent id is the main loop's: its events carry no `agent` (PROTOCOL.md, "Events"). */
-export const mainLoop = (agentId: unknown): boolean => text(agentId) === undefined
+export const mainLoop = (agentId: unknown): boolean => agentOf(agentId) === undefined
 
 /** A tool call as both of its events name it. */
 export type ToolCallSeen = { tool: string; use: string; agent?: string; fp: string; summary: string }

@@ -46,9 +46,11 @@ export function parseLine(line) {
 
 /**
  * How the deck answered a poll, by its POLL line's words (claude-code/deck/src/model/sessions.ts, `next` and
- * #answerPoll): held (`wait N s`), at once after a turn (`answered at once`), at once for an instance that isn't the
- * current one (`not the current one`), or a held one answered at a turn's end (`answered with none`). In this order:
- * a stray's line says "answered with none" too.
+ * #answerPoll): held (`wait N s`); at once in the 60 s after the main loop's turn ends, or after the session's other
+ * loops' running drops to 0 (`answered at once`); at once for an instance that isn't the current one (`not the current
+ * one`); or a held one answered with none (`answered with none`) at a turn's end or failure, when the registry turns
+ * busy after one, or when the other loops' running drops to 0 with the main loop out of its turn (Phase 9). In this
+ * order: a stray's line says "answered with none" too.
  */
 export const POLL_KINDS = Object.freeze([
   ['wait', /^wait \d+ s$/],

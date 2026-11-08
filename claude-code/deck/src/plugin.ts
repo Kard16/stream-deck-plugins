@@ -8,19 +8,16 @@ import streamDeck from "@elgato/streamdeck";
 import { ApproveKeyAction, DenyKeyAction } from "./actions/decision-keys.js";
 import { OthersKeyAction } from "./actions/others.js";
 import { PromptKeyAction } from "./actions/prompt-key.js";
-import { SessionKeyAction } from "./actions/session-key.js";
-import { SessionsDialAction } from "./actions/sessions-dial.js";
 import { SessionSlotAction } from "./actions/slot.js";
 import { BRIDGE_HOST, BRIDGE_PORT, RUN_DIR, TOKEN_FILE } from "./bridge/config.js";
 import { BridgeServer } from "./bridge/server.js";
 import { type LoadedToken, loadOrCreateToken } from "./bridge/token.js";
 import { PromptKeys } from "./keys/commands.js";
 import { DecisionKeys } from "./keys/decision.js";
-import { SessionKeys } from "./keys/session.js";
+import { Devices, wakeLine } from "./model/devices.js";
 import { lsappinfoCheck } from "./model/front.js";
 import { connectSources } from "./model/sources.js";
 import { VersionCheck, versionFiles } from "./model/versions.js";
-import { SessionsDials } from "./sessions/dials.js";
 import { heldToolOf, othersArt, slotKeyArt } from "./slots/art.js";
 import { SlotDials } from "./slots/dials.js";
 import { SlotKeys } from "./slots/keys.js";
@@ -86,7 +83,8 @@ const versions = new VersionCheck(versionFiles(pluginDir), { log: scope("Version
 // request or a hello that the latest reading doesn't confirm has the registry read once more at once. The wiring is
 // connectSources's, which the tests run too. For `seen`, it asks /usr/bin/lsappinfo whether Claude is the app in front,
 // only while a session whose turn ended unseen is on screen in the app and a Session Slot or Other Sessions key is on
-// the deck (SessionModel.showsSeen): every second at first, backing off to once a minute (front.ts's frontIntervalMs).
+// a connected deck (SessionModel.showsSeen and setDeckConnected): every second at first, backing off to once a minute
+// (front.ts's frontIntervalMs).
 const { registry, records, model } = connectSources({
 	registryDir: REGISTRY_DIR,
 	recordsDir: RECORDS_DIR,
@@ -94,41 +92,66 @@ const { registry, records, model } = connectSources({
 	model: { front: lsappinfoCheck({ log: scope("Front") }), versions },
 });
 
-// The bridge on 127.0.0.1:47600.
+// The bridge on 127.0.0.1:47600. It listens again should its server close or fail (agents-and-wake.md, C5).
 const bridge = loaded ? new BridgeServer({ port: BRIDGE_PORT, host: BRIDGE_HOST, token: loaded.token, routes: model, log: scope("Bridge") }) : null;
 bridge?.onState((state) => model.setBridgeState(state));
 
+// The Stream Deck devices (agents-and-wake.md, C1 to C4). While none is connected, the keys and strips send nothing,
+// and the front-app check and the slots' repaint tick stop; the model keeps up. Every key and strip is repainted in
+// full when a device connects, and 10 s and 20 s after a wake: the Stream Deck app turns the deck off at every display
+// sleep or lock, and may bring it back without telling the plugin. The SDK knows the devices once it has connected.
+const devices = new Devices({
+	log: scope("Devices"),
+	repaint: () => {
+		for (const keys of screens) keys.repaintInFull();
+	},
+	onLive: (connected) => {
+		model.setDeckConnected(connected);
+		slots.setDeckConnected(connected);
+	},
+});
+const live = (): boolean => devices.live;
+streamDeck.devices.onDeviceDidConnect((ev) => devices.connected(ev.device.id, ev.device.name));
+streamDeck.devices.onDeviceDidDisconnect((ev) => devices.disconnected(ev.device.id, ev.device.name));
+
 // The actions. Each logic class repaints its keys or strips when the model changes.
 const keysLog = scope("Keys");
-const dialsLog = scope("Dials");
-streamDeck.actions.registerAction(new SessionsDialAction(new SessionsDials(model, { log: dialsLog, open: openSession })));
-streamDeck.actions.registerAction(new ApproveKeyAction(new DecisionKeys(model, "allow", { log: keysLog, open: openSession })));
-streamDeck.actions.registerAction(new DenyKeyAction(new DecisionKeys(model, "deny", { log: keysLog, open: openSession })));
-streamDeck.actions.registerAction(new PromptKeyAction(new PromptKeys(model, { log: keysLog })));
-streamDeck.actions.registerAction(new SessionKeyAction(new SessionKeys(model, { log: keysLog, open: openSession })));
+const approveKeys = new DecisionKeys(model, "allow", { log: keysLog, open: openSession, live });
+const denyKeys = new DecisionKeys(model, "deny", { log: keysLog, open: openSession, live });
+const promptKeys = new PromptKeys(model, { log: keysLog, live });
+streamDeck.actions.registerAction(new ApproveKeyAction(approveKeys));
+streamDeck.actions.registerAction(new DenyKeyAction(denyKeys));
+streamDeck.actions.registerAction(new PromptKeyAction(promptKeys));
 
 // The Session Slots (session-keys.md): which session each slot holds, saved in run/slots.json, shared by a slot's
 // key and its dial; and the Other Sessions key for the running sessions on no slot.
 const slotsLog = scope("Slots");
 const slots = new Slots(model, { store: new SlotFile(path.join(pluginDir, RUN_DIR), { log: slotsLog }), log: slotsLog });
-const slotKeys = new SlotKeys(slots, model, { art: slotKeyArt({ heldTool: heldToolOf(model) }), log: keysLog, open: openSession });
-const slotDials = new SlotDials(slots, model, { render: slotStrip, log: dialsLog, open: openSession });
-const othersKeys = new OthersKeys(slots, model, { art: othersArt, log: keysLog, open: openSession });
+const slotKeys = new SlotKeys(slots, model, { art: slotKeyArt({ heldTool: heldToolOf(model) }), log: keysLog, open: openSession, live });
+const slotDials = new SlotDials(slots, model, { render: slotStrip, log: scope("Dials"), open: openSession, live });
+const othersKeys = new OthersKeys(slots, model, { art: othersArt, log: keysLog, open: openSession, live });
 const actionsLog = scope("Actions");
 streamDeck.actions.registerAction(new SessionSlotAction(new SlotActions(slotKeys, slotDials, { log: actionsLog })));
 streamDeck.actions.registerAction(new OthersKeyAction(new OthersActions(othersKeys, { log: actionsLog })));
 
+/** Every key and strip, which a device's connect repaints in full. */
+const screens = [approveKeys, denyKeys, promptKeys, slotKeys, slotDials, othersKeys];
+
 // A press anywhere on the deck, on any of this plugin's keys or dials: the user is there, so the front-app check for
-// `seen` asks every second again (hardening.md, B5).
-streamDeck.actions.onKeyDown(() => model.userPresent());
-streamDeck.actions.onDialDown(() => model.userPresent());
-streamDeck.actions.onTouchTap(() => model.userPresent());
+// `seen` asks every second again (hardening.md, B5). And the press's device is connected, whatever the deck last heard.
+const pressed = (device: { id: string; name: string }): void => {
+	devices.pressed(device.id, device.name);
+	model.userPresent();
+};
+streamDeck.actions.onKeyDown((ev) => pressed(ev.action.device));
+streamDeck.actions.onDialDown((ev) => pressed(ev.action.device));
+streamDeck.actions.onTouchTap((ev) => pressed(ev.action.device));
 
 // After sleep: re-read everything at once, listen again if the bridge had stopped, and repaint the slots' keys, dials
 // and Others, which times their next repaint afresh: the timers don't count the sleep. The user is likely back, so the
-// front-app check asks every second again.
+// front-app check asks every second again. The line says whether the Mac slept, or only its display (C4).
 streamDeck.system.onSystemDidWakeUp(() => {
-	log.info("woke up: rescanning");
+	log.info(wakeLine(devices.woke()));
 	void registry.scanNow();
 	void records.scanNow();
 	bridge?.start();
@@ -142,6 +165,7 @@ process.once("SIGTERM", () => {
 	log.info(`SIGTERM: stopping, with ${model.held.size} request(s) held`);
 	registry.stop();
 	records.stop();
+	devices.dispose();
 	slots.dispose();
 	model.dispose();
 	const exit = (): never => process.exit(0);
@@ -157,7 +181,10 @@ process.once("SIGTERM", () => {
 // the event loop's use, the memory, and the counts of scans, spawns, emits, polls, sends and ticks since the last.
 startIdleLog(scope("Idle"), { level: streamDeck.logger.level });
 
-streamDeck.connect().catch((err: unknown) => log.error(`couldn't connect to the Stream Deck app: ${describeError(err)}`));
+streamDeck.connect().then(
+	() => devices.start(streamDeck.devices),
+	(err: unknown) => log.error(`couldn't connect to the Stream Deck app: ${describeError(err)}`),
+);
 registry.start();
 records.start();
 bridge?.start();

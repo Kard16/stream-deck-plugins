@@ -93,6 +93,30 @@ async function run(argv, { now = T0, ps = PS, top = TOP() } = {}) {
   return { code, out, err, calls }
 }
 
+test("idle-report: the deck's POLL lines, as claude-code/deck/src/model/sessions.ts writes them now, each with its kind, every why of an answer with none included", () => {
+  // A POLL line the deck adds or changes fails here until idle-report's kinds are checked against it.
+  const source = fs.readFileSync(path.join(I.REPO, 'claude-code', 'deck', 'src', 'model', 'sessions.ts'), 'utf8')
+  const general = (template) => template.replace(/\$\{[^}]*\}/g, '…')
+  const templates = [...source.matchAll(/`POLL \$\{b\.host\} ([^`]*)`/g)].map((m) => m[1])
+  const kinds = {
+    'from mod instance …, not the current one: answered with none': 'stray',
+    'answered at once: the turn ended and the registry still says busy': 'atOnce',
+    'wait … s': 'wait',
+    'answered with none: …': 'none',
+  }
+  assert.deepEqual(templates.map(general).toSorted(), Object.keys(kinds).toSorted())
+  // The whys of an answer with none: a turn's end or failure, the registry turning busy after one, and the other loops
+  // leaving their turns (Phase 9).
+  const whys = [...source.matchAll(/#(?:answerPoll|turnOver)\(b, "([^"]+)"\)/g)].map((m) => m[1])
+  assert.deepEqual(whys.toSorted(), ['the session\'s other loops left their turns', 'the turn ended', 'the turn ended and the registry now says busy', 'the turn failed'])
+  for (const template of templates) {
+    for (const why of template.includes('${why}') ? whys : [null]) {
+      const message = `POLL ${A} ${template.replaceAll('${why}', why).replace(/\$\{[^}]*\}/g, '20')}`
+      assert.equal(I.classify({ scope: 'Sessions', message }).poll, kinds[general(template)], message)
+    }
+  }
+})
+
 test('idle-report: reads the lines the SDK writes, and tells IDLE, POLL by its answer, EVENT and the rest apart', () => {
   assert.deepEqual(I.parseLine('2026-11-06T00:30:00.000Z INFO  Claude: STARTUP {"pid":1}'), { t: T0, level: 'info', scope: 'Claude', message: 'STARTUP {"pid":1}' })
   assert.equal(I.parseLine('    at run (file:///x/plugin.js:1:1)'), null)
@@ -106,6 +130,10 @@ test('idle-report: reads the lines the SDK writes, and tells IDLE, POLL by its a
   assert.deepEqual(kind(`POLL ${A} answered at once: the turn ended and the registry still says busy`), { kind: 'poll', host: A, poll: 'atOnce' })
   assert.deepEqual(kind(`POLL ${A} from mod instance "i2", not the current one: answered with none`), { kind: 'poll', host: A, poll: 'stray' })
   assert.deepEqual(kind(`POLL ${A} answered with none: the turn failed`), { kind: 'poll', host: A, poll: 'none' })
+  // Since Phase 9 a held poll is answered with none when the session's other loops leave their turns too, and the at-once
+  // polls after that drop have the at-once line.
+  assert.deepEqual(kind(`POLL ${A} answered with none: the session's other loops left their turns`), { kind: 'poll', host: A, poll: 'none' })
+  assert.deepEqual(kind(`POLL ${A} answered with none: the turn ended and the registry now says busy`), { kind: 'poll', host: A, poll: 'none' })
   assert.deepEqual(kind(`POLL ${A} something new`), { kind: 'poll', host: A, poll: 'other' })
   assert.deepEqual(kind(`EVENT ${A} tool.start "Bash" fp 1234abcd`), { kind: 'event', host: A })
   // The rest by scope and leading capitals, else by their first words, made general.

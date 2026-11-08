@@ -2,7 +2,7 @@
 // hooks beneath the plugin), and the bridge answers from memory, so nothing touches the network. Tests change
 // how it behaves through the returned object, never with `on`: the kit takes no hooks after the first call on `$`.
 
-import type { On } from 'claude-code'
+import type { AgentSpawnInput, AgentSpawnResult, On } from 'claude-code'
 import { expect, mock } from 'claude-code/testing'
 
 export const TOKEN = 'tok-0123456789abcdef'
@@ -120,9 +120,11 @@ export function world(on: On, o: WorldOptions = {}) {
   }
   /** What `$.session.*` reads. A model of undefined can't be read: `$.session.model()` rejects. */
   const session = { sid: SID, model: MODEL as string | undefined, version: '2.1.309' }
-  /** Answers each `$.tool.call`, standing for the tool itself. */
+  let spawns = 0
+  /** Answers each `$.tool.call`, standing for the tool itself, and each `$.agent.spawn`: agents a1, a2... start. */
   const engine = {
     tool: (_e: Record<string, unknown>): unknown => ({ result: 'ran' }),
+    spawn: (_e: AgentSpawnInput): AgentSpawnResult => ({ model: MODEL, agentId: `a${++spawns}` }),
   }
 
   const clock = mock.clock(on)
@@ -246,6 +248,7 @@ export function world(on: On, o: WorldOptions = {}) {
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('tool.call', (_$, e) => engine.tool(e as unknown as Record<string, unknown>) as { result: string })
+  on('agent.spawn', (_$, e) => engine.spawn(e))
   // The kit raises classic.PreToolUse beneath the mod's tool.call hook, which then sees the errored result a
   // session's hooks see for a refused call.
   const refusal = o.refuse

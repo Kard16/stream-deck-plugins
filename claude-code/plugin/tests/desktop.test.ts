@@ -176,7 +176,7 @@ for (const t of TALKS) {
     const [hello, poll] = w.sent
     expect(hello?.route).toBe('/v1/hello')
     expect(hello?.headers.authorization).toBe(`Bearer ${TOKEN}`)
-    expect(hello?.body).toMatchObject({ v: 1, sid: SID, host: env.CLAUDE_CODE_HOST_SESSION_ID, plugin: '0.3.0' })
+    expect(hello?.body).toMatchObject({ v: 1, sid: SID, host: env.CLAUDE_CODE_HOST_SESSION_ID, plugin: '0.4.0' })
     expect(poll?.route).toBe('/v1/next')
     expect(poll?.query).toMatchObject({ sid: SID, host: env.CLAUDE_CODE_HOST_SESSION_ID })
     expect(w.sent).toHaveLength(2)

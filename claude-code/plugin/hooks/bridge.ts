@@ -25,7 +25,7 @@ import { redact } from './redact'
 export const BRIDGE_URL = 'http://127.0.0.1:47600'
 export const PROTOCOL_VERSION = 1
 /** The plugin's version for the hello, kept in step with .claude-plugin/plugin.json: `$.plugin` has none. */
-export const PLUGIN_VERSION = '0.3.0'
+export const PLUGIN_VERSION = '0.4.0'
 export const BACKOFF_MS: readonly number[] = [1000, 2000, 5000, 10_000, 30_000]
 /** How long the bridge may hold a poll (PROTOCOL.md, "Rates"). */
 export const POLL_WAIT_S = 20
@@ -123,6 +123,13 @@ export type Bridge = {
   checkModel: () => void
   /** Reads the session id again: /clear and resume go on under a new one. */
   sidMayHaveChanged: () => void
+  /**
+   * Whether the line is up: a hello answered, and no request failed since. Never, in a process it doesn't talk
+   * from.
+   */
+  up: () => boolean
+  /** Sets what runs after each hello the deck answers, once the poll and the line have started again. */
+  onHello: (listener: () => void) => void
 }
 
 type Phase = 'new' | 'boot' | 'off' | 'hello' | 'up' | 'down' | 'stopped'
@@ -213,6 +220,8 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
   /** What the deck was last told of the settings, by the hello or a settings event, in the order it hears them. */
   const known: Settings = {}
   const ids = { sid: '', host: '', token: '' }
+  /** What runs after each hello the deck answers (onHello). */
+  let helloListener: () => void = () => {}
 
   const silent = (): boolean => phase === 'off' || phase === 'stopped'
   const stamp = (): { sid: string; host: string; inst: string } => ({ sid: ids.sid, host: ids.host, inst })
@@ -362,6 +371,12 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     checkModel()
     void poll(ep)
     pump()
+    // The listener, register.ts's threads resend: what it queues goes after what's queued already, with the next seq.
+    try {
+      helloListener()
+    } catch {
+      // The listener's failure is its own: nothing may stop the line.
+    }
   }
 
   /**
@@ -622,5 +637,9 @@ export function createBridge(host: BridgeHost, onCommand: (cmd: Command) => void
     if (!silent()) void refreshSid()
   }
 
-  return { start, emit, result, observe, checkModel, sidMayHaveChanged }
+  function onHello(listener: () => void): void {
+    helloListener = listener
+  }
+
+  return { start, emit, result, observe, checkModel, sidMayHaveChanged, up: () => phase === 'up', onHello }
 }

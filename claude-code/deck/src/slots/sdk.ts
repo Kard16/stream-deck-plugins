@@ -94,7 +94,7 @@ export function dialSurfaceOf(dial: SdkDial, fire: Fire): SlotDialSurface {
  * - a key that appears joins its slot (keySlot; none in a multi-action, where it does nothing); its key-down and
  *   key-up go to SlotKeys, which tells a press (a jump) from a 500 ms hold (the session on screen in the app);
  * - a dial that appears joins the slot of the key above it (dialSlot); its turns, push (down and up) and touch go to
- *   SlotDials, a tap as a press and a long touch as a step back;
+ *   SlotDials, a tap as a press and a long touch as a way back to the start;
  * - whichever disappears leaves its slot, which keeps its session.
  */
 export class SlotActions {
@@ -146,7 +146,7 @@ export class SlotActions {
 		this.#dials.up(id);
 	}
 
-	/** A tap is a press, the touch alternative for a dial stack that takes the press; a long touch goes back a step. */
+	/** A tap is a press, the touch alternative for a dial stack that takes the press; a long touch goes back to the start. */
 	touchTap(id: string, hold: boolean): void {
 		this.#dials.tap(id, hold);
 	}

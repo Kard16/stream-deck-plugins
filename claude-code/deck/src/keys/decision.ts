@@ -1,7 +1,7 @@
 import type { Decision, HeldRequests } from "../bridge/held.js";
 import { type Clock, realClock } from "../util/clock.js";
 import { type Log, nullLog, quote } from "../util/log.js";
-import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
+import { KeyPainter, type Live, PAINT_INTERVAL_MS } from "../util/painter.js";
 import { type DecisionLook, decisionKeySvg } from "./art.js";
 
 /** What the SDK adapter gives for one key. */
@@ -62,12 +62,14 @@ export class DecisionKeys {
 	readonly #paintIntervalMs: number;
 	readonly #settleMs: number;
 	readonly #open: (host: string) => void;
+	readonly #live: Live | undefined;
 	readonly #keys = new Map<string, Key>();
 
+	/** `live`: whether a Stream Deck is connected; the keys' painters send nothing while none is (agents-and-wake.md, C3). */
 	constructor(
 		model: DecisionModel,
 		decision: Decision,
-		opts: { log?: Log; clock?: Clock; paintIntervalMs?: number; settleMs?: number; open?: (host: string) => void } = {},
+		opts: { log?: Log; clock?: Clock; paintIntervalMs?: number; settleMs?: number; open?: (host: string) => void; live?: Live } = {},
 	) {
 		this.#model = model;
 		this.#decision = decision;
@@ -76,12 +78,13 @@ export class DecisionKeys {
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
 		this.#settleMs = opts.settleMs ?? SETTLE_MS;
 		this.#open = opts.open ?? (() => {});
+		this.#live = opts.live;
 		model.onChange(() => this.repaintAll());
 	}
 
 	add(id: string, surface: KeySurface): void {
 		this.#keys.get(id)?.painter.dispose();
-		const painter = new KeyPainter<number | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs });
+		const painter = new KeyPainter<number | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs, live: this.#live });
 		const key: Key = { surface, painter, feedbackAt: -Infinity };
 		this.#keys.set(id, key);
 		this.#paint(key);
@@ -132,6 +135,12 @@ export class DecisionKeys {
 		for (const key of this.#keys.values()) this.#paint(key);
 	}
 
+	/** A device connected, or the Mac woke: every key sends its image again, the same one too (agents-and-wake.md, C2). */
+	repaintInFull(): void {
+		for (const key of this.#keys.values()) key.painter.forget();
+		this.repaintAll();
+	}
+
 	/** What a key shows now, for tests. */
 	painted(id: string): { svg: string | null; shown: number | null | undefined } | null {
 		const key = this.#keys.get(id);
@@ -149,6 +158,8 @@ export class DecisionKeys {
 	}
 
 	#paint(key: Key): void {
+		// The oldest held request, whether the bridge is listening or not: one its old server holds is still answered
+		// through it (decisionKeySvg), so the key shows what a press acts on, and reads Offline only with nothing held.
 		key.painter.update(decisionKeySvg(decisionLook(this.#model, this.#decision)), this.#model.held.oldest?.id ?? null);
 	}
 }

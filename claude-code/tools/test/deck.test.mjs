@@ -111,6 +111,31 @@ test('deck: release rule 1: tool.end with the same fp, from the same session', (
   assert.deepEqual(view().held.map((h) => h.host), [B.host])
 })
 
+test('deck: release rule 1 matches the loop: a request keeps its agent_id, and only a tool.end from that agent releases it; one with none, only the main loop\'s', () => {
+  // release-by-agent, and PROTOCOL.md, "Held requests", as amended on 2026-11-07 for Phase 9: one agent's finished call
+  // released another's identical request held on the deck.
+  const { log, reg, hello, ev, perm, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const bash = { command: 'npm test' }
+  const fp = fingerprint('Bash', bash)
+  const s1 = perm(A, 'Bash', bash, { extra: { agent_id: 's1', agent_type: 'general-purpose' } })
+  const main = perm(A, 'Bash', bash)
+  // An agent_id that isn't a non-empty string is none: the main loop's.
+  const odd = perm(A, 'Bash', bash, { extra: { agent_id: '' } })
+  assert.deepEqual(view().held.map((h) => [h.id, h.agent]), [[s1.id, 's1'], [main.id, null], [odd.id, null]])
+  assert.equal(log.find((e) => e.kind === 'held' && e.id === s1.id).say, `${s1.id} HELD tool local_a Bash: npm test fp ${fp} agent s1`)
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u14', agent: 's2', fp, ok: true })
+  assert.deepEqual(view().held.map((h) => h.id), [s1.id, main.id, odd.id], "another agent's identical call releases nothing")
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u15', fp, ok: true })
+  assert.deepEqual([main.r.sent, s1.r.sent], [[{ status: 200, json: {} }], []], "the main loop's releases the main loop's oldest, not the agent's older one")
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u13', agent: 's1', fp, ok: true })
+  assert.deepEqual(s1.r.sent, [{ status: 200, json: {} }], "its own agent's releases it")
+  assert.equal(log.find((e) => e.kind === 'release' && e.id === s1.id).why, 'tool.end with the same fp, from agent s1')
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u16', agent: '', fp, ok: true })
+  assert.deepEqual([odd.r.sent, view().held], [[{ status: 200, json: {} }], []], "an event's agent that isn't a non-empty string is the main loop's too")
+})
+
 test('deck: release rule 2: leaving waiting releases the only request, held while the registry showed waiting', () => {
   const { reg, perm, view } = setup()
   reg([A, 'busy'], [B, 'busy'])
@@ -1680,6 +1705,109 @@ test('deck: a reading that turns busy after a main-loop turn end answers the pol
   assert.equal(log.filter((e) => e.kind === 'poll-turn-end' && e.by === 'busy').length, 1)
 })
 
+test('deck: the polls answered at once wait for running to reach 0: a turn end while other loops are in a turn answers nothing, a threads above 0 ends them, and the drop to 0 with the main loop out of its turn answers the open poll and starts them', () => {
+  // threads, and PROTOCOL.md, "Commands", as amended on 2026-11-07 for Phase 9: other loops keep the registry busy
+  // whatever the mod has open, so answering at once only spun the mod, about 60 polls in the minute after every turn.
+  const { clock, log, reg, hello, ev, poll } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const n1 = poll(A)
+  ev(A, { t: 'turn.start', turn: 't1' }, { t: 'threads', running: 2, agents: [], runs: [] })
+  ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
+  assert.equal(n1.r.sent.length, 0, 'held: the turn ended with two agents in a turn')
+  reg([A, 'idle'])
+  reg([A, 'busy'])
+  assert.equal(n1.r.sent.length, 0, 'nor does a reading that turns busy answer it')
+  ev(A, { t: 'threads', running: 1, agents: [], runs: [] })
+  assert.equal(n1.r.sent.length, 0, 'one agent ended, one still in a turn')
+  // The drop to 0, with the main loop out of its turn: the open poll answered, and the polls after it at once.
+  clock.advance(5_000)
+  ev(A, { t: 'threads', running: 0, agents: [], runs: [] })
+  assert.deepEqual(n1.r.sent, [{ status: 200, json: { cmds: [] } }])
+  const n2 = poll(A)
+  assert.deepEqual(n2.r.sent, [{ status: 200, json: { cmds: [] } }], 'answered at once while the registry says busy')
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-at-once').map((e) => [e.poll, e.sinceTurnEndMs]), [[n2.id, 0]], 'timed from the drop')
+  // A threads above 0 ends them.
+  ev(A, { t: 'threads', running: 1, agents: [], runs: [] })
+  clock.advance(1_000)
+  const n3 = poll(A)
+  assert.equal(n3.r.sent.length, 0, 'held again')
+  // A drop to 0 while the main loop is in a turn answers nothing; its turn end then, with none in a turn, does.
+  ev(A, { t: 'turn.start', turn: 't2' }, { t: 'threads', running: 0, agents: [], runs: [] })
+  assert.equal(n3.r.sent.length, 0)
+  ev(A, { t: 'turn.end', turn: 't2', reason: 'answer' })
+  assert.deepEqual(n3.r.sent, [{ status: 200, json: { cmds: [] } }])
+  // A failed while others are in a turn is a turn end like any: it answers nothing, and starts nothing.
+  ev(A, { t: 'turn.start', turn: 't3' }, { t: 'threads', running: 3, agents: [], runs: [] }, { t: 'failed', error: 'API error' })
+  const n4 = poll(A)
+  assert.equal(n4.r.sent.length, 0)
+  assert.deepEqual(log.filter((e) => e.kind === 'poll-turn-end').map((e) => [e.poll, e.by]), [[n1.id, 'threads'], [n3.id, 'turn.end']])
+})
+
+test("deck: threads: the latest from the session's current instance, read with care, and forgotten when another instance is made current or the session ends", () => {
+  const { clock, log, reg, hello, ev, view } = setup()
+  const threads = () => view().threads[A.host]
+  reg([A, 'busy'])
+  hello(A)
+  assert.equal(threads(), null, 'none before the first')
+  const run = { run: 'wf_1', name: 'review', started: 2, finished: 0, failed: 0, open: 2 }
+  ev(A, { t: 'threads', running: 2, agents: [{ kind: 'workflow', desc: 'logs', doing: 'Grep: Device', run: 'wf_1' }, 'x', { kind: 'robot', desc: 7 }], runs: [run, 3] })
+  // An entry that isn't an object is skipped, and an unknown kind reads as other (PROTOCOL.md, "Events").
+  assert.deepEqual(threads(), { running: 2, agents: [{ kind: 'workflow', desc: 'logs', doing: 'Grep: Device', run: 'wf_1' }, { kind: 'other', desc: '', doing: '', run: null }], runs: [run] })
+  // A running that isn't a whole number from 0 counts as 0, and a field nested too deep to write out isn't kept.
+  ev(A, { t: 'threads', running: 1.5, agents: 'none', runs: [{ ...run, name: { deep: [] }, started: -1, finished: '2' }] })
+  assert.deepEqual(threads(), { running: 0, agents: [], runs: [{ ...run, name: null, started: 0, finished: 0 }] })
+  // Another inst's picture isn't the session's: one that never said hello, while ia is current.
+  ev({ ...A, inst: 'stray' }, { t: 'threads', running: 5, agents: [], runs: [] })
+  assert.equal(threads().running, 0)
+  assert.deepEqual(log.filter((e) => e.kind === 'threads-ignored').map((e) => [e.inst, e.current]), [['stray', A.inst]])
+  // The same instance, current again after 60 s without a poll, keeps its own.
+  ev(A, { t: 'threads', running: 1, agents: [], runs: [] })
+  clock.advance(60_000)
+  assert.equal(view().status[A.host], 'background', 'kept while no instance is current')
+  ev(A, { t: 'threads', running: 4, agents: [], runs: [] })
+  assert.equal(threads().running, 1, 'but none is current, so none is taken')
+  hello(A)
+  assert.equal(threads().running, 1)
+  // A new instance, as after a reload, starts with an empty picture.
+  hello({ ...A, inst: 'ia2' })
+  assert.equal(threads(), null)
+  assert.equal(view().status[A.host], 'working', 'busy, with nothing in threads')
+  ev({ ...A, inst: 'ia2' }, { t: 'threads', running: 1, agents: [], runs: [] })
+  assert.equal(threads().running, 1)
+  // Release rule 4 forgets it with the session, which comes back without it.
+  reg()
+  reg([A, 'busy'])
+  hello({ ...A, inst: 'ia2' })
+  assert.equal(threads(), null)
+})
+
+test("deck: the fp check pairs a request only with its own loop's tool.start: another loop's call of the same fp isn't its", () => {
+  const { deck, log, reg, hello, ev, perm } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const bash = { command: 'npm test' }
+  const fp = fingerprint('Bash', bash)
+  // release-by-agent: s1's request, then the main loop's identical call, then s1's tool.end, its tool.start never sent.
+  const p1 = perm(A, 'Bash', bash, { extra: { agent_id: 's1' } })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u15', summary: 'npm test', fp }, { t: 'tool.end', tool: 'Bash', use: 'u15', fp, ok: true })
+  assert.deepEqual(fpChecks(log), [], "the main loop's call isn't s1's")
+  ev(A, { t: 'tool.end', tool: 'Bash', use: 'u13', agent: 's1', fp, ok: true })
+  assert.deepEqual(fpChecks(log), [[p1.id, 'unpaired', null]])
+  assert.equal(log.find((e) => e.kind === 'fp-check').agent, 's1')
+  // An older mod still sends another loop's tool.start, with its agent: it pairs with that loop's request.
+  const p2 = perm(A, 'Bash', bash, { extra: { agent_id: 's2' } })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u20', agent: 's2', summary: 'npm test', fp })
+  assert.deepEqual(fpChecks(log).at(-1), [p2.id, 'match', 'npm test'])
+  // From plugin 0.4.0 none comes: an agent's request answered by a press ends unpaired, saying why.
+  const make = { command: 'make' }
+  const p3 = perm(A, 'Bash', make, { extra: { agent_id: 'w1' } })
+  ev(A, { t: 'tool.start', tool: 'Bash', use: 'u21', summary: 'make', fp: fingerprint('Bash', make) })
+  deck.answer({ id: p3.id, decision: 'allow' })
+  const c = log.findLast((e) => e.kind === 'fp-check')
+  assert.deepEqual([c.request, c.unpaired, c.doubt], [p3.id, true, "it's agent w1's, and from plugin 0.4.0 the mod sends no other loop's tool.start"])
+})
+
 test('deck: a new inst forgets the session\'s current tool and in-flight commands, and keeps the rest', () => {
   const { deck, reg, hello, ev, poll, view } = setup()
   reg([A, 'busy'])
@@ -1884,6 +2012,24 @@ test('deck: statuses come in the order PROTOCOL.md gives', () => {
   assert.equal(status(), 'working', 'a subagent\'s turn end is not the main loop\'s')
   ev(A, { t: 'turn.end', turn: 't4', reason: 'answer' })
   assert.equal(status(), 'done')
+  // Rule 3's background (Phase 9): other loops in a turn while the main loop isn't, whatever the registry says, after
+  // approval and needs-you, and before the rules for an idle session.
+  ev(A, { t: 'threads', running: 2, agents: [], runs: [] })
+  assert.equal(status(), 'background', 'an idle reading trails')
+  reg([A, 'busy'])
+  assert.equal(status(), 'background', 'a busy that began before the turn ended')
+  ev(A, { t: 'turn.start', turn: 't5' })
+  assert.equal(status(), 'working', 'the main loop in a turn')
+  ev(A, { t: 'turn.end', turn: 't5', reason: 'aborted' })
+  assert.equal(status(), 'background', 'before interrupted')
+  const t = perm(A, 'Write', W1)
+  assert.equal(status(), 'approval')
+  deck.clientClosed(t.id)
+  reg([A, 'waiting'])
+  assert.equal(status(), 'needs-you')
+  reg([A, 'idle'])
+  ev(A, { t: 'threads', running: 0, agents: [], runs: [] })
+  assert.equal(status(), 'interrupted', 'none in a turn: the rules after it')
 })
 
 test('deck: a main-loop failed marks only its own turn: a turn.end for another turn reads done, as the deck reads rule 4', () => {
@@ -2360,18 +2506,20 @@ test('deck: a request waits for its own tool.start across a mod restart, since a
 test('deck: a request waits for its own tool.start past the main loop\'s turn end, since a background subagent\'s call can outlast it', () => {
   // Round 3's probe (probe-fp.mjs): a background subagent's call of Bash starts before the main loop's turn ends
   // and asks for permission after, then the subagent makes an auto-allowed call of Bash.
+  // Its requests carry its agent_id, as a subagent's do (PROTOCOL.md, "Permission requests"), and an older mod sends its
+  // tool.starts with its agent.
   const { log, reg, hello, ev, perm } = setup()
   reg([A, 'busy'])
   hello(A)
   ev(A, { t: 'tool.start', tool: 'Bash', use: 'u1', agent: 'bg', summary: 'make', fp: fingerprint('Bash', { command: 'make' }) })
   ev(A, { t: 'turn.end', turn: 't1', reason: 'answer' })
-  const p1 = perm(A, 'Bash', { command: 'make' })
+  const p1 = perm(A, 'Bash', { command: 'make' }, { extra: { agent_id: 'bg' } })
   ev(A, { t: 'tool.start', tool: 'Bash', use: 'u2', agent: 'bg', summary: 'ls', fp: fingerprint('Bash', { command: 'ls' }) })
   ev(A, { t: 'turn.end', turn: 't2', reason: 'answer' })
   assert.deepEqual(fpChecks(log), [[p1.id, 'match', 'make']])
 
   // The other way round: its request before the main loop's turn end, its tool.start after.
-  const p2 = perm(A, 'Bash', { command: 'npm test' })
+  const p2 = perm(A, 'Bash', { command: 'npm test' }, { extra: { agent_id: 'bg' } })
   ev(A, { t: 'turn.end', turn: 't3', reason: 'answer' }, { t: 'turn.end', turn: 's1', agent: 'other', reason: 'answer' })
   ev(A, { t: 'tool.start', tool: 'Bash', use: 'u3', agent: 'bg', summary: 'npm test', fp: fingerprint('Bash', { command: 'npm test' }) })
   assert.deepEqual(fpChecks(log), [[p1.id, 'match', 'make'], [p2.id, 'match', 'npm test']])
@@ -2457,13 +2605,13 @@ test('deck: answer by id, and an ended request says how it ended', () => {
   assert.throws(() => deck.answer({ id: p1.id, decision: 'yes' }), BadRequest)
 })
 
-test('deck: answer refuses an ask request, which only its session\'s dial answers: a key press jumps instead', () => {
+test('deck: answer refuses an ask request, which the deck never answers: a press on it jumps instead', () => {
   const { deck, reg, perm, view } = setup()
   reg([A, 'busy'])
   for (const [tool, input] of [['AskUserQuestion', ASK], ['ExitPlanMode', { plan: 'x' }]]) {
     const ask = perm(A, tool, input)
     for (const decision of ['allow', 'deny', 'none']) {
-      assert.throws(() => deck.answer({ id: ask.id, decision }), (err) => err instanceof BadRequest && /which only local_a's Session Slot dial answers: use dial \(POST \/control\/dial\); a key press on it jumps to local_a/.test(err.message))
+      assert.throws(() => deck.answer({ id: ask.id, decision }), (err) => err instanceof BadRequest && /which the deck never answers: a press on it jumps to local_a, the user answers in the app, and its tool\.end releases it$/.test(err.message))
     }
     assert.equal(ask.r.sent.length, 0, `${tool}: nothing sent`)
   }

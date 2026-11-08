@@ -13,7 +13,7 @@ describe("the plugin's version", () => {
 		const manifest = read("com.karimdhanji.claude.sdPlugin/manifest.json");
 		const pkg = read("package.json");
 		const lock = read("package-lock.json") as { version?: unknown; packages?: Record<string, { version?: unknown }> };
-		assert.equal(manifest.Version, "0.5.0.0");
+		assert.equal(manifest.Version, "0.6.0.0");
 		assert.equal(manifest.Version, `${String(pkg.version)}.0`);
 		assert.deepEqual([lock.version, lock.packages?.[""]?.version], [pkg.version, pkg.version]);
 	});
@@ -63,15 +63,22 @@ describe("the manifest's actions", () => {
 		assert.equal(slot.SupportedInMultiActions, false);
 		assert.equal(slot.UserTitleEnabled, false);
 		assert.deepEqual(slot.Encoder?.TriggerDescription, {
-			Rotate: "Page details or pick an answer",
-			Push: "Jump, or send the answer",
-			Touch: "Jump, or send the answer",
-			LongTouch: "Back a step",
+			Rotate: "Page details, or pick Allow or Deny",
+			Push: "Jump, or send Allow or Deny",
+			Touch: "Jump, or send Allow or Deny",
+			LongTouch: "Start over",
 		});
 		// The layout before the plugin's first paint: one of the dial's own, which the plugin then switches.
 		assert.ok((Object.values(SLOT_LAYOUTS) as string[]).includes(slot.Encoder?.layout ?? ""), slot.Encoder?.layout);
 		assert.match(slot.Tooltip, /Press to jump/);
 		assert.match(slot.Tooltip, /hold to put the session on screen in the app on this key/);
+	});
+
+	test("the actions are Approve, Deny, Saved Prompt, Session Slot and Other Sessions, each with its own images: the Session key and the Sessions dial went in Phase 9", () => {
+		const uuids = ["approve", "deny", "prompt", "slot", "others"];
+		assert.deepEqual(manifest.Actions.map((a) => a.UUID).sort(), uuids.map((u) => `com.karimdhanji.claude.${u}`).sort());
+		// Dotfiles aside: Finder may leave a .DS_Store, which git ignores.
+		assert.deepEqual(readdirSync(sdPlugin("imgs/actions")).filter((f) => !f.startsWith(".")).sort(), [...uuids].sort());
 	});
 
 	test("Other Sessions: keys only, not in a multi-action, no user title", () => {

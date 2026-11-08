@@ -138,12 +138,6 @@ const B = { sid: '3fa86955-0000-4000-8000-00000000000b', host: 'local_test-b', i
 
 const ALLOW = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
 const DENY = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Denied from the Stream Deck.', interrupt: true } } }
-/** The Answer for an AskUserQuestion: Allow, with the request's own tool_input plus `answers` (T5, 2026-11-04). */
-const ANSWER = (input, answers) => ({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...input, answers } } } })
-/** The Approve for an ExitPlanMode: Allow, with the request's own tool_input and the mode to leave Plan mode into (T6, 2026-11-04). */
-const APPROVE_PLAN = (input, mode) => ({
-  hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: input, updatedPermissions: [{ type: 'setMode', mode, destination: 'session' }] } },
-})
 const note = (text) => ({ note: text })
 
 function setup(sessions = [A], status = {}, modes = {}) {
@@ -194,11 +188,24 @@ function session(S) {
     turn: (turnId, text) => ({ mod: { on: 'turn.start', e: { turnId, text } } }),
     turnEnd: (turnId, reason = 'answer') => ({ mod: { on: 'turn.complete', e: { turnId, reason, isAborted: reason === 'aborted', durationMs: 2400, answer: reason === 'aborted' ? '' : 'Done.' } } }),
     tool: (tool, use, input, result = { isError: false }) => ({ mod: { on: 'tool.call', e: { tool, tool_use_id: use, ...input }, result } }),
+    /** An agent starts (Phase 9): the engine's agent.spawn, and the spawned agent's id that next(e) resolves to. */
+    spawn: (agentId, e) => ({ mod: { on: 'agent.spawn', e: { prompt: 'Do the task.', subagentType: 'general-purpose', background: false, fork: false, ...e }, result: { agentId, model: MODEL } } }),
+    /** Another loop's turn and tool calls: the engine's events with that loop's agentId. */
+    agentTurn: (agentId) => ({ mod: { on: 'turn.start', e: { turnId: `${agentId}-t1`, text: 'Do the task.', agentId } } }),
+    agentTurnEnd: (agentId, reason = 'answer') => ({ mod: { on: 'turn.complete', e: { turnId: `${agentId}-t1`, reason, isAborted: reason === 'aborted', durationMs: 9000, answer: reason === 'answer' ? 'Done.' : '', agentId } } }),
+    agentTool: (agentId, tool, use, input, result = { isError: false }) => ({ mod: { on: 'tool.call', e: { tool, tool_use_id: use, agentId, ...input }, result } }),
   }
 }
 
 const toolStart = (tool, use, input) => ({ t: 'tool.start', tool, use, summary: summary(tool, input), fp: fingerprint(tool, input) })
 const toolEnd = (tool, use, input, extra = { ok: true }) => ({ t: 'tool.end', tool, use, fp: fingerprint(tool, input), ...extra })
+/** Another loop's tool.end, which the mod still sends for release rule 1 (Phase 9). */
+const agentToolEnd = (agent, tool, use, input, extra = { ok: true }) => ({ t: 'tool.end', tool, use, agent, fp: fingerprint(tool, input), ...extra })
+/**
+ * What a `threads` agent is doing: its latest tool call, as `<tool>: <summary>`, or the summary alone when it would read
+ * the same without the call's arguments (PROTOCOL.md, Events: threads).
+ */
+const doing = (tool, input) => (summary(tool, input) === summary(tool, {}) ? summary(tool, input) : `${tool}: ${summary(tool, input)}`)
 const held = (S, tool, input, kind = 'tool') => ({ host: S.host, tool, kind, summary: summary(tool, input) })
 const reply = (to, body, status = 200) => ({ reply: { to, status, ...(body === undefined ? {} : { body }) } })
 
@@ -369,7 +376,7 @@ const fixtures = {}
   const a = session(A)
   const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
   fixtures['needs-you'] = [
-    note('The Approve and Deny keys never answer an AskUserQuestion. A press on one jumps to the session and answers nothing. The user answers in the app, and the tool\'s end releases the request.'),
+    note('The deck never answers an AskUserQuestion (Phase 9). Its Session Slot dial and the Approve and Deny keys read Answer in app, and a press on any of them jumps to the session and answers nothing. The user answers in the app, and the tool\'s end releases the request.'),
     setup(),
     ...a.hello(),
     a.turn('t1', 'Ask me a question'),
@@ -380,6 +387,8 @@ const fixtures = {}
     a.permission('p1', 'AskUserQuestion', ask),
     a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
     { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')], status: { [A.host]: 'needs-you' } } },
+    { press: { dial: { session: A.host } } },
+    { expect: { jumped: A.host, alert: false, held: [held(A, 'AskUserQuestion', ask, 'ask')] } },
     { press: { approve: {} } },
     { expect: { jumped: A.host, held: [held(A, 'AskUserQuestion', ask, 'ask')] } },
     a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
@@ -404,62 +413,23 @@ function asking(a, input) {
 
 {
   const a = session(A)
-  const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
-  const picks = { 'Red or blue?': ['Blue'] }
-  const answers = { 'Red or blue?': 'Blue' }
-  fixtures['answer-question'] = [
-    note("The session's own Session Slot dial answers its question. The answer is Allow with the request's tool_input, unchanged, plus answers: the chosen option's label by the question's text. Claude Code then gives Claude the answers, and the tool runs and ends (T5, 2026-11-04)."),
-    setup(),
-    ...a.hello(),
-    ...asking(a, ask),
-    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')], status: { [A.host]: 'needs-you' } } },
-    { press: { dial: { session: A.host, picks } } },
-    reply('p1', ANSWER(ask, answers)),
-    { expect: { held: [], alert: false } },
-    a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
-    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
-    { expect: { held: [], status: { [A.host]: 'working' } } },
-  ]
-}
-
-{
-  const a = session(A)
-  const ask = {
-    questions: [
-      { question: 'Which fruits?', header: 'Fruit', options: [{ label: 'Apple', description: 'Red or green' }, { label: 'Pear, ripe', description: 'Soft and green' }, { label: 'Plum "Victoria"', description: 'Purple' }], multiSelect: true },
-      { question: 'Which size?', header: 'Size', options: [{ label: 'Small', description: 'A little one' }, { label: 'Large', description: 'A big one' }], multiSelect: false },
-    ],
-  }
-  const picks = { 'Which fruits?': ['Plum "Victoria"', 'Apple', 'Pear, ripe'], 'Which size?': ['Large'] }
-  const answers = { 'Which fruits?': 'Apple, "Pear, ripe", "Plum \\"Victoria\\""', 'Which size?': 'Large' }
-  fixtures['answer-questions'] = [
-    note('Two questions, the first multi-select, answered on the dial. A multi-select answer is the chosen labels in the order of the options, whatever order they were picked in, joined with ", ". A label that holds ", " or a double quote is written as a JSON string, as Claude Code joins its own (the engine check, 2026-11-04). T5 checked the plain join live.'),
-    setup(),
-    ...a.hello(),
-    ...asking(a, ask),
-    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')], status: { [A.host]: 'needs-you' } } },
-    { press: { dial: { session: A.host, picks } } },
-    reply('p1', ANSWER(ask, answers)),
-    { expect: { held: [], alert: false } },
-    a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
-    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
-    { expect: { held: [], status: { [A.host]: 'working' } } },
-  ]
-}
-
-{
-  const a = session(A)
-  const ask = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red', description: 'Red' }, { label: 'Blue', description: 'Blue' }], multiSelect: false }] }
+  const bash = { command: 'npm run build', description: 'Build' }
   fixtures['dial-gone'] = [
-    note("The user answers in the app while the dial shows the question. The tool's end releases the request, so the dial's press for it alerts and sends nothing."),
+    note("The user allows the Bash in the app while the dial shows it. The tool's end releases the request, so the dial's press for it alerts and sends nothing."),
     setup(),
     ...a.hello(),
-    ...asking(a, ask),
-    { expect: { held: [held(A, 'AskUserQuestion', ask, 'ask')] } },
-    a.ev(toolEnd('AskUserQuestion', 'u6', ask)),
+    a.turn('t1', 'Build it'),
+    a.ev({ t: 'turn.start', turn: 't1' }),
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
+    a.tool('Bash', 'u9', bash),
+    a.ev(toolStart('Bash', 'u9', bash)),
+    a.permission('p1', 'Bash', bash),
+    a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
+    { expect: { held: [held(A, 'Bash', bash)] } },
+    a.ev(toolEnd('Bash', 'u9', bash)),
     reply('p1', {}),
     { expect: { held: [] } },
-    { press: { dial: { session: A.host, picks: { 'Red or blue?': ['Red'] } } } },
+    { press: { dial: { session: A.host, decision: 'allow' } } },
     { expect: { held: [], alert: true } },
   ]
 }
@@ -489,58 +459,6 @@ function asking(a, input) {
   ]
 }
 
-/** The turn that plans: the mod sees the call and reports it, then Claude Code sends the PermissionRequest in Plan mode (T6). */
-function planning(a, input, result) {
-  return [
-    a.turn('t1', 'Plan s10.txt'),
-    a.ev({ t: 'turn.start', turn: 't1' }),
-    a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
-    a.tool('ExitPlanMode', 'u7', input, result),
-    a.ev(toolStart('ExitPlanMode', 'u7', input)),
-    a.permission('p1', 'ExitPlanMode', input, { permission_mode: 'plan' }),
-    a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
-  ]
-}
-
-const PLAN = { plan: '# Plan\n\n1. Create s10.txt containing: ten.\n', planFilePath: '/Users/me/.claude/plans/tidy-otter.md' }
-
-{
-  const a = session(A)
-  fixtures['plan-approve'] = [
-    note("The session's dial approves its plan into Accept edits: Allow with the request's tool_input unchanged, and a setMode for the session. ExitPlanMode needs the person, so Claude Code ignores a plain Allow; with updatedInput it takes the answer and closes the app's card (T6, 2026-11-04)."),
-    setup([A], {}, { [A.host]: 'plan' }),
-    ...a.hello(),
-    ...planning(a, PLAN),
-    { expect: { held: [held(A, 'ExitPlanMode', PLAN, 'ask')], status: { [A.host]: 'needs-you' }, settings: { [A.host]: { mode: 'plan' } } } },
-    { press: { dial: { session: A.host, plan: 'acceptEdits' } } },
-    reply('p1', APPROVE_PLAN(PLAN, 'acceptEdits')),
-    { expect: { held: [], alert: false } },
-    a.registry({ status: 'busy', statusUpdatedAt: T0 + 3000 }),
-    a.ev(toolEnd('ExitPlanMode', 'u7', PLAN)),
-    { expect: { held: [], status: { [A.host]: 'working' } } },
-  ]
-}
-
-{
-  const a = session(A)
-  fixtures['plan-reject'] = [
-    note("The dial rejects the plan with the keys' Deny, which stops the turn, so the user says in the app what to change. The refusal reaches the mod as an errored result, as for any Deny."),
-    setup([A], {}, { [A.host]: 'plan' }),
-    ...a.hello(),
-    ...planning(a, PLAN, { isError: true, text: "The user doesn't want to proceed with this tool use. The tool use was rejected." }),
-    { expect: { held: [held(A, 'ExitPlanMode', PLAN, 'ask')] } },
-    { press: { dial: { session: A.host, plan: 'reject' } } },
-    reply('p1', DENY),
-    a.ev(toolEnd('ExitPlanMode', 'u7', PLAN, { ok: false })),
-    a.turnEnd('t1'),
-    a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
-    reply('n1', { cmds: [] }),
-    a.next('n2'),
-    a.registry({ status: 'idle', statusUpdatedAt: T0 + 4000 }),
-    { expect: { held: [], status: { [A.host]: 'done' } } },
-  ]
-}
-
 {
   const a = session(A)
   const b = session(B)
@@ -559,6 +477,75 @@ const PLAN = { plan: '# Plan\n\n1. Create s10.txt containing: ten.\n', planFileP
     { expect: { held: [held(B, 'Bash', bash)], alert: false } },
     { press: { dial: { session: B.host, decision: 'deny' } } },
     reply('p1', DENY),
+    { expect: { held: [] } },
+  ]
+}
+
+{
+  const a = session(A)
+  const wf = { script: "export const meta = { name: 'review', description: 'Review the diff', phases: [{ title: 'Read' }] }\nawait parallel([() => agent('Read the logs', { label: 'logs' }), () => agent('Search the web', { label: 'hardware' })])" }
+  const launched = { result: { status: 'async_launched', taskId: 'task_w1', taskType: 'local_workflow', workflowName: 'review', runId: 'wf_1', transcriptDir: '/Users/me/.claude/wf/wf_1', scriptPath: '/Users/me/.claude/wf/review.js' }, isError: false }
+  const grep = { pattern: 'Device' }
+  const search = { query: 'U2725QE firmware' }
+  const run = (started, finished, open) => ({ run: 'wf_1', name: 'review', started, finished, failed: 0, open })
+  fixtures.threads = [
+    note("The main loop starts a workflow of two agents, then its turn ends while they work (Phase 9). The mod reports the session's other loops in threads: at once for the first change after a quiet second, then at most once a second, so the plugin side moves the mod's clock for the second and third. It sends the agents' tool.end, for release rule 1, but not their turn or tool starts. The deck reads working while the main loop's turn runs, then background, though the registry says busy throughout. When running drops to 0 with the main loop out of its turn, the deck answers the open poll at once and opens the 60 s window, as at a turn's end. That it didn't answer at the turn's end, while other loops were still in a turn, is for each side's unit tests: a fixture line can't say when a held poll was answered."),
+    setup(),
+    ...a.hello(),
+    a.turn('t1', 'Review the diff with a workflow'),
+    a.ev({ t: 'turn.start', turn: 't1' }),
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
+    a.tool('Workflow', 'u10', wf, launched),
+    a.ev(toolStart('Workflow', 'u10', wf)),
+    a.ev(toolEnd('Workflow', 'u10', wf)),
+    a.ev({ t: 'threads', running: 0, agents: [], runs: [run(0, 0, 0)] }),
+    a.spawn('w1', { tool_use_id: 'u10', description: 'logs', background: true, workflow: { runId: 'wf_1', agentIndex: 1 } }),
+    a.agentTurn('w1'),
+    a.spawn('w2', { tool_use_id: 'u10', description: 'hardware', background: true, workflow: { runId: 'wf_1', agentIndex: 2 } }),
+    a.agentTurn('w2'),
+    a.agentTool('w1', 'Grep', 'u11', grep),
+    a.ev(agentToolEnd('w1', 'Grep', 'u11', grep)),
+    a.ev({ t: 'threads', running: 2, agents: [{ kind: 'workflow', desc: 'hardware', doing: '', run: 'wf_1' }, { kind: 'workflow', desc: 'logs', doing: doing('Grep', grep), run: 'wf_1' }], runs: [run(2, 0, 2)] }),
+    { expect: { status: { [A.host]: 'working' }, doing: { [A.host]: null }, threads: { [A.host]: { running: 2, runs: [{ name: 'review', started: 2, finished: 0, open: 2 }] } } } },
+    a.turnEnd('t1'),
+    a.ev({ t: 'turn.end', turn: 't1', reason: 'answer' }),
+    { expect: { status: { [A.host]: 'background' } } },
+    a.agentTool('w2', 'WebSearch', 'u12', search),
+    a.ev(agentToolEnd('w2', 'WebSearch', 'u12', search)),
+    a.agentTurnEnd('w1'),
+    a.agentTurnEnd('w2'),
+    a.ev({ t: 'threads', running: 0, agents: [], runs: [run(2, 2, 0)] }),
+    reply('n1', { cmds: [] }),
+    a.next('n2'),
+    reply('n2', { cmds: [] }),
+    a.registry({ status: 'idle', statusUpdatedAt: T0 + 5000 }),
+    { expect: { status: { [A.host]: 'done' }, threads: { [A.host]: { running: 0, runs: [{ name: 'review', started: 2, finished: 2, open: 0 }] } } } },
+  ]
+}
+
+{
+  const a = session(A)
+  const bash = { command: 'npm test', description: 'Run the tests' }
+  fixtures['release-by-agent'] = [
+    note("Two subagents run the same command (Phase 9). s1's call needs permission, and its PermissionRequest carries agent_id. s2's identical call ends first: its tool.end comes from another loop, so it doesn't release s1's request. Nor does the main loop's identical call. s1's own tool.end does, once the user has allowed it in the app. Neither subagent's turn start reached this mod, so their calls change nothing in threads."),
+    setup(),
+    ...a.hello(),
+    a.turn('t1', 'Test it twice'),
+    a.ev({ t: 'turn.start', turn: 't1' }),
+    a.registry({ status: 'busy', statusUpdatedAt: T0 + 1000 }),
+    a.agentTool('s1', 'Bash', 'u13', bash),
+    a.permission('p1', 'Bash', bash, { agent_id: 's1', agent_type: 'general-purpose' }),
+    a.registry({ status: 'waiting', statusUpdatedAt: T0 + 2000 }),
+    { expect: { held: [held(A, 'Bash', bash)], status: { [A.host]: 'approval' } } },
+    a.agentTool('s2', 'Bash', 'u14', bash),
+    a.ev(agentToolEnd('s2', 'Bash', 'u14', bash)),
+    { expect: { held: [held(A, 'Bash', bash)] } },
+    a.tool('Bash', 'u15', bash),
+    a.ev(toolStart('Bash', 'u15', bash)),
+    a.ev(toolEnd('Bash', 'u15', bash)),
+    { expect: { held: [held(A, 'Bash', bash)] } },
+    a.ev(agentToolEnd('s1', 'Bash', 'u13', bash)),
+    reply('p1', {}),
     { expect: { held: [] } },
   ]
 }

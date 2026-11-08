@@ -4,19 +4,23 @@
 // Beneath the mod, the runner answers `$.session.*` and `$.env.get` from the fixture's setup, as a desktop session
 // of its own (PROTOCOL.md, "Desktop sessions only"): CLAUDE_CODE_ENTRYPOINT is claude-desktop, and CLAUDECODE,
 // CLAUDE_CODE_CHILD_SESSION and CLAUDE_CODE_TAGS are unset. It answers `$.prompt.submit` from the fixture's `engine`
-// lines (checking their arguments), and each engine event with the `mod` line's result. It stands for the bridge
-// too: hello answers {"v": 1, "ok": true}, events and results 204, and a poll nothing, unless a `reply` line says
-// otherwise. Each request the mod sends must be the fixture's next `plugin` line (polls in order among themselves),
-// with the token in its Authorization header, and the mod may send nothing more. Lines about /v1/permission, which
-// Claude Code's hook sends, not the mod, and lines about other sessions, presses, the registry and the deck's state
-// are the deck side's.
+// lines (checking their arguments), and each engine event with the `mod` line's result: an agent.spawn's is the
+// spawned agent's id and model. A tool call settles when a line waits on its tool.end, not before: until then it may
+// wait on a permission dialog, as s1's does in release-by-agent while other loops' calls start and end. The runner
+// stands for the bridge too: hello answers {"v": 1, "ok": true}, events and results 204, and a poll nothing, unless a
+// `reply` line says otherwise. Each request the mod sends must be the fixture's next `plugin` line (polls in order
+// among themselves), with the token in its Authorization header, and the mod may send nothing more. Lines about
+// /v1/permission, which Claude Code's hook sends, not the mod, and lines about other sessions, presses, the registry
+// and the deck's state are the deck side's.
 //
-// The mod's clock moves only when a line waits on it: by POLL_MIN_MS for a poll after an early empty answer, and by
-// RETRY_MS for a hello after a rejected fetch or a poll answered 409 hello first. The mod logs nothing in any fixture.
+// The mod's clock moves only when a line waits on it: by POLL_MIN_MS for a poll after an early empty answer, by
+// RETRY_MS for a hello after a rejected fetch or a poll answered 409 hello first, and by THREADS_MS for a threads the
+// mod holds back. The mod logs nothing in any fixture.
 
 import type { On } from 'claude-code'
 import { expect, mock, test, type Engine, type MockClock } from 'claude-code/testing'
 import { POLL_MIN_MS, RETRY_MS } from '../hooks/bridge'
+import { THREADS_MS } from '../hooks/threads'
 import { FIXTURES } from './fixtures.gen'
 
 const BRIDGE = 'http://127.0.0.1:47600'
@@ -77,6 +81,8 @@ function raise($: Engine, event: string, e: Json): Promise<unknown> {
       return $.turn.complete(e)
     case 'tool.call':
       return $.tool.call(e)
+    case 'agent.spawn':
+      return $.agent.spawn(e)
     case 'classic.UserPromptSubmit':
       return $.classic.UserPromptSubmit(e)
     case 'classic.PostToolUse':
@@ -107,6 +113,8 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
   const others: Req[] = []
   /** What next(e) resolves to beneath the mod for the `mod` line being played. */
   let result: Json
+  /** Each tool call's answer beneath the mod, by use id, held until a line waits on its tool.end. */
+  const calls = new Map<string, { answer: Promise<unknown>; settle: () => void }>()
 
   /** "The plugin side binds the mod's real inst to the fixture's at its first appearance." */
   const insts = new Map<string, string>()
@@ -213,7 +221,8 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
   on('session.measure', (_$, e) => result ?? { changed: e.changed })
   on('turn.start', (_$, e) => result ?? { turnId: e.turnId })
   on('turn.complete', (_$, e) => result ?? { text: e.answer })
-  on('tool.call', () => toolAnswer(result) as { result: unknown })
+  on('tool.call', (_$, e) => (calls.get(String(e.tool_use_id))?.answer ?? Promise.resolve(toolAnswer(undefined))) as Promise<{ result: unknown }>)
+  on('agent.spawn', () => result ?? { model: s.model })
   on('classic.UserPromptSubmit', () => result ?? {})
   on('classic.PostToolUse', () => result ?? {})
   on('classic.PostToolUseFailure', () => result ?? {})
@@ -232,13 +241,26 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
   for (const [i, line] of lines.entries()) {
     const at = `line ${i + 1}`
     if ('mod' in line) {
-      result = line.mod.result
-      try {
-        await raise($, line.mod.on, line.mod.e)
-      } catch (err) {
+      const failed = (err: unknown): void => {
         problems.push(`${at}: ${line.mod.on} failed: ${err instanceof Error ? err.message : String(err)}`)
       }
-      result = undefined
+      if (line.mod.on === 'tool.call') {
+        // Raised and left running: the call settles when a line waits on its tool.end.
+        let settleCall = (): void => {}
+        const held = new Promise<void>(resolve => {
+          settleCall = resolve
+        })
+        calls.set(String(line.mod.e.tool_use_id), { answer: held.then(() => toolAnswer(line.mod.result)), settle: settleCall })
+        raise($, line.mod.on, line.mod.e).catch(failed)
+      } else {
+        result = line.mod.result
+        try {
+          await raise($, line.mod.on, line.mod.e)
+        } catch (err) {
+          failed(err)
+        }
+        result = undefined
+      }
       await settle(clock)
     } else if ('plugin' in line) {
       const p = line.plugin
@@ -249,16 +271,20 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
         if (p.as !== undefined) labels.set(p.as, null)
         continue
       }
+      const events: Json[] = Array.isArray(p.body?.events) ? p.body.events : []
+      for (const x of events) if (x?.t === 'tool.end') calls.get(String(x.use))?.settle()
       const isPoll = route === '/v1/next'
       const list = isPoll ? polls : others
       const n = isPoll ? pollsSeen++ : othersSeen++
       for (let k = 0; k < 20 && list.length <= n; k++) await clock.settle()
       // After an empty answer that came sooner than POLL_MIN_MS, as at a turn's end, the mod waits out the rest
       // before it polls again (PROTOCOL.md, "Commands"). After a rejected fetch or a poll answered 409 hello first,
-      // it says hello RETRY_MS later (PROTOCOL.md, "Failure and recovery"). The clock moves only when told to.
+      // it says hello RETRY_MS later (PROTOCOL.md, "Failure and recovery"). A threads it holds back goes when the
+      // second after the last one is up (PROTOCOL.md, "Events"). The clock moves only when told to.
       if (list.length <= n) {
         if (isPoll) await clock.advance(POLL_MIN_MS)
         else if (route === '/v1/hello') await clock.advance(RETRY_MS)
+        else if (events.some(x => x?.t === 'threads')) await clock.advance(THREADS_MS)
       }
       for (let k = 0; k < 20 && list.length <= n; k++) await clock.settle()
       const req = list[n]

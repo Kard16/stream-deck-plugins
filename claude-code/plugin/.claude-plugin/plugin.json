@@ -1,6 +1,6 @@
 {
   "name": "streamdeck-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Reports this session's status to the Stream Deck bridge on 127.0.0.1:47600 and runs the prompts pressed on the deck.",
   "author": { "name": "Karim Dhanji" }
 }

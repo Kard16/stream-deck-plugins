@@ -2,7 +2,7 @@ import type { KeySurface } from "../keys/decision.js";
 import type { SessionView } from "../model/sessions.js";
 import { type Clock, realClock } from "../util/clock.js";
 import { describeError, type Log, nullLog } from "../util/log.js";
-import { KeyPainter, PAINT_INTERVAL_MS } from "../util/painter.js";
+import { KeyPainter, type Live, PAINT_INTERVAL_MS } from "../util/painter.js";
 import { type JumpModel, jumpTo } from "./jump.js";
 import type { Slots } from "./slots.js";
 
@@ -66,12 +66,14 @@ export class OthersKeys {
 	readonly #log: Log;
 	readonly #open: (host: string) => void;
 	readonly #paintIntervalMs: number;
+	readonly #live: Live | undefined;
 	readonly #keys = new Map<string, Key>();
 
+	/** `live`: whether a Stream Deck is connected; the keys' painters send nothing while none is (agents-and-wake.md, C3). */
 	constructor(
 		slots: Slots,
 		model: OthersModel,
-		opts: { art: OthersArt; clock?: Clock; wallNow?: () => number; log?: Log; open?: (host: string) => void; paintIntervalMs?: number },
+		opts: { art: OthersArt; clock?: Clock; wallNow?: () => number; log?: Log; open?: (host: string) => void; paintIntervalMs?: number; live?: Live },
 	) {
 		this.#slots = slots;
 		this.#model = model;
@@ -81,12 +83,13 @@ export class OthersKeys {
 		this.#log = opts.log ?? nullLog;
 		this.#open = opts.open ?? (() => {});
 		this.#paintIntervalMs = opts.paintIntervalMs ?? PAINT_INTERVAL_MS;
+		this.#live = opts.live;
 		slots.onChange(() => this.repaintAll());
 	}
 
 	add(id: string, surface: KeySurface): void {
 		this.remove(id);
-		const key: Key = { surface, painter: new KeyPainter<string | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs }) };
+		const key: Key = { surface, painter: new KeyPainter<string | null>((svg) => surface.setImage(svg), { clock: this.#clock, minIntervalMs: this.#paintIntervalMs, live: this.#live }) };
 		this.#keys.set(id, key);
 		this.#model.showsSeen(this, true);
 		this.#slots.showsOthers(this, true);
@@ -131,6 +134,12 @@ export class OthersKeys {
 		const drawn = this.#draw();
 		if (drawn === null) return;
 		for (const key of this.#keys.values()) key.painter.update(drawn.svg, drawn.shown);
+	}
+
+	/** A device connected, or the Mac woke: every key sends its image again, the same one too (agents-and-wake.md, C2). */
+	repaintInFull(): void {
+		for (const key of this.#keys.values()) key.painter.forget();
+		this.repaintAll();
 	}
 
 	painted(id: string): string | null {

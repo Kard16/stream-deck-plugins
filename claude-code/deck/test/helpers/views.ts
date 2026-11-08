@@ -9,6 +9,7 @@ export function view(fields: Partial<SessionView> = {}): SessionView {
 		title: "Fix the build",
 		status: "idle",
 		doing: null,
+		threads: null,
 		context: null,
 		model: null,
 		effort: null,

@@ -1,5 +1,5 @@
 import { type OthersFace, othersKeySvg, type SlotFace, slotKeySvg } from "../keys/art.js";
-import { sinceText } from "../model/format.js";
+import { sinceText, threadsLabel } from "../model/format.js";
 import type { Need, SessionView } from "../model/sessions.js";
 import type { SlotKeyArt, SlotKeyLook } from "./keys.js";
 import type { OthersArt, OthersLook } from "./others.js";
@@ -34,7 +34,9 @@ export function contextPercent(context: number | null): number | null {
  * - none: the empty slot, `No session`, with how to fill it;
  * - not running: `Not running` and the title, dimmed;
  * - waiting on you (`need`): amber, `Question`, `Plan`, `Approve?` or `Needs you`, with the tool for an approval;
- * - working: blue, `Working`, with the tool it's on;
+ * - working: blue, `Working`; background, other loops in a turn while the main loop isn't: blue, `Background`. Either
+ *   with what the other loops are at (`review 5/9`, `3 agents`), else, working, the tool it's on (agents-and-wake.md,
+ *   B2);
  * - a turn's end not seen: green `Done`, red `Failed`, dark red `Stopped`; an idle session whose activity since it was
  *   last on screen the deck didn't see end (seen false) reads as Done;
  * - seen, or idle: dark, `Done`, `Failed`, `Stopped` or `Idle`.
@@ -53,9 +55,13 @@ export function slotFace(look: SlotKeyLook, heldTool: (host: string) => string |
 		return face("need", NEED_WORDS[s.need], s.need === "approval" ? (held === null ? s.doing : toolName(held)) : null);
 	}
 	const unseen = s.seen === false;
+	const loops = threadsLabel(s.threads);
 	switch (s.status) {
 		case "working":
-			return face("working", "Working", s.doing);
+		case "background": {
+			const word = s.status === "working" ? "Working" : "Background";
+			return loops === null ? face("working", word, s.status === "working" ? s.doing : null) : { ...face("working", word, loops.text), keep: loops.keep };
+		}
 		case "done":
 			return face(unseen ? "done" : "quiet", "Done");
 		case "failed":

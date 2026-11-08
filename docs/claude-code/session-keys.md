@@ -2,6 +2,8 @@
 
 **Status:** designed 2026-11-04, from the user's feedback after a day of use. Spikes T5 and T6 and a read of the engine settled the risks, and PROTOCOL.md's amendment "2026-11-04, session keys" holds the contract. Progress and results go in `docs/claude-code/plan.md` (Phase 7 and the Log); this file is the spec.
 
+**Partly superseded, 2026-11-07 (Phase 9, `docs/claude-code/agents-and-wake.md`):** at the user's word, the dial no longer answers questions or plans. It reads "Answer in app", and a press or tap jumps to the session. The Session key and the Sessions dial went, and the target for prompts now comes from slot and Other Sessions jumps. What this file says about those is history. The slots, the key face and the strip's pages stand, with Phase 9's additions: the Background status, the workflow label and the Agents pages. Two rules below change with them: when other loops work on past the turn, `since` and `seen` for Done, Failed and Stopped count from when that work ended, not the turn's end; and a slot key's or slot dial's jump goes only to the session it showed when pressed down.
+
 ## What the user asked
 
 After a session with the plugin, the user asked for (2026-11-04):

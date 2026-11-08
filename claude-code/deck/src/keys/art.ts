@@ -113,23 +113,9 @@ function question(color: string): string {
 	return `<text x="38" y="58" text-anchor="middle" font-family="${FONT}" font-size="56" font-weight="800" fill="${color}">?</text>`;
 }
 
-/** Three rows, the middle one picked: a list of sessions. */
-function rows(color: string, accent: string, width = 9): string {
-	return (
-		`<path d="M30 36H114" stroke="${color}" stroke-width="${width}" stroke-linecap="round"/>` +
-		`<path d="M30 72H114" stroke="${accent}" stroke-width="${width}" stroke-linecap="round"/>` +
-		`<path d="M30 108H114" stroke="${color}" stroke-width="${width}" stroke-linecap="round"/>`
-	);
-}
-
 /** A speech bubble: a saved prompt. */
 function bubble(color: string, width = 10): string {
 	return `<path d="M30 34H114Q122 34 122 42V86Q122 94 114 94H66L44 112V94H30Q22 94 22 86V42Q22 34 30 34Z" stroke="${color}" stroke-width="${width}" stroke-linejoin="round" fill="none"/>`;
-}
-
-/** A window with a dot in its bar: one session. */
-function windowGlyph(color: string, accent: string, width = 10): string {
-	return `<rect x="22" y="30" width="100" height="84" rx="12" stroke="${color}" stroke-width="${width}" fill="none"/><path d="M22 54H122" stroke="${color}" stroke-width="${width}"/><circle cx="40" cy="42" r="5" fill="${accent}"/>`;
 }
 
 /** A key with a dot at its top and a bar along its foot: one session's slot. */
@@ -156,7 +142,7 @@ function badge(count: number, fill: string, text: string): string {
 
 export type DecisionLook = {
 	decision: "allow" | "deny";
-	/** The bridge is listening. */
+	/** The bridge is listening. Not listening, with nothing held, the key reads Offline. */
 	online: boolean;
 	/** Requests held now, across sessions. */
 	count: number;
@@ -166,17 +152,21 @@ export type DecisionLook = {
 
 /**
  * Approve or Deny: the oldest held request's session and what it's for, with the count in a badge. Green
- * (Approve) or red (Deny) while a tool waits; amber with "Answer in app" for a question or a plan. Dimmed,
- * saying "Offline", while the bridge isn't listening.
+ * (Approve) or red (Deny) while a tool waits; amber with "Answer in app" for a question or a plan. With nothing
+ * held, dimmed and saying "Offline" while the bridge isn't listening. A request held when the bridge's server closed
+ * or failed stays on the key all the same, as on its Session Slot dial: that server keeps its connection open, so a
+ * press still answers it (PROTOCOL.md, Failure and recovery), and the key shows what a press acts on.
  */
 export function decisionKeySvg(look: DecisionLook, size = 144): string {
 	const allow = look.decision === "allow";
 	const name = allow ? "Approve" : "Deny";
 	const glyph = (color: string, small: boolean): string =>
 		allow ? check(color, small ? 11 : 13, small ? CHECK_SMALL : CHECK) : cross(color, small ? 11 : 13, small ? CROSS_SMALL : CROSS);
-	if (!look.online) return key(DIM_BG, glyph(DIM_FG, false) + caption("Offline", DIM_FG), size);
 	const oldest = look.oldest;
-	if (look.count <= 0 || !oldest) return key(BG, glyph(CAPTION, false) + caption(name, CAPTION), size);
+	if (look.count <= 0 || !oldest) {
+		if (!look.online) return key(DIM_BG, glyph(DIM_FG, false) + caption("Offline", DIM_FG), size);
+		return key(BG, glyph(CAPTION, false) + caption(name, CAPTION), size);
+	}
 	const bg = oldest.ask ? ASK_BG : allow ? ALLOW_BG : DENY_BG;
 	const mark = oldest.ask ? question("#FFFFFF") : glyph("#FFFFFF", true);
 	return key(bg, mark + badge(look.count, "#FFFFFF", bg) + line(oldest.title, 98, "#FFFFFF", 17, 600) + line(oldest.ask ? "Answer in app" : oldest.summary, 126, "#E8E8E8", 17, 500), size);
@@ -213,32 +203,13 @@ export function promptKeySvg(look: PromptLook, size = 144): string {
 	return key(bg, body + line(bottom, 128, state ? "#FFFFFF" : CAPTION, 15, state ? 700 : 500), size);
 }
 
-// ---- Session key ----
-
-export type SessionKeyLook = {
-	/** The target's title; null for no target. */
-	title: string | null;
-	/** "working: notes.md", "approval"… */
-	status: string;
-	statusColor: string;
-};
-
-/** The Session key: the target session's title, and its status in its colour. */
-export function sessionKeySvg(look: SessionKeyLook, size = 144): string {
-	if (look.title === null) return key(BG, raised(windowGlyph(CAPTION, CAPTION)) + caption("No target", CAPTION, 18), size);
-	const lines = wrap(look.title, fits(19), 3);
-	const top = lines.length === 1 ? 64 : lines.length === 2 ? 52 : 40;
-	const body = lines.map((l, i) => line(l, top + i * 25, FG, 19, 600)).join("");
-	return key(BG, body + line(look.status, 128, look.statusColor, 17, 700), size);
-}
-
 // ---- Session Slot ----
 
 /**
  * A Session Slot key's tone (session-keys.md, The key face): the state's colour fills the key, and only the states
  * that need you are amber, with a light outline, so a glance at the row finds them.
  * - `need`: a question, a plan, an approval, or needs input.
- * - `working`: blue.
+ * - `working`: blue, for Background too (agents-and-wake.md, B2).
  * - `done`, `failed`, `stopped`: a turn's end the user hasn't seen: green, red, dark red.
  * - `quiet`: a turn's end that has been seen, or idle: dark, with the bottom line dimmed.
  * - `notRunning`: darker, with dim text. `empty`: a slot with no session, darker.
@@ -248,14 +219,19 @@ export type SlotTone = "need" | "working" | "done" | "failed" | "stopped" | "qui
 /** A slot key's face, with its text already formatted (src/slots/art.ts makes it from the session). */
 export type SlotFace = {
 	tone: SlotTone;
-	/** The top line's word: `Question`, `Plan`, `Approve?`, `Needs you`, `Working`, `Done`, `No session`… */
+	/** The top line's word: `Question`, `Plan`, `Approve?`, `Needs you`, `Working`, `Background`, `Done`, `No session`… */
 	word: string;
 	/** How long the state has lasted, as `30s`, `4m`, `2h` or `3d`; null when unknown. */
 	since: string | null;
 	/** The session's title, in the middle on up to two lines; null for none. */
 	title: string | null;
-	/** The bottom line's left: the tool it's on (working) or that waits (approval); null for none. */
+	/**
+	 * The bottom line's left: what other loops are at (`review 5/9`, `3 agents`) or the tool it's on (working,
+	 * background), or the tool that waits (approval); null for none.
+	 */
 	tool: string | null;
+	/** How many characters at the end of `tool` stay whole when it's cut (clipKeep): a run's counts. */
+	keep?: number;
 	/** Context use, 0–100, as the bottom line's % over a thin bar; null when unknown. */
 	context: number | null;
 };
@@ -264,8 +240,8 @@ export type SlotFace = {
 const NEED_LINE = "#F2C94C";
 /** An interrupted turn's dark red, darker than Failed's DENY_BG. */
 const STOPPED_BG = "#5A1F1F";
-/** Context use from which the bar turns orange, as on the Sessions strip (src/sessions/strip.ts). */
-const CONTEXT_HIGH = 80;
+/** Context use from which the bar turns orange, on the slot keys and the slot strips (src/slots/strip.ts). */
+export const CONTEXT_HIGH = 80;
 
 type ToneColors = {
 	bg: string;
@@ -315,11 +291,36 @@ export function clip(text: string, max: number): string {
 	return text.replace(/\s+…$/, "…");
 }
 
-/** A line with a word on the left and a short value on the right (`Working … 4m`, `npm test … 62%`), a gap between. */
-function splitLine(left: string | null, right: string | null, y: number, fontSize: number, colors: { left: string; right: string }, weights = { left: 600, right: 700 }): string {
-	const r = right === null || right === "" ? "" : line(right, y, colors.right, fontSize, weights.right, EDGE_R, "end", ROW);
-	const room = Math.max(1, right === null || right === "" ? ROW : ROW - textWidth(right, fontSize) - 14);
-	const l = left === null || left === "" ? "" : line(clip(left, fits(fontSize, room)), y, colors.left, fontSize, weights.left, EDGE_L, "start", room);
+/**
+ * Cut to `max` characters as clip() does, but with its last `keep` characters whole, so a workflow run's label keeps
+ * its counts: `agents-and-wake 5/9` → `agents-… 5/9`. When those alone leave no room, it's cut as clip() cuts.
+ */
+export function clipKeep(text: string, max: number, keep: number): string {
+	if (text.length <= max || keep <= 0 || keep >= max - 1) return clip(text, max);
+	return `${clip(text.slice(0, -keep), max - keep)}${text.slice(-keep)}`;
+}
+
+/**
+ * A line with a word on the left and a short value on the right (`Working … 4m`, `npm test … 62%`), a gap between. The
+ * left is cut to its room, its last `keep` characters whole (clipKeep). With `shrink`, a left too long for its room
+ * takes the largest smaller size, down to `shrink`, that holds it whole, and the right goes with it: the top line's
+ * `Background` beside its since.
+ */
+function splitLine(
+	left: string | null,
+	right: string | null,
+	y: number,
+	fontSize: number,
+	colors: { left: string; right: string },
+	weights = { left: 600, right: 700 },
+	opts: { keep?: number; shrink?: number } = {},
+): string {
+	const roomAt = (size: number): number => Math.max(1, right === null || right === "" ? ROW : ROW - textWidth(right, size) - 14);
+	let size = fontSize;
+	while (left !== null && size > (opts.shrink ?? fontSize) && left.length > fits(size, roomAt(size))) size--;
+	const r = right === null || right === "" ? "" : line(right, y, colors.right, size, weights.right, EDGE_R, "end", ROW);
+	const room = roomAt(size);
+	const l = left === null || left === "" ? "" : line(clipKeep(left, fits(size, room), opts.keep ?? 0), y, colors.left, size, weights.left, EDGE_L, "start", room);
 	return l + r;
 }
 
@@ -350,15 +351,19 @@ function needOutline(): string {
 /** The empty slot's hint, at the bottom in small type. */
 const EMPTY_SLOT_HINT = "Hold to add the one on screen";
 
+/** The smallest the top line goes so that its word fits whole beside its since: `Background 30s` takes 14. */
+const TOP_LINE_MIN = 13;
+
 /**
- * A Session Slot key: the state's colour fills it; the top line has the state's word and `since`; the title sits in
- * the middle on up to two lines; the bottom line has the tool (working or approval) and the context %, over a thin
- * context bar. A slot that isn't running shows only its title, dimmed; an empty one, how to fill it.
+ * A Session Slot key: the state's colour fills it; the top line has the state's word and `since`, smaller when the
+ * word wouldn't fit whole; the title sits in the middle on up to two lines; the bottom line has what other loops are
+ * at or the tool (working, background or approval) and the context %, over a thin context bar. A slot that isn't
+ * running shows only its title, dimmed; an empty one, how to fill it.
  */
 export function slotKeySvg(face: SlotFace, size = 144): string {
 	const c = SLOT_TONES[face.tone];
 	let body = face.tone === "need" ? needOutline() : "";
-	body += splitLine(face.word, face.since, 34, 17, { left: c.word, right: c.since }, { left: 700, right: 600 });
+	body += splitLine(face.word, face.since, 34, 17, { left: c.word, right: c.since }, { left: 700, right: 600 }, { shrink: TOP_LINE_MIN });
 	if (face.tone === "empty") {
 		body += `<path d="M72 54V86M56 70H88" stroke="${DIM_FG}" stroke-width="8" stroke-linecap="round"/>`;
 		const per = fits(13);
@@ -370,7 +375,7 @@ export function slotKeySvg(face: SlotFace, size = 144): string {
 	if (face.title !== null) body += middleTitle(face.title, c.title);
 	if (face.tone === "notRunning") return key(c.bg, body, size);
 	const pct = face.context === null ? null : Math.max(0, Math.min(100, Math.round(face.context)));
-	body += splitLine(face.tool, pct === null ? null : `${pct}%`, 117, 15, { left: c.small, right: c.small });
+	body += splitLine(face.tool, pct === null ? null : `${pct}%`, 117, 15, { left: c.small, right: c.small }, undefined, { keep: face.keep });
 	if (pct !== null) body += contextBar(pct, c);
 	return key(c.bg, body, size);
 }
@@ -412,17 +417,7 @@ export function othersKeySvg(face: OthersFace, size = 144): string {
 	return key(DIM_BG, body, size);
 }
 
-// ---- the dials' images ----
-
-/** The Sessions dial's key image (its manifest state image): the rows glyph on the key background. */
-export function sessionsKeySvg(size = 144): string {
-	return key(BG, rows(FG, ACCENT), size);
-}
-
-/** The Sessions dial's encoder icon: the rows glyph without a background. */
-export function sessionsEncoderSvg(size = 72): string {
-	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 144 144">${rows(FG, ACCENT)}</svg>`;
-}
+// ---- the dial's image ----
 
 /** The Session Slot dial's encoder icon: the slot glyph without a background. Its key image is the empty slot's face. */
 export function slotEncoderSvg(size = 72): string {
@@ -431,17 +426,15 @@ export function slotEncoderSvg(size = 72): string {
 
 // ---- the action list ----
 
-export type IconKind = "sessions" | "approve" | "deny" | "prompt" | "session" | "slot" | "others";
+export type IconKind = "approve" | "deny" | "prompt" | "slot" | "others";
 
 /** The 20 px action-list icons: monochrome white on transparent, as the manifest asks. */
 export function actionIconSvg(kind: IconKind): string {
 	const white = "#FFFFFF";
 	const bodies: Record<IconKind, string> = {
-		sessions: rows(white, white, 13),
 		approve: check(white, 17),
 		deny: cross(white, 17),
 		prompt: bubble(white, 13),
-		session: windowGlyph(white, white, 13),
 		slot: slotGlyph(white, white, 13),
 		others: stackGlyph(white, 13),
 	};

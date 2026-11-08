@@ -20,7 +20,7 @@ const ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","
 const DENY_JSON = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from the Stream Deck.","interrupt":true}}}';
 
 function req(tool: string, fields: Partial<Omit<Held, "id">> = {}): Omit<Held, "id"> {
-	return { at: 1000, host: "local_a", tool, kind: "tool", summary: tool, fp: "00000000", ask: null, ...fields };
+	return { at: 1000, host: "local_a", tool, kind: "tool", summary: tool, fp: "00000000", agent: null, ...fields };
 }
 
 describe("held requests", () => {
@@ -80,6 +80,65 @@ describe("held requests", () => {
 		assert.deepEqual(result, { ok: true, did: "jump", held: q });
 		assert.deepEqual(r.sent, []);
 		assert.equal(held.size, 1);
+	});
+
+	test("a Session Slot dial answers its own session's oldest, Allow or Deny, and only the one its strip showed", () => {
+		const held = new HeldRequests();
+		const b = new FakeResponder();
+		const a1 = new FakeResponder();
+		const a2 = new FakeResponder();
+		held.hold(req("Bash", { host: "local_b" }), b);
+		const first = held.hold(req("Write"), a1);
+		const second = held.hold(req("Edit"), a2);
+		assert.deepEqual(held.answer("local_a", second.id, "allow"), { ok: false, why: "changed", held: first, detail: `the strip showed #${second.id}, but the session's oldest is #${first.id}` });
+		assert.deepEqual(held.answer("local_a", first.id, "deny"), { ok: true, held: first, remaining: 2 });
+		assert.deepEqual(held.answer("local_a", second.id, "allow"), { ok: true, held: second, remaining: 1 });
+		assert.deepEqual([a1.sent, a2.sent, b.sent], [[{ status: 200, body: DENY_JSON }], [{ status: 200, body: ALLOW_JSON }], []], "the oldest across sessions, B's, isn't touched");
+		assert.equal(held.answer("local_c", null, "allow").ok, false, "nothing held for that session");
+	});
+
+	test("a dial never answers an ask (Phase 9): Allow and Deny are refused, nothing is sent, and it stays held until released", () => {
+		const held = new HeldRequests();
+		const r = new FakeResponder();
+		for (const tool of ["AskUserQuestion", "ExitPlanMode"]) {
+			const ask = held.hold(req(tool, { kind: "ask" }), r);
+			for (const decision of ["allow", "deny"] as const) {
+				const result = held.answer("local_a", ask.id, decision);
+				assert.deepEqual(result.ok ? null : [result.why, result.held], ["ask", ask], `${tool} ${decision}`);
+			}
+			assert.deepEqual([r.sent, held.size], [[], 1], tool);
+			held.release(ask.id, "the tool's end (rule 1)");
+			assert.deepEqual(r.sent, [{ status: 200, body: "{}" }], tool);
+			r.open = true;
+			r.sent = [];
+		}
+	});
+
+	test("nothing but PROTOCOL.md's three bodies ever leaves: Allow, Deny and {}, whatever answers or releases a request", () => {
+		const held = new HeldRequests();
+		const responders: FakeResponder[] = [];
+		const hold = (tool: string, fields: Partial<Omit<Held, "id">> = {}): Held => {
+			const r = new FakeResponder();
+			responders.push(r);
+			return held.hold(req(tool, fields), r);
+		};
+		// Every way a request can go: the keys, a dial, the release rules and a client that went, on a tool and on an ask.
+		for (const decision of ["allow", "deny"] as const) {
+			held.press(hold("Bash").id, decision);
+			held.answer("local_a", hold("Bash").id, decision);
+			const ask = hold("AskUserQuestion", { kind: "ask" });
+			held.press(ask.id, decision);
+			held.answer("local_a", ask.id, decision);
+			held.release(ask.id, "rule 1");
+			const plan = hold("ExitPlanMode", { kind: "ask" });
+			held.answer("local_a", plan.id, decision);
+			held.close(plan.id);
+		}
+		held.release(hold("Bash").id, "rule 3");
+		const bodies = responders.flatMap((r) => r.sent.map((sent) => sent.body));
+		assert.deepEqual(new Set(bodies), new Set([ALLOW_JSON, DENY_JSON, "{}"]), "each of the three, and nothing else");
+		assert.equal(bodies.length, 7, "one answer per request answered or released; none for the plans, which closed");
+		assert.equal(held.size, 0);
 	});
 
 	test("an oldest whose client already went is removed, nothing is sent, and the press doesn't fall through", () => {

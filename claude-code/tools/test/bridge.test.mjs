@@ -426,7 +426,7 @@ test('bridge: a held request is released when its client closes, and the press a
   assert.ok(runLog(env).some((e) => e.kind === 'release' && e.rule === 5))
 })
 
-test("bridge: POST /control/dial answers a session's own oldest request with PROTOCOL.md's bodies, and refuses a press that isn't one with 400", async (t) => {
+test("bridge: POST /control/dial answers a session's own oldest tool request with the keys' bodies, jumps with nothing picked or on an ask, and refuses a press that isn't one with 400", async (t) => {
   const env = tempEnv(t)
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'waiting', statusUpdatedAt: 1 })
   const bridge = await startBridge(t, env)
@@ -434,51 +434,35 @@ test("bridge: POST /control/dial answers a session's own oldest request with PRO
   const hold = (tool, input, extra = {}) => request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, tool_name: tool, tool_input: input, ...extra } })
   const dial = (json) => request(bridge, env.token, { method: 'POST', path: '/control/dial', json }).answer
 
-  for (const json of [{}, { host: A.host }, { host: A.host, decision: 'yes' }, { host: A.host, plan: 'auto', picks: {} }, { host: A.host, picks: 'Blue' }]) {
+  // A question's picks and a plan's choice went with the dial's answers to them (Phase 9): a press that has them is
+  // refused, not taken as one with nothing picked.
+  for (const json of [{}, { host: A.host, decision: 'yes' }, { host: A.host, plan: 'auto' }, { host: A.host, picks: { 'Red or blue?': ['Blue'] } }, { host: A.host, decision: 'allow', shown: 3 }]) {
     const r = await dial(json)
     assert.deepEqual([r.status, r.json.ok, typeof r.json.error], [400, false, 'string'], JSON.stringify(json))
   }
   const q = hold('AskUserQuestion', ask)
   await sleep(100)
-  let r = await dial({ host: A.host, decision: 'allow' })
-  assert.deepEqual([r.status, r.json.ok, r.json.alert, r.json.error], [200, false, true, 'p1 is a question: its dial answers it with picks'])
-  r = await dial({ host: A.host, picks: { 'Red or blue?': ['Blue'] }, shown: 'p1' })
-  assert.deepEqual([r.status, r.json.ok, r.json.answered, r.json.answers], [200, true, 'answer', { 'Red or blue?': 'Blue' }])
-  assert.deepEqual((await q.answer).json, { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...ask, answers: { 'Red or blue?': 'Blue' } } } } })
-  r = await dial({ host: A.host, picks: { 'Red or blue?': ['Red'] } })
-  assert.deepEqual([r.json.alert, r.json.error], [true, 'p1, the request the dial showed, has gone (answered)'])
+  for (const json of [{ host: A.host, decision: 'allow' }, { host: A.host, shown: 'p1' }]) {
+    const r = await dial(json)
+    assert.deepEqual([r.status, r.json.ok, r.json.jumped, r.json.answered], [200, true, A.host, undefined], JSON.stringify(json))
+  }
+  assert.equal(q.settled, false, 'an ask is never answered')
+  q.abort()
+  await sleep(50)
+  const w = hold('Write', { file_path: '/s/a.txt', content: 'a' })
+  await sleep(100)
+  let r = await dial({ host: A.host })
+  assert.deepEqual([r.json.jumped, w.settled], [A.host, false], 'nothing picked: a jump')
+  r = await dial({ host: A.host, decision: 'deny', shown: 'p2' })
+  assert.deepEqual([r.status, r.json.ok, r.json.answered], [200, true, 'deny'])
+  assert.deepEqual((await w.answer).json, DENY)
+  r = await dial({ host: A.host, decision: 'allow' })
+  assert.deepEqual([r.json.alert, r.json.error], [true, 'p2, the request the dial showed, has gone (answered)'])
   const answered = runLog(env).find((e) => e.kind === 'answered')
-  assert.deepEqual([answered.id, answered.decision, answered.by, answered.answers], ['p1', 'answer', 'dial', { 'Red or blue?': 'Blue' }])
+  assert.deepEqual([answered.id, answered.decision, answered.by], ['p2', 'deny', 'dial'])
 })
 
-test("bridge: a request whose tool_input held a run of the token isn't kept for its dial, which says Answer in app; a run elsewhere in the body changes nothing", async (t) => {
-  // The bridge reads every body with the token scrubbed out, so it can't echo such an input back as it came.
-  const env = tempEnv(t)
-  writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'waiting', statusUpdatedAt: 1 })
-  const bridge = await startBridge(t, env)
-  const ask = (question) => ({ questions: [{ question, options: [{ label: 'Red' }, { label: 'Blue' }] }] })
-  const hold = (input, extra = {}) => request(bridge, env.token, { method: 'POST', path: '/v1/permission', headers: { 'x-deck-host': A.host }, json: { session_id: A.sid, tool_name: 'AskUserQuestion', tool_input: input, ...extra } })
-  const dial = (json) => request(bridge, env.token, { method: 'POST', path: '/control/dial', json }).answer
-
-  const scrubbed = hold(ask(`Is ${env.token.slice(3, 15)} it?`))
-  await sleep(100)
-  assert.deepEqual(bridge.deck.view().held[0].dial, { screen: 'answer-in-app', why: "the bridge scrubbed a run of the token out of its tool_input, so it can't echo the input back as it came" })
-  let r = await dial({ host: A.host, picks: { 'Is <token> it?': ['Red'] } })
-  assert.deepEqual([r.json.ok, r.json.jumped], [true, A.host], 'a press jumps')
-  assert.equal(scrubbed.settled, false, 'nothing sent')
-  scrubbed.abort()
-  await sleep(100)
-
-  // The token elsewhere, its transcript path say: the input goes back as it came.
-  const elsewhere = hold(ask('Red or blue?'), { transcript_path: `/Users/me/${env.token}.jsonl` })
-  await sleep(100)
-  assert.equal(bridge.deck.view().held[0].dial.screen, 'question')
-  r = await dial({ host: A.host, picks: { 'Red or blue?': ['Red'] } })
-  assert.equal(r.json.answered, 'answer')
-  assert.deepEqual((await elsewhere.answer).json.hookSpecificOutput.decision.updatedInput, { ...ask('Red or blue?'), answers: { 'Red or blue?': 'Red' } })
-})
-
-test('bridge: a body is scrubbed once it has parsed, as the deck scrubs it (PROTOCOL.md, "Transport"): numbers are left alone, an escaped token is caught, touching runs are one, and only a change inside tool_input makes an ask display-only', async (t) => {
+test('bridge: a body is scrubbed once it has parsed, as the deck scrubs it (PROTOCOL.md, "Transport"): numbers are left alone, an escaped token is caught, and touching runs are one', async (t) => {
   const env = tempEnv(t)
   // A token with a run of digits in it, so that a number can hold 8 or more of its characters.
   env.token = `${env.token}-9081726354453627`
@@ -497,8 +481,6 @@ test('bridge: a body is scrubbed once it has parsed, as the deck scrubs it (PROT
     await sleep(40)
     return h
   }
-  const ask = (question, more = {}) => ({ questions: [{ question, options: [{ label: 'Red' }, { label: 'Blue' }] }], ...more })
-  const inApp = { screen: 'answer-in-app', why: "the bridge scrubbed a run of the token out of its tool_input, so it can't echo the input back as it came" }
   const mod = { sid: A.sid, host: A.host, inst: A.inst }
 
   // A number holding a run of the token's digits is no reason to refuse a body: the events, and a seq, are taken.
@@ -506,17 +488,10 @@ test('bridge: a body is scrubbed once it has parsed, as the deck scrubs it (PROT
   let r = await request(bridge, env.token, { method: 'POST', path: '/v1/events', json: { ...mod, seq: DIGITS, events: [{ t: 'measure', context: { percent: 7, tokens: DIGITS, window: DIGITS }, at: DIGITS }] } }).answer
   assert.equal(r.status, 204)
   assert.equal(bridge.deck.view().context[A.host], 7)
-  // A request whose input holds one is held, with the mod's fp, and an ask's goes back exactly as it came.
+  // A request whose input holds one is held, with the mod's fp.
   const bash = { command: 'sleep 1', timeout: DIGITS }
   let h = await heldAs(hold('Bash', bash))
   assert.deepEqual([h.tool, h.summary, h.fp], ['Bash', 'sleep 1', fingerprint('Bash', bash)])
-  const counted = ask('Red or blue?', { metadata: { n: DIGITS } })
-  const q = hold('AskUserQuestion', counted)
-  await sleep(80)
-  assert.equal(bridge.deck.view().held.at(-1).dial.screen, 'question')
-  r = await request(bridge, env.token, { method: 'POST', path: '/control/dial', json: { host: A.host, picks: { 'Red or blue?': ['Blue'] } } }).answer
-  assert.equal(r.json.answered, 'answer')
-  assert.deepEqual((await q.answer).json.hookSpecificOutput.decision.updatedInput, { ...counted, answers: { 'Red or blue?': 'Blue' } })
 
   // The token written with \u escapes is the token once parsed, and is taken out; touching or overlapping runs are one.
   const escaped = [...env.token].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('')
@@ -531,17 +506,9 @@ test('bridge: a body is scrubbed once it has parsed, as the deck scrubs it (PROT
   h = await heldAs(raw(`{"session_id":"${A.sid}","tool_name":"Bash","tool_input":${named}}`))
   assert.equal(h.fp, fingerprint('Bash', JSON.parse(`{"__proto__":{"command":"x"},"command":"echo hi","k_<token>":1}`)))
 
-  // An ask is display-only when the scrub changed its own tool_input: a name in it at any depth, or the input itself as
-  // a string. A run outside it, in a name of the body's own or its transcript path, changes nothing.
-  const changed = [
-    ask('Red or blue?', { [`k_${run}`]: 1 }),
-    { questions: [{ question: 'Red or blue?', options: [{ label: 'Red' }, { label: 'Blue', [`k_${run}`]: 1 }] }] },
-    `Is ${run} it?`,
-  ]
-  for (const input of changed) assert.deepEqual((await heldAs(hold('AskUserQuestion', input))).dial, inApp, JSON.stringify(input))
-  for (const extra of [{ [`k_${run}`]: 1 }, { transcript_path: `/Users/me/${env.token}.jsonl` }]) {
-    assert.equal((await heldAs(hold('AskUserQuestion', ask('Red or blue?'), extra))).dial.screen, 'question', JSON.stringify(extra))
-  }
+  // An input that is a string is scrubbed as any string is.
+  h = await heldAs(hold('AskUserQuestion', `Is ${run} it?`))
+  assert.equal(h.fp, fingerprint('AskUserQuestion', 'Is <token> it?'))
 
   // What reaches a person is still scrubbed, and still JSON: a number holding a run is a string there, scrubbed.
   const state = await request(bridge, env.token, { path: '/control/state' }).answer
@@ -743,16 +710,16 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   await sleep(50)
   await events({ t: 'tool.end', tool: 'Bash', use: 'u2', fp: fingerprint('Bash', B1), ok: true })
   await answered(p2, 'p2')
-  // A question its session's dial answers, and one whose form the dial can't read, released by its tool.end.
-  const Q = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
-  const q1 = hook('/v1/permission', { tool_name: 'AskUserQuestion', tool_input: Q })
+  // A subagent's request its session's dial allows, and a question its dial only jumps from, released by its tool.end.
+  const q1 = hook('/v1/permission', { tool_name: 'Bash', tool_input: B1, agent_id: 'w1' })
   await sleep(50)
-  assert.equal((await call({ method: 'POST', path: '/control/dial', json: { host: A.host, picks: { 'Red or blue?': ['Blue'] } } })).json.answered, 'answer')
+  assert.equal((await call({ method: 'POST', path: '/control/dial', json: { host: A.host, decision: 'allow' } })).json.answered, 'allow')
   await answered(q1, 'q1')
-  const UNREAD = { questions: [] }
-  const q2 = hook('/v1/permission', { tool_name: 'AskUserQuestion', tool_input: UNREAD })
+  const Q = { questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
+  const q2 = hook('/v1/permission', { tool_name: 'AskUserQuestion', tool_input: Q })
   await sleep(50)
-  await events({ t: 'tool.end', tool: 'AskUserQuestion', use: 'u3', fp: fingerprint('AskUserQuestion', UNREAD), ok: true })
+  assert.equal((await call({ method: 'POST', path: '/control/dial', json: { host: A.host } })).json.jumped, A.host)
+  await events({ t: 'tool.end', tool: 'AskUserQuestion', use: 'u3', fp: fingerprint('AskUserQuestion', Q), ok: true })
   await answered(q2, 'q2')
   // A prompt: delivered to the open poll; a request from a `claude` started inside the session; a result from an inst
   // that never said hello.
@@ -826,10 +793,10 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   assert.ok(log.some((e) => e.kind === 'fp-check' && e.match === true && e.bridgeFp === e.modFp && e.bridgeSummary === 'a.txt'))
   assert.ok(log.some((e) => e.kind === 'release' && e.rule === 1 && typeof e.why === 'string'))
   assert.ok(log.some((e) => e.kind === 'answered' && e.decision === 'allow' && e.by === 'press'))
-  // What each held request's dial shows, and an answer from a dial, with its answers.
+  // Each held request's kind and loop, and an answer from a dial.
   const heldLines = log.filter((e) => e.kind === 'held')
-  assert.deepEqual(heldLines.map((e) => [e.tool, e.dial]), [['Write', 'approval'], ['Bash', 'approval'], ['AskUserQuestion', 'question'], ['AskUserQuestion', 'answer-in-app']])
-  assert.ok(log.some((e) => e.kind === 'answered' && e.by === 'dial' && e.decision === 'answer' && e.id === heldLines[2].id && e.answers?.['Red or blue?'] === 'Blue'))
+  assert.deepEqual(heldLines.map((e) => [e.tool, e.requestKind, e.agent]), [['Write', 'tool', null], ['Bash', 'tool', null], ['Bash', 'tool', 'w1'], ['AskUserQuestion', 'ask', null]])
+  assert.ok(log.some((e) => e.kind === 'answered' && e.by === 'dial' && e.decision === 'allow' && e.id === heldLines[2].id))
   assert.ok(log.some((e) => e.kind === 'unconfirmed' && e.route === 'permission' && e.sid === 'sid-child' && e.host === A.host))
   assert.ok(log.some((e) => e.kind === 'client-gone' && e.route === 'permission' && e.sid === 'sid-gone' && e.host === A.host && typeof e.why === 'string'))
   assert.ok(log.some((e) => e.kind === 'poll-hello-first' && e.host === A.host && e.inst === 'ia2' && Number.isInteger(e.poll)))
@@ -842,7 +809,9 @@ test('bridge: stdout gets a line for each hello, held request, release, press, c
   const said = lines.join('\n')
   const want = [
     [/ hello local_a inst ia \(plugin 0\.2\.0, cc 2\.1\.309, m\)/, 'hello'],
-    [/ p1 HELD tool local_a Write: a\.txt fp [0-9a-f]{8}/, 'a held request'],
+    [/ p1 HELD tool local_a Write: a\.txt fp [0-9a-f]{8}\n/, 'a held request'],
+    [/ p3 HELD tool local_a Bash: make fp [0-9a-f]{8} agent w1\n/, "a subagent's held request"],
+    [/ press dial local_a: jumps to local_a/, 'a jump from a dial'],
     [/ p2 released with \{\}: tool\.end with the same fp \(rule 1\)/, 'a release'],
     [/ press approve: allow p1/, 'a press'],
     [new RegExp(` ${press.json.cmd} queued for local_a: prompt "List the files\\."`), 'a command'],
@@ -863,7 +832,7 @@ test('bridge: the control routes check the Host before the token too, and the st
   await request(bridge, env.token, { method: 'POST', path: '/v1/hello', json: { v: 1, sid: A.sid, host: A.host, inst: A.inst, cwd: '/s', model: 'm', plugin: '0.1.0', cc: '2.1.309' } }).answer
   r = await request(bridge, env.token, { path: '/control/state' }).answer
   assert.deepEqual(Object.keys(r.json).toSorted(), ['commands', 'deck', 'dials', 'dirs', 'lastPress', 'recent', 'records', 'registry', 'runDir', 'sessions', 'taken', 'url', 'v'])
-  assert.deepEqual(Object.keys(r.json.deck).toSorted(), ['alert', 'cmds', 'context', 'doing', 'held', 'jumped', 'sessions', 'settings', 'status', 'target'])
+  assert.deepEqual(Object.keys(r.json.deck).toSorted(), ['alert', 'cmds', 'context', 'doing', 'held', 'jumped', 'sessions', 'settings', 'status', 'target', 'threads'])
   assert.deepEqual([r.json.sessions[A.host].inst, r.json.sessions[A.host].insts, r.json.taken, r.json.runDir, r.json.dirs], [A.inst, [A.inst], 1, env.runDir, { registry: env.registryDir, records: env.recordsDir }])
   await request(bridge, env.token, { method: 'POST', path: '/control/reset' }).answer
   r = await request(bridge, env.token, { path: '/control/taken' }).answer
@@ -953,44 +922,28 @@ test('bridge: the scrubber takes the token and every run of 8 or more of it, as 
   assert.equal(scrubber('')('as it is'), 'as it is')
 })
 
-test("bridge: scrubBody takes the token out of every string and name of a parsed body, as the deck's scrubJson does, and says whether it changed the body's own tool_input", () => {
+test("bridge: scrubBody takes the token out of every string and name of a parsed body, as the deck's scrubJson does", () => {
   const token = 'tok-0123456789abcdef'
   const scrub = secretScrubber(token)
   const run = token.slice(2, 12)
   const of = (text) => scrubBody(JSON.parse(text), scrub)
   // Strings at any depth, and names, in their order; numbers, booleans and null as they are.
   let r = of(JSON.stringify({ a: [`x ${token}`, { [`k_${run}`]: run, n: 1234567890123, b: true, z: null }], c: 'plain' }))
-  assert.equal(JSON.stringify(r.body), '{"a":["x <token>",{"k_<token>":"<token>","n":1234567890123,"b":true,"z":null}],"c":"plain"}')
-  assert.equal(r.inputScrubbed, false, 'no tool_input')
+  assert.equal(JSON.stringify(r), '{"a":["x <token>",{"k_<token>":"<token>","n":1234567890123,"b":true,"z":null}],"c":"plain"}')
   // A renamed name is defined as JSON.parse defines it: a "__proto__" beside it stays an ordinary key, in its place.
   r = of(`{"tool_input": {"__proto__": {"x": 1}, "k_${run}": 2, "last": 3}}`)
-  assert.deepEqual(Object.keys(r.body.tool_input), ['__proto__', 'k_<token>', 'last'])
-  assert.equal(Object.getPrototypeOf(r.body.tool_input), Object.prototype)
-  assert.deepEqual(r.body.tool_input.__proto__, { x: 1 })
+  assert.deepEqual(Object.keys(r.tool_input), ['__proto__', 'k_<token>', 'last'])
+  assert.equal(Object.getPrototypeOf(r.tool_input), Object.prototype)
+  assert.deepEqual(r.tool_input.__proto__, { x: 1 })
   // Of two names that scrub alike, the later value wins, in the earlier's place.
   r = of(`{"k_${run}": 1, "m": 2, "k_${token.slice(4, 14)}": 3}`)
-  assert.equal(JSON.stringify(r.body), '{"k_<token>":3,"m":2}')
-  // What counts as changing the body's own tool_input: a value or a name in it at any depth, or the input as a string.
-  const cases = [
-    [{ tool_input: { command: `echo ${run}` } }, true],
-    [{ tool_input: { questions: [{ options: [{ label: `L ${run}` }] }] } }, true],
-    [{ tool_input: { questions: [{ [`k_${run}`]: 1 }] } }, true],
-    [{ tool_input: { [`k_${run}`]: 1 } }, true],
-    [{ tool_input: [`x ${run}`] }, true],
-    [{ tool_input: `Is ${run} it?` }, true],
-    [{ tool_input: { n: Number('1234567890') } }, false],
-    [{ tool_input: { command: 'echo hi' }, transcript_path: `/Users/me/${token}.jsonl` }, false],
-    [{ tool_input: { command: 'echo hi' }, [`k_${run}`]: 1 }, false],
-    [{ nested: { tool_input: `Is ${run} it?` }, tool_input: {} }, false],
-  ]
-  for (const [body, flagged] of cases) assert.equal(of(JSON.stringify(body)).inputScrubbed, flagged, JSON.stringify(body))
+  assert.equal(JSON.stringify(r), '{"k_<token>":3,"m":2}')
   // A string body, and nesting too deep for a walk by recursion.
-  assert.deepEqual(scrubBody(`a ${token}`, scrub), { body: 'a <token>', inputScrubbed: false })
+  assert.equal(scrubBody(`a ${token}`, scrub), 'a <token>')
   const deep = JSON.parse(`{"tool_input":${'['.repeat(100_000)}"${run}"${']'.repeat(100_000)}}`)
-  r = scrubBody(deep, scrub)
-  let bottom = r.body.tool_input
+  let bottom = scrubBody(deep, scrub).tool_input
   while (Array.isArray(bottom)) bottom = bottom[0]
-  assert.deepEqual([bottom, r.inputScrubbed], ['<token>', true])
+  assert.equal(bottom, '<token>')
 })
 
 test('bridge: a reset cuts the open poll off with no answer, so the live mod\'s fetch fails and it says hello again; its next poll is held and takes the next command', async (t) => {

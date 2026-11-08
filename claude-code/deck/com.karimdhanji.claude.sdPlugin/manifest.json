@@ -2,9 +2,9 @@
 	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 	"UUID": "com.karimdhanji.claude",
 	"Name": "Claude Code",
-	"Version": "0.5.0.0",
+	"Version": "0.6.0.0",
 	"Author": "Karim Dhanji",
-	"Description": "Live status for Claude Code desktop sessions, with a key and a dial for each session, answers to questions, plans and approvals, and saved prompts.",
+	"Description": "Live status for Claude Code desktop sessions, with a key and a dial for each session, approvals and saved prompts.",
 	"Category": "Claude Code",
 	"CategoryIcon": "imgs/plugin/category-icon",
 	"Icon": "imgs/plugin/icon",
@@ -23,31 +23,6 @@
 		"Version": "24"
 	},
 	"Actions": [
-		{
-			"UUID": "com.karimdhanji.claude.sessions",
-			"Name": "Sessions",
-			"Tooltip": "Turn to scroll through the running Claude Code sessions: status, context, model and effort. Press or tap to jump to one and make it the target.",
-			"Icon": "imgs/actions/sessions/icon",
-			"Controllers": [
-				"Encoder"
-			],
-			"UserTitleEnabled": false,
-			"States": [
-				{
-					"Image": "imgs/actions/sessions/key"
-				}
-			],
-			"Encoder": {
-				"layout": "layouts/sessions.json",
-				"Icon": "imgs/actions/sessions/encoder",
-				"TriggerDescription": {
-					"Rotate": "Scroll sessions",
-					"Push": "Jump and target",
-					"Touch": "Jump and target",
-					"LongTouch": "Nothing"
-				}
-			}
-		},
 		{
 			"UUID": "com.karimdhanji.claude.approve",
 			"Name": "Approve",
@@ -98,24 +73,9 @@
 			]
 		},
 		{
-			"UUID": "com.karimdhanji.claude.session",
-			"Name": "Session",
-			"Tooltip": "The target session's title and status. Press to jump to it.",
-			"Icon": "imgs/actions/session/icon",
-			"Controllers": [
-				"Keypad"
-			],
-			"UserTitleEnabled": false,
-			"States": [
-				{
-					"Image": "imgs/actions/session/key"
-				}
-			]
-		},
-		{
 			"UUID": "com.karimdhanji.claude.slot",
 			"Name": "Session Slot",
-			"Tooltip": "One session per key: its state, title, context and what it's doing. Press to jump to it; hold to put the session on screen in the app on this key. On a dial, the session on the key above: turn to page or pick, press or tap to jump or send.",
+			"Tooltip": "One session per key: its state, title, context and what it's doing. Press to jump to it; hold to put the session on screen in the app on this key. On a dial, the session on the key above: turn to page or pick Allow or Deny, press or tap to jump or send. Questions and plans are answered in the app.",
 			"Icon": "imgs/actions/slot/icon",
 			"Controllers": [
 				"Keypad",
@@ -132,10 +92,10 @@
 				"layout": "layouts/slot-empty.json",
 				"Icon": "imgs/actions/slot/encoder",
 				"TriggerDescription": {
-					"Rotate": "Page details or pick an answer",
-					"Push": "Jump, or send the answer",
-					"Touch": "Jump, or send the answer",
-					"LongTouch": "Back a step"
+					"Rotate": "Page details, or pick Allow or Deny",
+					"Push": "Jump, or send Allow or Deny",
+					"Touch": "Jump, or send Allow or Deny",
+					"LongTouch": "Start over"
 				}
 			}
 		},
