@@ -360,6 +360,38 @@ test('bridge: status rule 6 is the app\'s own needs-input indicator, read from e
   assert.deepEqual(hosts.map((h) => [h, status[h]]), cases.map(([, want], i) => [hosts[i], want]))
 })
 
+test('bridge: task cards and threads, as the deck reads them (PROTOCOL.md\'s 2026-11-08 amendment: rules 2, 6 and 9)', async (t) => {
+  const env = tempEnv(t)
+  const last = { postTurnSummaryFor: 'msg-9', lastAssistantUuid: 'msg-9' }
+  const blocked = { ...last, postTurnSummary: { status_category: 'blocked' }, turnWrapUp: { description: 'Two threads planned.' } }
+  const card = (fields = {}) => ({ id: 'task_1', title: 'Doc 40 T1', createdAt: 1, ...fields })
+  const thread = (parent, fields = {}) => ({ spawnedFrom: { sessionId: parent, taskId: 'task_1', sideSession: true, ...fields } })
+  const cases = [
+    // [host, registry status, record, status]
+    ['local_cards', 'idle', { ...blocked, backgroundTaskSuggestions: [card()] }, 'needs-you'],
+    ['local_suggestion', 'idle', { ...last, postTurnSummary: { status_category: 'completed' }, turnWrapUp: { description: 'Done.' }, backgroundTaskSuggestions: [card()] }, 'idle'],
+    ['local_started', 'idle', blocked, 'idle'],
+    ['local_accepted', 'idle', { ...blocked, backgroundTaskSuggestions: [card({ offer: true, accepted: true })] }, 'idle'],
+    ['local_offer', 'busy', { backgroundTaskSuggestions: [card({ offer: true })] }, 'needs-you'],
+    // The parent with two threads, one working: background. A thread's own side chat, a detached one, an archived one
+    // and an idle one don't count.
+    ['local_parent', 'idle', {}, 'background'],
+    ['local_t1', 'busy', thread('local_parent'), 'working'],
+    ['local_t2', 'idle', thread('local_parent'), 'idle'],
+    ['local_alone', 'idle', {}, 'idle'],
+    ['local_btw', 'busy', thread('local_alone', { btw: true, userFork: true }), 'working'],
+    ['local_detached', 'busy', { ...thread('local_alone'), lineageDetached: true }, 'working'],
+    ['local_archived', 'busy', { ...thread('local_alone'), isArchived: true }, 'working'],
+  ]
+  cases.forEach(([host, status, record], i) => {
+    writeRegistry(env, 200 + i, { sessionId: `sid-c${i}`, hostSessionId: host, status, statusUpdatedAt: 1 })
+    writeRecord(env, host, record)
+  })
+  const bridge = await startBridge(t, env)
+  const status = bridge.deck.view().status
+  assert.deepEqual(cases.map(([host]) => [host, status[host]]), cases.map(([host, , , want]) => [host, want]))
+})
+
 test('bridge: a long poll waits, answers when a command is queued, and needs a session', async (t) => {
   const env = tempEnv(t)
   writeRegistry(env, A.pid, { sessionId: A.sid, hostSessionId: A.host, status: 'idle', statusUpdatedAt: Date.now() })

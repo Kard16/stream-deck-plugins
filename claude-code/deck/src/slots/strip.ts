@@ -1,5 +1,5 @@
 import { CONTEXT_HIGH, clip, clipKeep, fits, wrap } from "../keys/art.js";
-import { agentPages, agentsHead, costText, ENDED_COLOR, type Label, modeName, modelAndEffort, sinceText, STATUS_COLORS, threadsLabel, tokensText } from "../model/format.js";
+import { agentPages, agentsHead, costText, ENDED_COLOR, type Label, modeName, modelAndEffort, sinceText, STATUS_COLORS, tokensText, workLabel } from "../model/format.js";
 import type { SessionView } from "../model/sessions.js";
 import { EXIT_PLAN } from "../protocol/wire.js";
 import type { Feedback } from "../util/painter.js";
@@ -151,8 +151,8 @@ const NOW_NEED: Record<NonNullable<SessionView["need"]>, string> = {
 
 /**
  * The Now page's first line: what the session is doing, or how its last turn ended, and when. Working and background
- * say what other loops are at as the key does, `Background: review 5/9`, `Working: 3 agents`; else working says the
- * tool it's on (agents-and-wake.md, B2).
+ * say what other work is at as the key does, `Background: review 5/9`, `Working: 3 agents`, `Background: 2 threads`;
+ * else working says the tool it's on (agents-and-wake.md, B2; PROTOCOL.md's 2026-11-08 amendment).
  */
 export function nowLine(s: SessionView, now: number): { value: string; color: string } {
 	const since = sinceText(s.since, now);
@@ -163,7 +163,7 @@ export function nowLine(s: SessionView, now: number): { value: string; color: st
 		case "working":
 		case "background": {
 			const word = s.status === "working" ? "Working" : "Background";
-			const loops = threadsLabel(s.threads);
+			const loops = workLabel(s.threads, s.sideSessions);
 			const color = STATUS_COLORS[s.status];
 			if (loops !== null) return { value: withLabel(`${word}: `, loops, SLOT_TEXT.pages.line1), color };
 			if (s.status === "working" && s.doing) return { value: `Working: ${s.doing}`, color };
@@ -209,9 +209,10 @@ function modeLine(s: SessionView): Text {
  * each, then
  * 1. Now: what it's doing or how its last turn ended; then what the app says it needs, while it needs input, else the
  *    last summary, on up to two lines;
- * 2. Agents, while other loops are in a turn, up to three pages (format.ts's agentPages): the run they follow as
- *    `review · 5/9 done` or `review · 5/9, 1 failed`, or `3 agents running`, in the accent colour (agentsHead), then two
- *    running agents (agents-and-wake.md, B2);
+ * 2. Agents, while other loops are in a turn or threads are unfinished, up to three pages (format.ts's agentPages): the
+ *    run they follow as `review · 5/9 done` or `review · 5/9, 1 failed`, or `3 agents running`, or `2 threads`, in the
+ *    accent colour (agentsHead), then two running agents or threads a page (agents-and-wake.md, B2; PROTOCOL.md's
+ *    2026-11-08 amendment);
  * 3. Context: `Context 62%` with its bar, `620k of 1M tokens`, `Cost $1.24`;
  * 4. Setup: model and effort; mode, and the Claude Code version when the session's hello gave one (modeLine); project.
  * `page` counts every page the session has now, the Agents pages included, as the dial does.
@@ -226,13 +227,13 @@ function pagesStrip(s: SessionView, page: number, pages: number, now: number): F
 		name: text("pages", "name", s.title, { color: s.running ? c.title : c.dim }),
 		dots: text("pages", "dots", pageDots(page, pages), { font: { size: dotsSize(pages), weight: DOTS_WEIGHT } }),
 	};
-	const agents = agentPages(s.threads);
+	const agents = agentPages(s.threads, s.sideSessions);
 	const shown = agents[page - 1];
-	if (s.threads !== null && shown !== undefined) {
+	if (shown !== undefined) {
 		const [l2 = "", l3 = ""] = shown;
 		return {
 			...head,
-			line1: text("pages", "line1", withLabel("", agentsHead(s.threads), SLOT_TEXT.pages.line1), { color: c.accent }),
+			line1: text("pages", "line1", withLabel("", agentsHead(s.threads, s.sideSessions), SLOT_TEXT.pages.line1), { color: c.accent }),
 			line2: text("pages", "line2", l2, { color: c.caption }),
 			line3: text("pages", "line3", l3),
 			bar: contextBar(pct, false),

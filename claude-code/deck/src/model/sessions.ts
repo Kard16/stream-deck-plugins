@@ -32,7 +32,7 @@ import { describeError, type Log, nullLog, quote } from "../util/log.js";
 import { QuietLog } from "../util/quiet-log.js";
 import { activeRun, projectName, runLabel } from "./format.js";
 import { type FrontCheck, FrontWatcher } from "./front.js";
-import { type SessionState, type SessionStatus, sessionState } from "./status.js";
+import { type SessionState, type SessionStatus, sessionState, UNFINISHED } from "./status.js";
 import { asVersion, type VersionCheck } from "./versions.js";
 
 /**
@@ -42,6 +42,19 @@ import { asVersion, type VersionCheck } from "./versions.js";
  * several held it can differ from the status, which puts a `tool` request first.
  */
 export type Need = "approval" | "question" | "plan" | "input";
+
+/**
+ * One of a session's unfinished threads (PROTOCOL.md's 2026-11-08 amendment): a session it started, which the app's
+ * record of that session links to it (AppRecord's `parent`), listed and not archived, whose status is UNFINISHED.
+ */
+export type SideView = {
+	key: string;
+	title: string;
+	status: SessionStatus;
+	need: Need | null;
+	/** The registry's `startedAt`. */
+	startedAt: number | null;
+};
 
 /** One session as the deck shows it. */
 export type SessionView = {
@@ -60,6 +73,11 @@ export type SessionView = {
 	 * one, and from a new instance's hello until it sends one (PROTOCOL.md, Events: threads).
 	 */
 	threads: Threads | null;
+	/**
+	 * Its unfinished threads, the sessions it started (SideView), the oldest started first; none for a session that isn't
+	 * running. While it has any and would read done or idle, it reads background (status rule 9).
+	 */
+	sideSessions: readonly SideView[];
 	/** Context use, %, from the mod's latest `measure`. */
 	context: number | null;
 	model: string | null;
@@ -314,6 +332,8 @@ export class SessionModel implements BridgeRoutes {
 	readonly #firstReadings = new Map<string, number>();
 	/** Each listed session's status when the model last changed, by key, for the log. */
 	#statuses = new Map<string, SessionStatus>();
+	/** Each listed session's unfinished threads with their statuses when the model last changed, by key, for the log. */
+	#sides = new Map<string, string>();
 	#records = new Map<string, AppRecord>();
 	/** The hosts the latest records scan looked for and found no file for (RecordsReader's `missing`). */
 	#missing: ReadonlySet<string> = new Set();
@@ -1242,13 +1262,37 @@ export class SessionModel implements BridgeRoutes {
 	/** The listed sessions' views as the model stands, built now if the latest change dropped them (#views). */
 	#built(): { list: SessionView[]; byKey: Map<string, SessionView> } {
 		if (this.#views === null) {
-			const list: SessionView[] = this.#ordered.map((s) => Object.freeze(this.#view(s)));
+			// A thread's view is built before the view of the session that started it, which its status changes (rule 9).
+			// The path stops a loop of parents, which the app never makes, from going round.
+			const threadsOf = new Map<string, RegistrySession[]>();
+			for (const s of this.#ordered) {
+				const host = asHost(s.hostSessionId);
+				const parent = host === null ? null : (this.#records.get(host)?.parent ?? null);
+				if (parent !== null && parent !== host) threadsOf.set(parent, [...(threadsOf.get(parent) ?? []), s]);
+			}
+			const built = new Map<string, SessionView>();
+			const build = (s: RegistrySession, path: ReadonlySet<string>): SessionView => {
+				const key = keyOf(s);
+				const done = built.get(key);
+				if (done) return done;
+				const inner = new Set([...path, key]);
+				const sides = (threadsOf.get(key) ?? [])
+					.filter((t) => !inner.has(keyOf(t)))
+					.map((t) => build(t, inner))
+					.filter((t) => !t.archived && UNFINISHED.has(t.status))
+					.map((t): SideView => Object.freeze({ key: t.key, title: t.title, status: t.status, need: t.need, startedAt: t.startedAt }))
+					.sort((a, b) => (a.startedAt ?? Infinity) - (b.startedAt ?? Infinity));
+				const view = Object.freeze(this.#view(s, Object.freeze(sides)));
+				built.set(key, view);
+				return view;
+			};
+			const list: SessionView[] = this.#ordered.map((s) => build(s, new Set()));
 			this.#views = { list, byKey: new Map(list.map((v) => [v.key, v])) };
 		}
 		return this.#views;
 	}
 
-	#view(s: RegistrySession): SessionView {
+	#view(s: RegistrySession, sides: readonly SideView[]): SessionView {
 		countIdle("view");
 		const host = asHost(s.hostSessionId);
 		const b = host === null ? undefined : this.#bridge.get(host);
@@ -1264,8 +1308,11 @@ export class SessionModel implements BridgeRoutes {
 			turn: b?.turn ?? null,
 			recordCategory: rec?.turnCategory ?? null,
 			running: b?.threads?.latest.running ?? 0,
+			offer: (rec?.offer ?? null) !== null,
+			sides: sides.length,
 		});
 		const oldest = held[0] ?? null;
+		const offer = state.from === "offer" ? (rec?.offer ?? null) : null;
 		return {
 			key: keyOf(s),
 			host,
@@ -1274,6 +1321,7 @@ export class SessionModel implements BridgeRoutes {
 			status: state.status,
 			doing: b?.tools.at(-1)?.summary ?? null,
 			threads: b?.threads?.latest ?? null,
+			sideSessions: sides,
 			context: b?.context ?? null,
 			model: b?.settings.model ?? rec?.model ?? null,
 			effort: b?.settings.effort ?? rec?.effort ?? null,
@@ -1284,13 +1332,14 @@ export class SessionModel implements BridgeRoutes {
 			listed: true,
 			running: true,
 			need: needOf(state, oldest),
-			since: since(state, s.statusUpdatedAt ?? firstReadingAt, b?.turn ?? null, oldest, b?.threads ?? null),
+			since: since(state, s.statusUpdatedAt ?? firstReadingAt, b?.turn ?? null, oldest, b?.threads ?? null, { offerAt: offer?.at ?? null, sidesSince: sides[0]?.startedAt ?? null }),
 			seen: this.#seen(state, host, b, rec),
 			tokens: b?.tokens ?? null,
 			window: b?.window ?? null,
 			cost: b?.cost ?? null,
 			summary: rec?.summary ?? null,
-			needs: rec?.needs ?? null,
+			// An offer asks to start a session now; what the last turn's summary asked is older.
+			needs: offer === null ? (rec?.needs ?? null) : `Start “${offer.title ?? "a new session"}”?`,
 			project: projectName(s.cwd ?? b?.cwd ?? rec?.cwd),
 			startedAt: s.startedAt,
 			archived: rec?.isArchived ?? false,
@@ -1383,12 +1432,18 @@ export class SessionModel implements BridgeRoutes {
 	/** Each listed session's status when it changes, at debug, so a hardware test can time it from the log. */
 	#logStatuses(views: readonly SessionView[]): void {
 		const statuses = new Map<string, SessionStatus>();
-		for (const { key, status } of views) {
+		const sides = new Map<string, string>();
+		for (const { key, status, sideSessions } of views) {
 			const was = this.#statuses.get(key);
 			if (status !== was) this.#log.debug(`STATUS ${key} ${was === undefined ? "" : `${was} `}→ ${status}`);
 			statuses.set(key, status);
+			// Its unfinished threads, when they change: which, each with its status (status rule 9).
+			const now = sideSessions.map((t) => `${t.key} ${t.status}`).join(", ");
+			if (now !== (this.#sides.get(key) ?? "")) this.#log.info(`SIDES ${key}: ${now === "" ? "no unfinished threads" : `${sideSessions.length} unfinished: ${now}`}`);
+			if (now !== "") sides.set(key, now);
 		}
 		this.#statuses = statuses;
+		this.#sides = sides;
 	}
 
 	#emit(): void {
@@ -1429,6 +1484,7 @@ function notRunning(key: string, title: string): SessionView {
 		status: "idle",
 		doing: null,
 		threads: null,
+		sideSessions: [],
 		context: null,
 		model: null,
 		effort: null,
@@ -1478,13 +1534,25 @@ function workEndedAt(turn: Turn, threads: { runningEndedAt: number | null } | nu
  * registry's `registryAt` (its `statusUpdatedAt`, else the deck's first reading of that status); the `turn.start`
  * the deck got; or the work's end (workEndedAt). For the app's needs-input sign, the turn's end when the deck saw one,
  * else the registry's idle. For background, the later of the main loop's last turn end and `runningSince`, when other
- * loops' `running` last went above 0 (PROTOCOL.md, status rule 3).
+ * loops' `running` last went above 0 (PROTOCOL.md, status rule 3). For an offer, when its card was made; for
+ * unfinished threads, the later of the main loop's last turn end and the oldest thread's start, `sidesSince`.
  */
-function since(state: SessionState, registryAt: number | null, turn: Turn | null, oldest: Held | null, threads: { runningSince: number | null; runningEndedAt: number | null } | null): number | null {
+function since(
+	state: SessionState,
+	registryAt: number | null,
+	turn: Turn | null,
+	oldest: Held | null,
+	threads: { runningSince: number | null; runningEndedAt: number | null } | null,
+	app: { offerAt: number | null; sidesSince: number | null },
+): number | null {
 	switch (state.from) {
 		case "held-tool":
 		case "held-ask":
 			return oldest?.at ?? null;
+		case "offer":
+			return app.offerAt ?? registryAt;
+		case "sides":
+			return latest(turn ? endedAt(turn) : null, app.sidesSince) ?? registryAt;
 		case "background":
 			return latest(turn ? endedAt(turn) : null, threads?.runningSince ?? null);
 		case "waiting":

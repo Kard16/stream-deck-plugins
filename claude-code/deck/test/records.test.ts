@@ -88,6 +88,9 @@ describe("app records (claude-code-sessions/<account>/<org>/<host>.json), agains
 			cwd: "/Users/me/sandbox",
 			summary: "replied ok",
 			needs: null,
+			// 2026-11-08: no thread of another session's, and no offer card waiting.
+			parent: null,
+			offer: null,
 		});
 		assert.equal(records.get(B)?.turnCategory, "review_ready");
 		assert.equal(records.get(C)?.turnCategory, "blocked");
@@ -311,6 +314,79 @@ describe("status rule 6, the app's own needs-input indicator (its _D, Dw and jM)
 		assert.deepEqual(read({ postTurnSummary: { status_category: "review_ready", needs_action: "Review it." }, ...forLast }), { category: "review_ready", status: "idle" });
 		assert.deepEqual(read({ postTurnSummary: { status_category: "completed", needs_action: "Merge it?" }, ...forLast }), { category: "completed", status: "idle" });
 		assert.deepEqual(read({ postTurnSummary: { needs_action: "Merge it?" }, ...forLast }), { category: null, status: "idle" });
+	});
+});
+
+describe("session cards waiting for the user (backgroundTaskSuggestions; PROTOCOL.md's 2026-11-08 amendment)", () => {
+	const forLast = { postTurnSummaryFor: LAST, lastAssistantUuid: LAST };
+	/** A "New task" card as app 4.23118.0 writes one, values made up. */
+	const card = (fields: Record<string, unknown> = {}) => ({ id: "task_f25ae22d", title: "Doc 40 T1: the lamp behind the film", prompt: "…", createdAt: 1_794_181_660_000, expiresAt: 1_794_786_460_000, ...fields });
+	/** "Site lighting effects improvement" at 17:47 on 11-08: blocked on the user's start, a wrap-up that asks nothing. */
+	const waiting = {
+		...forLast,
+		postTurnSummary: { status_category: "blocked", status_detail: "two lighting threads drafted; awaiting your start", needs_action: 'click "Start both" to start the two lighting threads (T1 lamp, T2 safelight)' },
+		turnWrapUp: { description: "Your four picks are recorded, and the round's plan is written for two threads." },
+	};
+	const read = (fields: Record<string, unknown>) => {
+		const r = parseRecord(A, JSON.stringify(fields));
+		const category = r?.turnCategory ?? null;
+		return { category, status: sessionStatus({ heldTool: 0, heldAsk: 0, registry: "idle", statusUpdatedAt: null, firstReadingAt: null, turn: null, recordCategory: category, running: 0 }), needs: r?.needs ?? null };
+	};
+
+	test("while cards wait, a blocked summary stands though the wrap-up asks nothing: needs you, with the summary's ask", () => {
+		const cards = [card(), card({ id: "task_cb775eaf", title: "Doc 40 T2: the safelight" })];
+		assert.deepEqual(read({ ...waiting, backgroundTaskSuggestions: cards }), { category: "blocked", status: "needs-you", needs: waiting.postTurnSummary.needs_action });
+		assert.equal(read({ ...waiting, postTurnSummary: { ...waiting.postTurnSummary, status_category: "need_input" }, backgroundTaskSuggestions: cards }).status, "needs-you");
+		// Once the user started them, the app moves them to resolvedBackgroundTaskSuggestions: ready for review, as the app shows it.
+		assert.deepEqual(read({ ...waiting, resolvedBackgroundTaskSuggestions: { task_f25ae22d: "started_notified" } }).status, "idle");
+		assert.equal(read({ ...waiting, backgroundTaskSuggestions: [] }).category, "review_ready");
+	});
+
+	test("a card after a finished turn is a suggestion: it changes nothing", () => {
+		// "Claude plugin session dashboard revision", pending since 11-05.
+		const done = { ...forLast, postTurnSummary: { status_category: "completed", status_detail: "Phase 8 handover docs written", needs_action: "" }, turnWrapUp: { description: "Phase 8's spec and kickoff are written." } };
+		assert.deepEqual(read({ ...done, backgroundTaskSuggestions: [card({ tldr: "ultracode", useWorktree: false })] }), { category: "completed", status: "idle", needs: null });
+	});
+
+	test("only an object with a string id is a card, and an accepted offer waits on its brief, not the user", () => {
+		for (const cards of [[{ title: "no id" }], [{ id: 7 }], ["task_1"], [null], { id: "task_1" }, "task_1"]) {
+			assert.equal(read({ ...waiting, backgroundTaskSuggestions: cards }).category, "review_ready", JSON.stringify(cards));
+		}
+		assert.equal(read({ ...waiting, backgroundTaskSuggestions: [card({ offer: true, accepted: true })] }).category, "review_ready");
+		assert.equal(read({ ...waiting, backgroundTaskSuggestions: [card({ offer: true, accepted: false })] }).category, "blocked");
+	});
+
+	test("an offer card waiting: its title and when it was made, the oldest of several; none for a plain card or an accepted offer", () => {
+		const offer = (fields: Record<string, unknown> = {}) => parseRecord(A, JSON.stringify({ ...forLast, backgroundTaskSuggestions: [card(fields)] }))?.offer ?? null;
+		assert.deepEqual(offer({ offer: true }), { at: 1_794_181_660_000, title: "Doc 40 T1: the lamp behind the film" });
+		assert.deepEqual(offer({ offer: true, createdAt: "soon", title: "" }), { at: null, title: null });
+		assert.equal(offer(), null, "a New task card holds no turn");
+		assert.equal(offer({ offer: true, accepted: true }), null);
+		const two = parseRecord(A, JSON.stringify({ backgroundTaskSuggestions: [card({ offer: true, createdAt: 9, title: "later" }), card({ id: "task_2", offer: true, createdAt: 3, title: "first" })] }));
+		assert.deepEqual(two?.offer, { at: 3, title: "first" });
+	});
+});
+
+describe("a session's threads: the sessions it started (spawnedFrom; PROTOCOL.md's 2026-11-08 amendment)", () => {
+	const PARENT = "local_77373387-63ea-4603-9343-633803cfd1d3";
+	const parentOf = (fields: Record<string, unknown>) => parseRecord(A, JSON.stringify(fields))?.parent ?? null;
+	/** A thread's spawnedFrom as app 4.23118.0 writes it. */
+	const from = { sessionId: PARENT, taskId: "task_f25ae22d", title: "Doc 40 T1: the lamp behind the film", sideSession: true, sharedFolder: true, name: "doc-40-t1-the-lamp-behin" };
+
+	test("a side session another session started is its thread", () => {
+		assert.equal(parentOf({ spawnedFrom: from }), PARENT);
+		assert.equal(parentOf({ spawnedFrom: { ...from, wakeParent: false, sharedFolder: undefined } }), PARENT);
+	});
+
+	test("not the user's own side chat, a detached one, one that isn't a side session, or an id that isn't the app's", () => {
+		assert.equal(parentOf({ spawnedFrom: { ...from, btw: true, userFork: true } }), null, "a /btw side chat");
+		assert.equal(parentOf({ spawnedFrom: { ...from, userFork: true } }), null);
+		assert.equal(parentOf({ spawnedFrom: from, lineageDetached: true }), null);
+		assert.equal(parentOf({ spawnedFrom: { ...from, sideSession: false } }), null);
+		assert.equal(parentOf({ spawnedFrom: { ...from, sideSession: "yes" } }), null);
+		for (const sessionId of ["", "session_01EF7nM1", "local_../x", 7, null]) assert.equal(parentOf({ spawnedFrom: { ...from, sessionId } }), null, JSON.stringify(sessionId));
+		for (const spawnedFrom of [null, "local_a", [from]]) assert.equal(parentOf({ spawnedFrom }), null, JSON.stringify(spawnedFrom));
+		assert.equal(parentOf({}), null);
 	});
 });
 

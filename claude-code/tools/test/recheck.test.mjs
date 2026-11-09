@@ -461,6 +461,10 @@ test('recheck: record fields of another type, a mode the deck has no name for, o
     'records.isArchived': 'warn',
     'records.lastActivityAt': 'warn',
     'records.cwd': 'warn',
+    // Rare: in no record here, which is how the app writes them most of the time.
+    'records.backgroundTaskSuggestions': 'ok',
+    'records.spawnedFrom': 'ok',
+    'records.lineageDetached': 'ok',
     'records.summary-for-last': 'warn',
     'records.lookup': 'warn',
   })
@@ -476,6 +480,26 @@ test('recheck: record fields of another type, a mode the deck has no name for, o
   assert.match(byId(rows, 'records.lastFocusedAt').reason, /^2\/3 number; 1 string\. /)
   assert.match(byId(rows, 'records.summary-for-last').reason, /^0\/3 records with both have them equal\. Status rule 6/)
   assert.match(byId(rows, 'records.lookup').reason, /^3\/4 running sessions' records found/)
+})
+
+test('recheck: the rare fields of threads and task cards are ok in no record, and warn only when one is of another type (PROTOCOL.md\'s 2026-11-08 amendment)', async (t) => {
+  const f = fixture(t, { sessions: 0 })
+  const card = { id: 'task_f25ae22d', title: 'Doc 40 T1', createdAt: 1 }
+  const from = { sessionId: 'local_secret-1', taskId: 'task_f25ae22d', sideSession: true }
+  writeRecord(f, 1, record(1, { backgroundTaskSuggestions: [card], spawnedFrom: from, lineageDetached: false }))
+  writeRecord(f, 2, record(2))
+  let rows = await R.checkRecords(f.records, [])
+  for (const field of ['backgroundTaskSuggestions', 'spawnedFrom', 'lineageDetached']) assert.equal(byId(rows, `records.${field}`).status, 'ok', field)
+  assert.equal(byId(rows, 'records.spawnedFrom').reason, '1/2 object with a string sessionId and a boolean sideSession; 1 without one')
+  writeRecord(f, 3, record(3, { backgroundTaskSuggestions: [{ title: 'no id' }], spawnedFrom: { sessionId: 'local_secret-1', sideSession: 'yes' }, lineageDetached: 'no' }))
+  rows = await R.checkRecords(f.records, [])
+  assert.match(byId(rows, 'records.backgroundTaskSuggestions').reason, /^1\/3 array of cards with a string id; 1 without one, 1 array with a card without a string id\. Status rules 2 and 6/)
+  assert.match(byId(rows, 'records.spawnedFrom').reason, /^1\/3 object .*; 1 without one, 1 object without a boolean sideSession\. Status rule 9/)
+  assert.equal(byId(rows, 'records.lineageDetached').status, 'warn')
+  // Only of the wrong type, and in no record of the right one: still a warn.
+  fs.rmSync(path.join(f.orgDir, 'local_secret-1.json'))
+  rows = await R.checkRecords(f.records, [])
+  assert.equal(byId(rows, 'records.backgroundTaskSuggestions').status, 'warn')
 })
 
 test('recheck: a record\'s summary counts only as the app\'s loader keeps it, as status rule 6 reads it: one the loader drops warns', async (t) => {
@@ -982,13 +1006,13 @@ test('recheck: the command prints a table or JSON, exits 0 when nothing fails an
   assert.doesNotMatch(r.out, /mods API:/)
   assert.match(r.out, /^ok\s+bundle: summary loader\s+/m)
   assert.match(r.out, /^ok\s+engine: registry statuses\s+/m)
-  assert.match(r.out, /\n\n37 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
+  assert.match(r.out, /\n\n40 ok, 0 warn, 0 fail; the mods API check skipped \(--skip-plugin\)\n$/)
 
   r = await cli([...flags(f), '--skip-plugin', '--json'], { env: { HOME: f.root } })
   assert.equal(r.code, 0)
   const j = JSON.parse(r.out)
   assert.equal(j.ok, true)
-  assert.deepEqual(j.summary, { ok: 37, warn: 0, fail: 0 })
+  assert.deepEqual(j.summary, { ok: 40, warn: 0, fail: 0 })
   assert.deepEqual(j.skipped, ['mods'])
   assert.equal(j.paths.sessions, '~/sessions', 'paths under HOME read ~')
   assert.deepEqual([...new Set(j.checks.map((c) => c.group))], ['versions', 'registry', 'records', 'bundle', 'engine', 'seen', 'vendor'])
@@ -1034,7 +1058,7 @@ test('recheck: the command runs check 5 too, keeps DECK_TOKEN from Claude Code a
   r = await cli([...flags(f), '--repo', repo], { env: { HOME: f.root, TMPDIR: f.tmp } })
   assert.equal(r.code, 1)
   assert.match(r.out, /^fail\s+mods API: plugin test\s+2\.1\.309 failed \(exit 1\): 1 of 2 failed/m)
-  assert.match(r.out, /\n38 ok, 0 warn, 1 fail\n$/)
+  assert.match(r.out, /\n41 ok, 0 warn, 1 fail\n$/)
   assert.deepEqual(fs.readdirSync(f.tmp), [])
 })
 

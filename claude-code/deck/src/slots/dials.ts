@@ -20,7 +20,7 @@ const SETUP_PAGE = MAX_AGENT_PAGES + 2;
 
 /** The pages the session has now, in order. */
 function pageList(s: SessionView): number[] {
-	return [NOW_PAGE, ...agentPages(s.threads).map((_, i) => i + 1), CONTEXT_PAGE, SETUP_PAGE];
+	return [NOW_PAGE, ...agentPages(s.threads, s.sideSessions).map((_, i) => i + 1), CONTEXT_PAGE, SETUP_PAGE];
 }
 
 /** How long a turn's repaint waits for more ticks: ticks within it are painted together. */

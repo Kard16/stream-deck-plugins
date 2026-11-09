@@ -29,7 +29,7 @@ function reg(pid: number, host: string | null, fields: Partial<RegistrySession> 
 }
 
 function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
-	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, ...fields };
+	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, parent: null, offer: null, ...fields };
 }
 
 /** Lets the front check's promises settle. */

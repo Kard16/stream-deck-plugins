@@ -22,11 +22,11 @@ The other keys work as before, on this page or another.
 ## Session Slot keys
 
 **The key face:**
-- **The colour says the state.** Amber, with a light outline, means the session needs you: **Question**, **Plan**, **Approve?** or **Needs you**. Blue is **Working**, and **Background** while the session's own turn has ended but its agents or a workflow still run. Green is **Done**, red **Failed** and dark red **Stopped**, until you've seen the session; then the key goes dark, as it is while **Idle**.
+- **The colour says the state.** Amber, with a light outline, means the session needs you: **Question**, **Plan**, **Approve?** or **Needs you**. Blue is **Working**, and **Background** while the session's own turn has ended but its agents, a workflow or its threads still run. Threads are the sessions it started, from task cards you started. Green is **Done**, red **Failed** and dark red **Stopped**, until you've seen the session; then the key goes dark, as it is while **Idle**.
 - **The top line** says the state and how long it has lasted: 30s, 4m, 2h, 3d. A long word, such as Background, gets smaller type rather than being cut.
 - **The title** is in the middle.
 - **The bottom line** has the context % on the right, over a thin bar that turns orange at 80%. On the left:
-  - **Working or Background,** while other agents run: the workflow, as `review 5/9` (its agents finished of those started), or else how many agents run, `3 agents`. A long workflow name is cut, never its counts.
+  - **Working or Background,** while other agents run: the workflow, as `review 5/9` (its agents finished of those started), or else how many agents run, `3 agents`. A long workflow name is cut, never its counts. With no agents, how many of its threads are unfinished, `2 threads`: working, or waiting on you.
   - **Otherwise,** the tool it's running or waiting to run.
 - **Not running**, dimmed: the session's process has stopped, after a Claude app restart say. A press opens it, and the app starts it again.
 - **No session:** an empty slot. Hold the key to add the session on screen.
@@ -45,11 +45,11 @@ The other keys work as before, on this page or another.
 
 Each dial belongs to the session on the key above it, and its strip shows what didn't fit on the key.
 
-**With nothing waiting on you,** the strip has three pages, or more while agents run, and the dots say which:
-1. **Now:** what it's doing, or how its last turn ended, then the app's last summary, or what the app says it needs. While agents run it says what the key says: `Background: review 5/9`, `Working: 3 agents`.
-2. **Agents,** only while other agents run, up to three pages:
-   - the first line, in blue: the workflow, as `review · 5/9 done`, or `review · 5/9, 1 failed` once some have failed, with a long name cut, never its counts; or how many agents run, as `3 agents running`;
-   - then two agents a page, as `● <what it was asked>: <what it's doing>`, such as `● logs: Grep: Device`;
+**With nothing waiting on you,** the strip has three pages, or more while agents or threads run, and the dots say which:
+1. **Now:** what it's doing, or how its last turn ended, then the app's last summary, or what the app says it needs. While agents or threads run it says what the key says: `Background: review 5/9`, `Working: 3 agents`, `Background: 2 threads`.
+2. **Agents,** only while other agents run or threads are unfinished, up to three pages:
+   - the first line, in blue: the workflow, as `review · 5/9 done`, or `review · 5/9, 1 failed` once some have failed, with a long name cut, never its counts; or how many agents run, as `3 agents running`; or `2 threads`, or `3 agents, 2 threads`;
+   - then two agents a page, as `● <what it was asked>: <what it's doing>`, such as `● logs: Grep: Device`; then the threads, each by its title, after what it waits on when it waits on you: `● Approve? Doc 40 T2: the safelight`;
    - when more run than fit, the last page ends with `+3 more`.
    When they finish while you're on one of these pages, the strip goes back to Now.
 3. **Context:** the context %, with its bar, the tokens, and the cost so far.
@@ -92,9 +92,9 @@ A placed one of these shows as a missing action, on this Mac or another: remove 
 | Status | Meaning |
 |---|---|
 | working | A turn is running. The strip says on what. |
-| background | The session's own turn has ended, but its agents or a workflow still run. Blue, like working. |
+| background | The session's own turn has ended, but its agents, a workflow or its threads still run. Blue, like working. A thread waiting on you keeps it here too; the thread's own key says what it waits on. |
 | approval | A request is waiting on Approve or Deny. |
-| needs you | A question, a plan, or the app's own needs-input sign. |
+| needs you | A question, a plan, the app's own needs-input sign, or task cards waiting for you to start them. Cards count when the app's summary says the turn waits on them, so a card that only suggests a follow-up after a finished turn doesn't. A card that holds the turn open until you pick a new session or this one always counts. |
 | failed | The last turn ended with an error. |
 | interrupted | The last turn was stopped with Esc. |
 | done | The last turn finished. |

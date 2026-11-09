@@ -39,6 +39,10 @@ export type AppRecord = {
 	summary: string | null;
 	/** What the app says it needs from the user: a valid wrap-up's `needsUser`, else the counted summary's `needs_action`. */
 	needs: string | null;
+	/** The session it was started from, when it's one of that session's threads (parentOf); null for any other. */
+	parent: string | null;
+	/** The oldest offer card waiting for the user's answer: when it was made, and its title (offerOf); null with none. */
+	offer: { at: number | null; title: string | null } | null;
 };
 
 /** The file-system calls the reader makes, so tests can watch them. */
@@ -111,12 +115,27 @@ export function validSummary(v: unknown): Obj | null {
 }
 
 /**
+ * The session cards in the record that wait for the user (PROTOCOL.md's 2026-11-08 amendment): the app's
+ * `backgroundTaskSuggestions`, the "New task" cards and offers a session makes with start_session, each there until the
+ * user starts or dismisses it, or it expires. Only an object with a string `id` is one, as the app's loader keeps them.
+ * An offer the user has accepted waits for the session's brief, not for the user, so it isn't.
+ */
+function waitingCards(o: Obj): Obj[] {
+	if (!Array.isArray(o.backgroundTaskSuggestions)) return [];
+	return o.backgroundTaskSuggestions.filter((c): c is Obj => isObj(c) && typeof c.id === "string" && c.accepted !== true);
+}
+
+/**
  * The category of the record's last turn as the app's needs-input indicator reads it (app 4.4212.0's `_D`, with its
- * `Dw`, and the record loader's `OM` and `jM`; PROTOCOL.md, status rule 6). The indicator ignores a record with
- * neither a valid wrap-up nor a summary written for its last assistant message (`postTurnSummaryFor` equal to
- * `lastAssistantUuid`, both strings): null. The category is the valid summary's `status_category`, or none, which a
- * valid wrap-up changes: a failed summary stays failed; otherwise a wrap-up with `needsUser`, even an empty one, makes
- * it blocked, and one without turns blocked or need_input into review_ready.
+ * `Dw`, and the record loader's `OM` and `jM`; unchanged in 4.23118.0's `Jx` and `Cy`; PROTOCOL.md, status rule 6).
+ * The indicator ignores a record with neither a valid wrap-up nor a summary written for its last assistant message
+ * (`postTurnSummaryFor` equal to `lastAssistantUuid`, both strings): null. The category is the valid summary's
+ * `status_category`, or none, which a valid wrap-up changes: a failed summary stays failed; otherwise a wrap-up with
+ * `needsUser`, even an empty one, makes it blocked, and one without turns blocked or need_input into review_ready.
+ *
+ * Except while cards wait for the user (waitingCards), where the deck goes beyond the app: the cards are the turn's
+ * ask, so its wrap-up asks nothing, and the summary's own blocked or need_input stands. A card that only suggests a
+ * follow-up comes after a turn whose summary says it's finished, and changes nothing.
  */
 function turnCategory(o: Obj): string | null {
 	const w = wrapUp(o.turnWrapUp);
@@ -126,7 +145,33 @@ function turnCategory(o: Obj): string | null {
 	const category = typeof summary?.status_category === "string" ? summary.status_category : null;
 	if (w === null || category === "failed") return category;
 	if (w.needsUser !== null) return "blocked";
+	if (waitingCards(o).length > 0) return category;
 	return category === "blocked" || category === "need_input" ? "review_ready" : category;
+}
+
+/**
+ * The oldest offer card waiting for the user (waitingCards with `offer: true`): the session's start_session call that
+ * holds its turn until the user picks a new session or this one. When it was made (`createdAt`), and its title.
+ */
+function offerOf(o: Obj): { at: number | null; title: string | null } | null {
+	let oldest: { at: number | null; title: string | null } | null = null;
+	for (const c of waitingCards(o)) {
+		if (c.offer !== true) continue;
+		const at = typeof c.createdAt === "number" && Number.isFinite(c.createdAt) ? c.createdAt : null;
+		if (oldest === null || (at ?? Infinity) < (oldest.at ?? Infinity)) oldest = { at, title: turnText(c.title) };
+	}
+	return oldest;
+}
+
+/**
+ * The session this one is a thread of (PROTOCOL.md's 2026-11-08 amendment): its record's `spawnedFrom.sessionId`, when
+ * another session started it (`sideSession`). Not the user's own side chat (`btw`, `userFork`), nor a session the user
+ * detached from its parent (`lineageDetached`). Null for any other, and for an id that isn't the app's.
+ */
+function parentOf(o: Obj): string | null {
+	const from = o.spawnedFrom;
+	if (!isObj(from) || from.sideSession !== true || from.btw === true || from.userFork === true || o.lineageDetached === true) return null;
+	return typeof from.sessionId === "string" && HOST_PATTERN.test(from.sessionId) ? from.sessionId : null;
 }
 
 /** A record from one file's text; null when it isn't a complete JSON object (say, caught mid-write). */
@@ -156,6 +201,8 @@ export function parseRecord(host: string, text: string): AppRecord | null {
 		cwd: str(o.cwd, 1000),
 		summary: turn.summary,
 		needs: turn.needs,
+		parent: parentOf(o),
+		offer: offerOf(o),
 	};
 }
 

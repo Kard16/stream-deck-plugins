@@ -1,5 +1,14 @@
 import type { ThreadAgent, ThreadRun, Threads } from "../protocol/wire.js";
+import type { Need, SideView } from "./sessions.js";
 import type { SessionStatus } from "./status.js";
+
+/** The top line's word for what a session waits on, on the keys and strips; and before a waiting thread's title. */
+export const NEED_WORDS: Record<Need, string> = {
+	question: "Question",
+	plan: "Plan",
+	approval: "Approve?",
+	input: "Needs you",
+};
 
 /** The app's names for the modes, as its own picker shows them. */
 const MODE_NAMES: Record<string, string> = {
@@ -140,6 +149,18 @@ export function threadsLabel(t: Threads | null): Label | null {
 	return { text: t.running === 1 ? "1 agent" : `${t.running} agents`, keep: 0 };
 }
 
+/** `2 threads`, `1 thread`. */
+const threadCount = (n: number): string => `${n} thread${n === 1 ? "" : "s"}`;
+
+/**
+ * What a session's other work is at, on the key's bottom line and the strip's Now page: its own loops (threadsLabel);
+ * else its unfinished threads, the sessions it started, as `2 threads` (`1 thread`); null with neither (PROTOCOL.md's
+ * 2026-11-08 amendment).
+ */
+export function workLabel(t: Threads | null, sides: readonly SideView[]): Label | null {
+	return threadsLabel(t) ?? (sides.length === 0 ? null : { text: threadCount(sides.length), keep: 0 });
+}
+
 /** How many Agents pages the strip has at most, and how many running agents each lists (agents-and-wake.md, B2). */
 export const MAX_AGENT_PAGES = 3;
 const AGENTS_A_PAGE = 2;
@@ -147,11 +168,16 @@ const AGENTS_A_PAGE = 2;
 /**
  * The first line of each Agents page (agents-and-wake.md, B2): the run they follow as `review · 5/9 done`, or
  * `review · 5/9, 1 failed` when some failed, the counts kept whole and the name cut when it's too long; else
- * `3 agents running` (`1 agent running`).
+ * `3 agents running` (`1 agent running`), `2 threads` with only unfinished threads, `3 agents, 2 threads` with both.
  */
-export function agentsHead(t: Threads): Label {
+export function agentsHead(t: Threads | null, sides: readonly SideView[] = []): Label {
 	const run = activeRun(t);
-	if (run === null) return { text: `${t.running} agent${t.running === 1 ? "" : "s"} running`, keep: 0 };
+	if (run === null) {
+		const running = t === null ? 0 : Math.max(0, t.running);
+		const agents = `${running} agent${running === 1 ? "" : "s"}`;
+		if (sides.length === 0) return { text: `${agents} running`, keep: 0 };
+		return { text: running > 0 ? `${agents}, ${threadCount(sides.length)}` : threadCount(sides.length), keep: 0 };
+	}
 	const counts = ` · ${run.finished}/${run.started}${run.failed > 0 ? `, ${run.failed} failed` : " done"}`;
 	return { text: `${run.name}${counts}`, keep: counts.length };
 }
@@ -161,16 +187,24 @@ function agentLine(a: ThreadAgent): string {
 	return `● ${a.desc || a.kind}${a.doing ? `: ${a.doing}` : ""}`;
 }
 
+/** An unfinished thread on an Agents page: `● Doc 40 T1: the lamp`, or `● Approve? Doc 40 T2` while it waits on the user. */
+function sideLine(t: SideView): string {
+	return `● ${t.need === null ? "" : `${NEED_WORDS[t.need]} `}${t.title}`;
+}
+
 /**
- * The lines of the strip's Agents pages, two running agents a page, while other loops are in a turn; none while none
- * is. At most MAX_AGENT_PAGES: when more are running than fit, the last line says `+<n> more`. `running` counts them
- * all, and only the snapshot's agents can be listed, so those it leaves out count among the more too.
+ * The lines of the strip's Agents pages, two a page: the running agents while other loops are in a turn, then the
+ * session's unfinished threads; none while there are neither. At most MAX_AGENT_PAGES: when more are running than fit,
+ * the last line says `+<n> more`. `running` counts the agents all, and only the snapshot's agents can be listed, so
+ * those it leaves out count among the more too.
  */
-export function agentPages(t: Threads | null): string[][] {
-	if (t === null || t.running <= 0) return [];
+export function agentPages(t: Threads | null, sides: readonly SideView[] = []): string[][] {
+	const running = t !== null && t.running > 0 ? t : null;
+	if (running === null && sides.length === 0) return [];
 	const room = MAX_AGENT_PAGES * AGENTS_A_PAGE;
-	const all = Math.max(t.running, t.agents.length);
-	const listed = t.agents.slice(0, all > room ? room - 1 : room).map(agentLine);
+	const candidates = [...(running?.agents ?? []).map(agentLine), ...sides.map(sideLine)];
+	const all = (running === null ? 0 : Math.max(running.running, running.agents.length)) + sides.length;
+	const listed = candidates.slice(0, all > room ? room - 1 : room);
 	const lines = all > listed.length ? [...listed, `+${all - listed.length} more`] : listed;
 	const pages: string[][] = [];
 	for (let i = 0; i < lines.length; i += AGENTS_A_PAGE) pages.push(lines.slice(i, i + AGENTS_A_PAGE));

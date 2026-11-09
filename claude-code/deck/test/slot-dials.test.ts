@@ -518,7 +518,7 @@ describe("starting over, painting, and the strip's layouts", () => {
 		assert.equal(screen().kind, "inApp", "the next request, the question");
 		key.remove("k");
 		turn();
-		model.setRecords(new Map([[B, { host: B, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: 99_999, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null }]]));
+		model.setRecords(new Map([[B, { host: B, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: 99_999, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, parent: null, offer: null }]]));
 		slots.takeOnScreen(SLOT0);
 		const s = screen();
 		assert.deepEqual([s.kind, s.kind === "pages" ? s.session.host : null, s.kind === "pages" ? s.page : null], ["pages", B, 0], "another session: from the first page");

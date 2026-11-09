@@ -233,7 +233,9 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
    - **A session has ended** when no file lists its `host` any more.
    - **Two files can list one `host`,** as for a moment when a session's process restarts. The deck shows the one with the later `startedAt`, and confirms a `session_id` or `sid` against any of them ([Desktop sessions only](#desktop-sessions-only)).
    - **A reading that can't list the folder changes nothing:** the deck keeps its last reading, and warns once until a reading succeeds. A folder that doesn't exist is no sessions. A file that can't be read or parsed keeps its last good reading, or is left out if it has none.
-2. **The app's records,** `~/Library/Application Support/Claude/claude-code-sessions/*/*/<host>.json`, read when a session appears and again when its file changes: `model`, `effort`, `permissionMode`, `lastFocusedAt`, `postTurnSummary`, `postTurnSummaryFor`, `lastAssistantUuid` and `turnWrapUp`. Read only.
+2. **The app's records,** `~/Library/Application Support/Claude/claude-code-sessions/*/*/<host>.json`, read when a session appears and again when its file changes: `model`, `effort`, `permissionMode`, `lastFocusedAt`, `postTurnSummary`, `postTurnSummaryFor`, `lastAssistantUuid` and `turnWrapUp`; since 2026-11-08, `backgroundTaskSuggestions`, `spawnedFrom` and `lineageDetached`. Read only.
+   - **Task cards** are the `backgroundTaskSuggestions` entries that wait for the user: the "New task" cards and offers a session makes with `start_session`, each there until the user starts or dismisses it, or it expires. An entry counts when it's an object with a string `id`, and an offer the user has accepted (`accepted: true`) doesn't: it waits for the session's brief.
+   - **A session's threads** are the sessions it started: a listed session whose record's `spawnedFrom` has `sideSession: true` and its `local_…` id as `sessionId`. Not the user's own side chats (`btw` or `userFork` true), nor a session with `lineageDetached: true`, nor one whose record says it's archived.
 3. **The bridge,** for sessions with the plugin: hello, events and held requests.
 
 **Model, effort and mode:** the latest of the plugin's `hello` and `settings`, and of `permission_mode` and `effort.level` in the session's PermissionRequests; with none of those, the app's record, which lags a change made inside the engine (S4). A hello counts for less:
@@ -242,7 +244,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 
 **Status,** the first that applies:
 1. `approval`: the bridge holds a `tool` request for the session.
-2. `needs-you`: the bridge holds an `ask` request for it; or the registry says `waiting` and nothing is held for it (a session without the plugin, or a request lost when the deck restarted).
+2. `needs-you`: the bridge holds an `ask` request for it; or the registry says `waiting` and nothing is held for it (a session without the plugin, or a request lost when the deck restarted); or its record holds an offer card waiting (`offer: true` among its task cards), whose `start_session` call holds the turn until the user picks a new session or this one (2026-11-08). The registry says `busy` meanwhile. The deck times it from the oldest such card's `createdAt`, and its strip asks `Start “<the card's title>”?`.
 3. `background` or `working`, while the session has work going:
    - **`background`** (Phase 9): the main loop isn't in a turn, and the session's latest `threads` has `running` above 0 ([Events](#events)). The main loop isn't in a turn when its latest `turn.start` has a `turn.end` or `failed` after it, or when the deck has seen none. That holds whatever the registry says: other loops keep it `busy`, and an `idle` while `threads` still counts loops in a turn is a reading that trails.
    - **`working`** otherwise, as follows.
@@ -259,6 +261,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
    - **A valid wrap-up** is a `turnWrapUp` object with a string `description` (empty counts) and a `needsUser` that's missing or a string. Any other `turnWrapUp` is ignored, as the app's loader drops it.
    - **The record counts** only when it has a valid wrap-up, or a `postTurnSummaryFor` equal to its `lastAssistantUuid`.
    - **The turn's category** is the valid summary's `status_category`, or none. With a valid wrap-up: a `failed` summary stays `failed`; otherwise a wrap-up with `needsUser` makes it `blocked`, and one without turns `blocked` or `need_input` into `review_ready`.
+   - **Except while task cards wait** (2026-11-08), where the deck goes beyond the app: a wrap-up without `needsUser` leaves `blocked` and `need_input` as they are. The cards are the turn's ask, which is why its wrap-up asks nothing. A card that only suggests a follow-up comes after a turn whose summary says it's finished, so it changes nothing.
    - **needs-you** when that category is `blocked` or `need_input`.
    - **Known differences from the app:**
      - The app also hides the indicator while the session has background tasks, which the record doesn't show.
@@ -266,6 +269,7 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
      None of this changes any record on this Mac (2026-11-01).
 7. `done`: idle after a turn the deck saw end.
 8. `idle`: otherwise.
+9. `background`, in place of `done` or `idle` (2026-11-08): one of its threads is unfinished, its status `approval`, `needs-you`, `background` or `working`. So what a session says of itself comes first, a turn that failed or asks for the user included, and a thread's own threads count for it. The deck times it from the later of the main loop's last turn end and the oldest unfinished thread's `startedAt`. Its key says `2 threads` where it would say `3 agents`, after its own loops, and its Agents pages list the threads after its agents, each a waiting one's word before its title (`● Approve? Doc 40 T2`). The threads keep their own keys, on a slot or under Others.
 
 **Context %:** the latest `measure`.
 
@@ -512,3 +516,10 @@ The deck shows every running Code-tab session, with or without the plugin (kicko
 7. **Fixtures:** `answer-question`, `answer-questions`, `plan-approve` and `plan-reject` go. `dial-gone` moves onto a Bash request. `needs-you` gains the dial's jump. New: `threads` and `release-by-agent`, 21 in all. A dial `press` line has `decision` or nothing, and `expect` gains `threads`. On the plugin side, a `tool.call` stays open until its `tool.end` line. (Fixtures)
 8. **After the build:** the mod sends its `threads` again after each answered hello, and queues none before its first answered hello or from a failed request until the next. The build found that after a deck restart, a session's agents showed nothing until their picture next changed, and that an outage filled the queue with snapshots. The deck also listens again should its server close or fail, and keeps showing the requests it holds meanwhile. (Events, Failure and recovery)
 9. **After the review:** `doing` is the call in the loop's current turn, and shows the summary alone when it would read the same without the call's arguments, so `TodoWrite: TodoWrite` reads `TodoWrite`. (Events)
+
+**2026-11-08, task cards and threads** (deck 0.7.0; nothing on the wire changes, so `v` stays 1 and the plugin stays 0.4.0). After the user's day with "Site lighting effects improvement": at 17:47 its turn ended with two "New task" cards waiting on their "Start both", and the key read Done; from 18:11 the two sessions those cards started worked while the key still read Done. The app's own summary said `blocked`, but its wrap-up asked nothing, since the cards were the ask, and status rule 6 turned that into `review_ready`, as the app does (unchanged in app 4.23118.0, its `Cy` and `Jx`). The sessions a session starts are sessions of their own, linked to it only by their records, so the mod's `threads` never sees them.
+1. **The deck reads three more fields of the app's records:** `backgroundTaskSuggestions`, the task cards, and `spawnedFrom` and `lineageDetached`, a session's link to the one that started it. (The deck's session model)
+2. **While task cards wait, rule 6 keeps the summary's own `blocked` or `need_input`.** The user chose to tell an ask from a suggestion this way, by the app's own summary, over any card at all: a card after a finished turn is a suggestion, and one had waited three days on this Mac. (The deck's session model, rule 6)
+3. **An offer card reads `needs-you`,** within rule 2: its turn waits on the user, while the registry says `busy`. (The deck's session model, rule 2)
+4. **New rule 9: unfinished threads keep a session in the background,** where it would read done or idle, with `2 threads` on its key and its threads on its Agents pages, at the user's word. They keep their own keys too. (The deck's session model)
+5. **recheck** checks the three fields, as `rare`: they may be in no record at all. The fake deck follows rules 2, 6 and 9. No fixture changes: fixtures play the wire, and this is all in the records.

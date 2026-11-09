@@ -97,7 +97,7 @@ function reg(pid: number, host: string, fields: Partial<RegistrySession> = {}): 
 }
 
 function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
-	return { host, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, ...fields };
+	return { host, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, parent: null, offer: null, ...fields };
 }
 
 /** The plugin's wiring (src/plugin.ts) with fakes: the model, the slots, both logic classes and both actions' wiring. */

@@ -163,7 +163,8 @@ export const REGISTRY_FIELDS = Object.freeze([
 /**
  * Every record field the deck reads: parseRecord and turnCategory, claude-code/deck/src/records/records.ts:45-90. As
  * above, plus `presence`: an `always` field should be in every record, so one missing from some warns; a `sparse` one
- * comes only once a session has had a turn or a wrap-up, so records without it are fine, and only its type counts.
+ * comes only once a session has had a turn or a wrap-up, so records without it are fine, and only its type counts; a
+ * `rare` one comes only in some sessions some of the time, so it may be in no record at all, and only its type counts.
  */
 export const RECORD_FIELDS = Object.freeze([
   {
@@ -233,6 +234,23 @@ export const RECORD_FIELDS = Object.freeze([
     field: 'cwd', expect: 'non-empty string', need: 'optional', presence: 'always', reads: [RECORDS_TS, 'cwd: str(o.cwd'],
     why: 'The project, its last segment, of a slotted session the registry doesn\'t list.',
     check: aNonEmptyString,
+  },
+  // 2026-11-08, threads and task cards (PROTOCOL.md's amendment), from app 4.23118.0. Rare: cards are there only while
+  // they wait for the user, the link only in a session another one started, and lineageDetached in none on this Mac.
+  {
+    field: 'backgroundTaskSuggestions', expect: 'array of cards with a string id', need: 'optional', presence: 'rare', reads: [RECORDS_TS, 'Array.isArray(o.backgroundTaskSuggestions)'],
+    why: "Status rules 2 and 6: while a session's cards wait for the user, a blocked summary stands, and an offer card reads Needs you. Without them the deck reads Done, as the app does.",
+    check: (v) => (!Array.isArray(v) ? kind(v) : v.every((c) => isObj(c) && typeof c.id === 'string') ? null : 'array with a card without a string id'),
+  },
+  {
+    field: 'spawnedFrom', expect: 'object with a string sessionId and a boolean sideSession', need: 'optional', presence: 'rare', reads: [RECORDS_TS, 'const from = o.spawnedFrom'],
+    why: "Status rule 9: a session another started is that session's thread, which keeps it in the background while unfinished. Without it, threads show only on their own.",
+    check: (v) => (!isObj(v) ? kind(v) : typeof v.sessionId !== 'string' ? 'object without a string sessionId' : typeof v.sideSession !== 'boolean' ? 'object without a boolean sideSession' : null),
+  },
+  {
+    field: 'lineageDetached', expect: 'boolean', need: 'optional', presence: 'rare', reads: [RECORDS_TS, 'o.lineageDetached === true'],
+    why: 'A thread the user detached from its parent no longer counts for it (status rule 9).',
+    check: (v) => (typeof v === 'boolean' ? null : kind(v)),
   },
 ])
 
@@ -545,10 +563,11 @@ export function fieldRow(group, spec, objs) {
     } else problems[problem] = (problems[problem] ?? 0) + 1
   }
   const bad = total - good - missing
-  const sparse = spec.presence === 'sparse'
+  const sparse = spec.presence === 'sparse' || spec.presence === 'rare'
   const none = spec.need === 'required' ? 'fail' : 'warn'
   let status
-  if (good === 0) status = none
+  // A rare field in no record is as the app writes it most of the time; only one of the wrong type warns.
+  if (good === 0) status = spec.presence === 'rare' && bad === 0 ? 'ok' : none
   else if (sparse) status = bad > 0 ? 'warn' : 'ok'
   else status = good === total ? 'ok' : 'warn'
 

@@ -10,6 +10,7 @@ export function view(fields: Partial<SessionView> = {}): SessionView {
 		status: "idle",
 		doing: null,
 		threads: null,
+		sideSessions: [],
 		context: null,
 		model: null,
 		effort: null,

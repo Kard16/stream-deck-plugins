@@ -49,7 +49,7 @@ function reg(pid: number, host: string, fields: Partial<RegistrySession> = {}): 
 }
 
 function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
-	return { host, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, ...fields };
+	return { host, title: null, model: null, effort: null, permissionMode: null, lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, parent: null, offer: null, ...fields };
 }
 
 function setup(registry: RegistrySession[], saved: Map<string, string> = new Map()) {

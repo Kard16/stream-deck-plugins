@@ -41,7 +41,7 @@ function reg(pid: number, host: string | null, fields: Partial<RegistrySession> 
 }
 
 function record(host: string, fields: Partial<AppRecord> = {}): AppRecord {
-	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, ...fields };
+	return { host, title: null, model: "claude-haiku-5-5", effort: "low", permissionMode: "default", lastFocusedAt: null, turnCategory: null, isArchived: false, lastActivityAt: null, cwd: null, summary: null, needs: null, parent: null, offer: null, ...fields };
 }
 
 /** The session id the registry lists each test host with, as `reg` makes them: A is pid 1, B pid 2. */
@@ -2561,5 +2561,107 @@ describe("the poll burst while other loops are at work (PROTOCOL.md, Commands; P
 		assert.deepEqual(n3.answers, [], "for 60 s");
 		events(A, { t: "turn.start", turn: "t2" }, threadsEvent(1), threadsEvent(0));
 		assert.deepEqual(n3.answers, [], "the main loop's turn runs");
+	});
+});
+
+describe("a session's threads and offer cards in the model (PROTOCOL.md's 2026-11-08 amendment: status rules 2 and 9)", () => {
+	/** "Site lighting effects improvement" (A) and the two threads it started, T1 (B) and T2 (C). */
+	const T1 = "Doc 40 T1: the lamp behind the film";
+	const T2 = "Doc 40 T2: the safelight";
+	const family = (b: Partial<RegistrySession> = {}, c: Partial<RegistrySession> = {}) => [
+		reg(1, A, { name: "Site lighting effects improvement" }),
+		reg(2, B, { name: T1, status: "busy", startedAt: 60_000, ...b }),
+		reg(3, C, { name: T2, status: "busy", startedAt: 61_000, ...c }),
+	];
+	const threadsOf = (parent: string) => ({ parent });
+
+	test("the parent reads background while a thread is unfinished, since its oldest thread started; its own done comes back after", () => {
+		const { model, at, events, hello, view, log } = setup(family());
+		hello(A);
+		at(20_000);
+		events(A, { t: "turn.start", turn: "t1" });
+		at(30_000);
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		assert.equal(view(A)?.status, "done", "no record links the threads yet");
+		model.setRecords(new Map([[A, record(A)], [B, record(B, threadsOf(A))], [C, record(C, threadsOf(A))]]));
+		const a = view(A);
+		assert.deepEqual([a?.status, a?.since, a?.need, a?.seen], ["background", 60_000, null, null]);
+		assert.deepEqual(
+			a?.sideSessions.map((t) => [t.key, t.title, t.status, t.need]),
+			[
+				[B, T1, "working", null],
+				[C, T2, "working", null],
+			],
+			"the oldest started first",
+		);
+		assert.ok(log.at("info").includes(`info SIDES ${A}: 2 unfinished: ${B} working, ${C} working`));
+		assert.deepEqual(view(B)?.sideSessions, [], "a thread has none of its own");
+		// T1 waits on an approval: still unfinished, with what it waits on.
+		model.permission({ session_id: "sid-2", tool_name: "Bash", tool_input: { command: "ls" } }, B, new FakeReply());
+		assert.deepEqual(
+			view(A)?.sideSessions.map((t) => [t.status, t.need]),
+			[
+				["approval", "approval"],
+				["working", null],
+			],
+		);
+		// Both end their turns: idle after the request came, which lets it go (release rule 3), and finished. The parent is
+		// done again.
+		model.setRegistry(family({ status: "idle", statusUpdatedAt: 40_000 }, { status: "idle", statusUpdatedAt: 40_000 }));
+		assert.deepEqual([view(A)?.status, view(A)?.sideSessions], ["done", []]);
+		assert.ok(log.at("info").includes(`info SIDES ${A}: no unfinished threads`));
+	});
+
+	test("what the parent says of itself comes first: its own work, a turn that asks for the user, a failed turn", () => {
+		const records = (fields: Partial<AppRecord> = {}) => new Map([[A, record(A, fields)], [B, record(B, threadsOf(A))]]);
+		const { model, events, hello, view } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "busy" })]);
+		model.setRecords(records());
+		hello(A);
+		events(A, { t: "turn.start", turn: "t1" });
+		assert.deepEqual([view(A)?.status, view(A)?.sideSessions.length], ["working", 1], "working, with its thread listed");
+		events(A, { t: "turn.end", turn: "t1", reason: "answer" });
+		model.setRegistry([reg(1, A), reg(2, B, { status: "busy" })]);
+		assert.equal(view(A)?.status, "background");
+		model.setRecords(records({ turnCategory: "blocked", needs: "Pick one" }));
+		assert.deepEqual([view(A)?.status, view(A)?.need], ["needs-you", "input"]);
+		model.setRecords(records());
+		events(A, { t: "turn.start", turn: "t2" }, { t: "failed", error: "overloaded" });
+		assert.equal(view(A)?.status, "failed");
+	});
+
+	test("only a listed, unarchived thread whose status is unfinished counts; not the user's own session, nor itself", () => {
+		const { model, view } = setup(family());
+		model.setRecords(new Map([[A, record(A, threadsOf(A))], [B, record(B, { ...threadsOf(A), isArchived: true })], [C, record(C, threadsOf(A))]]));
+		assert.deepEqual(view(A)?.sideSessions.map((t) => t.key), [C], "not archived, and not itself");
+		model.setRegistry(family({}, { status: "idle" }));
+		assert.deepEqual([view(A)?.status, view(A)?.sideSessions], ["idle", []], "a thread whose turn ended is finished");
+		model.setRegistry([reg(1, A)]);
+		assert.deepEqual(view(A)?.sideSessions, [], "an ended thread");
+	});
+
+	test("a thread whose own thread is unfinished is unfinished too; a loop of parents doesn't go round", () => {
+		const { model, view } = setup(family({ status: "idle" }));
+		model.setRecords(new Map([[B, record(B, threadsOf(A))], [C, record(C, threadsOf(B))]]));
+		assert.deepEqual([view(B)?.status, view(A)?.status, view(A)?.sideSessions.map((t) => [t.key, t.status])], ["background", "background", [[B, "background"]]]);
+		model.setRecords(new Map([[A, record(A, threadsOf(B))], [B, record(B, threadsOf(A))]]));
+		assert.deepEqual([view(A)?.status, view(B)?.status], ["idle", "idle"]);
+	});
+
+	test("an offer card holds the turn: needs you, from when it was made, asking to start it; it goes when answered", () => {
+		const { model, at, events, hello, view } = setup([reg(1, A, { status: "busy", statusUpdatedAt: 5000 })]);
+		hello(A);
+		at(20_000);
+		events(A, { t: "turn.start", turn: "t1" });
+		model.setRecords(new Map([[A, record(A, { needs: "an older ask", offer: { at: 21_000, title: T1 } })]]));
+		const a = view(A);
+		assert.deepEqual([a?.status, a?.need, a?.since, a?.needs], ["needs-you", "input", 21_000, `Start “${T1}”?`]);
+		model.setRecords(new Map([[A, record(A, { offer: { at: null, title: null } })]]));
+		assert.deepEqual([view(A)?.since, view(A)?.needs], [5000, "Start “a new session”?"], "without a time, the registry's; without a title, a new session");
+		model.setRecords(new Map([[A, record(A, { needs: "an older ask" })]]));
+		assert.deepEqual([view(A)?.status, view(A)?.needs], ["working", "an older ask"]);
+		// A held request comes first.
+		model.setRecords(new Map([[A, record(A, { offer: { at: 21_000, title: T1 } })]]));
+		model.permission({ session_id: "sid-1", tool_name: "Bash", tool_input: { command: "ls" } }, A, new FakeReply());
+		assert.equal(view(A)?.status, "approval");
 	});
 });

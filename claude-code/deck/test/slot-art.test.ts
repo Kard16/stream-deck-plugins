@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 
 import type { PollReply } from "../src/bridge/commands.js";
 import { clip, clipKeep, fits, type OthersFace, othersKeySvg, type SlotFace, slotKeySvg, slotToneBackground, type SlotTone } from "../src/keys/art.js";
-import { SessionModel, type SessionView } from "../src/model/sessions.js";
+import { SessionModel, type SessionView, type SideView } from "../src/model/sessions.js";
 import type { ThreadRun, Threads } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { heldToolOf, NEED_WORDS, othersArt, othersFace, slotFace, slotKeyArt, toolName } from "../src/slots/art.js";
@@ -219,7 +219,10 @@ describe("a session's other loops on its key (agents-and-wake.md, B2: option A)"
 		runs: runs.map((r) => ({ run: "wf_1", name: "review", started: 9, finished: 5, failed: 0, open: 1, ...r })),
 	});
 
-	test("Background is blue with its own word; for Working and Background the bottom line says the newest run in a turn, else how many agents, else (working only) the tool it's on", () => {
+	/** `n` unfinished threads, working. */
+	const sides = (n: number): SideView[] => Array.from({ length: n }, (_, i) => ({ key: `local_t${i}`, title: `Thread ${i + 1}`, status: "working", need: null, startedAt: i }));
+
+	test("Background is blue with its own word; for Working and Background the bottom line says the newest run in a turn, else how many agents, else how many threads, else (working only) the tool it's on", () => {
 		const cases: [string, Partial<SessionView>, Partial<SlotFace>][] = [
 			["background, a run", { status: "background", threads: threads(3, [{}]), doing: "npm test" }, { tone: "working", word: "Background", tool: "review 5/9", keep: 4 }],
 			["background, agents only", { status: "background", threads: threads(3), doing: "npm test" }, { tone: "working", word: "Background", tool: "3 agents", keep: 0 }],
@@ -232,6 +235,11 @@ describe("a session's other loops on its key (agents-and-wake.md, B2: option A)"
 			["working, no picture", { status: "working", doing: "npm test" }, { tool: "npm test", keep: undefined }],
 			["the most recent run in a turn, which the mod lists first", { status: "background", threads: threads(4, [{ name: "deck", started: 3, finished: 1, open: 2 }, { open: 2 }]) }, { tool: "deck 1/3" }],
 			["a run in a turn before one that isn't", { status: "background", threads: threads(1, [{ name: "old", open: 0 }, {}]) }, { tool: "review 5/9" }],
+			// PROTOCOL.md's 2026-11-08 amendment: unfinished threads, the sessions it started, after its own loops.
+			["background, two threads", { status: "background", sideSessions: sides(2) }, { tone: "working", word: "Background", tool: "2 threads", keep: 0 }],
+			["background, one thread", { status: "background", sideSessions: sides(1) }, { tool: "1 thread" }],
+			["working, with threads", { status: "working", sideSessions: sides(2), doing: "npm test" }, { word: "Working", tool: "2 threads" }],
+			["its own agents before its threads", { status: "background", threads: threads(3), sideSessions: sides(2) }, { tool: "3 agents" }],
 		];
 		for (const [what, fields, want] of cases) {
 			const face = slotFace(look(view({ since: NOW - 60_000, ...fields })));

@@ -1,6 +1,6 @@
 import { type OthersFace, othersKeySvg, type SlotFace, slotKeySvg } from "../keys/art.js";
-import { sinceText, threadsLabel } from "../model/format.js";
-import type { Need, SessionView } from "../model/sessions.js";
+import { NEED_WORDS, sinceText, workLabel } from "../model/format.js";
+import type { SessionView } from "../model/sessions.js";
 import type { SlotKeyArt, SlotKeyLook } from "./keys.js";
 import type { OthersArt, OthersLook } from "./others.js";
 
@@ -9,13 +9,8 @@ import type { OthersArt, OthersLook } from "./others.js";
  * src/keys/art.ts (session-keys.md, The key face and Others). Plain functions, no SDK.
  */
 
-/** The top line's word for what a session waits on. */
-export const NEED_WORDS: Record<Need, string> = {
-	question: "Question",
-	plan: "Plan",
-	approval: "Approve?",
-	input: "Needs you",
-};
+/** The top line's word for what a session waits on (format.ts's, which an Agents page's waiting thread uses too). */
+export { NEED_WORDS };
 
 /** A tool's name as a key or strip shows it: an MCP tool by its own name, its server left out (`set session permission mode`). */
 export function toolName(tool: string): string {
@@ -34,9 +29,9 @@ export function contextPercent(context: number | null): number | null {
  * - none: the empty slot, `No session`, with how to fill it;
  * - not running: `Not running` and the title, dimmed;
  * - waiting on you (`need`): amber, `Question`, `Plan`, `Approve?` or `Needs you`, with the tool for an approval;
- * - working: blue, `Working`; background, other loops in a turn while the main loop isn't: blue, `Background`. Either
- *   with what the other loops are at (`review 5/9`, `3 agents`), else, working, the tool it's on (agents-and-wake.md,
- *   B2);
+ * - working: blue, `Working`; background, other loops in a turn while the main loop isn't, or unfinished threads: blue,
+ *   `Background`. Either with what the other work is at (`review 5/9`, `3 agents`, `2 threads`), else, working, the
+ *   tool it's on (agents-and-wake.md, B2; PROTOCOL.md's 2026-11-08 amendment);
  * - a turn's end not seen: green `Done`, red `Failed`, dark red `Stopped`; an idle session whose activity since it was
  *   last on screen the deck didn't see end (seen false) reads as Done;
  * - seen, or idle: dark, `Done`, `Failed`, `Stopped` or `Idle`.
@@ -55,7 +50,7 @@ export function slotFace(look: SlotKeyLook, heldTool: (host: string) => string |
 		return face("need", NEED_WORDS[s.need], s.need === "approval" ? (held === null ? s.doing : toolName(held)) : null);
 	}
 	const unseen = s.seen === false;
-	const loops = threadsLabel(s.threads);
+	const loops = workLabel(s.threads, s.sideSessions);
 	switch (s.status) {
 		case "working":
 		case "background": {

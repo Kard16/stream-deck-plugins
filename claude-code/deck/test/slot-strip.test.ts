@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 import type { PollReply } from "../src/bridge/commands.js";
 import { fits } from "../src/keys/art.js";
 import { agentPages, agentsHead, MAX_AGENT_PAGES } from "../src/model/format.js";
-import { SessionModel, type SessionView } from "../src/model/sessions.js";
+import { SessionModel, type SessionView, type SideView } from "../src/model/sessions.js";
 import type { ThreadAgent, ThreadRun } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
 import { APPROVAL_CHOICES, COALESCE_MS, SlotDials, type SlotScreen } from "../src/slots/dials.js";
@@ -362,6 +362,28 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		// A long run name is cut, its counts whole.
 		const long = view({ status: "background", threads: { running: 2, agents: agents(2), runs: [run({ name: "agents-and-wake-review" })] } });
 		assert.equal(value(slotStrip({ kind: "pages", slot: SLOT, session: long, page: 1, pages: 4 }, NOW).feedback, "line1"), "agents-and… · 5/9 done");
+	});
+
+	test("a session's unfinished threads (PROTOCOL.md's 2026-11-08 amendment): Background: 2 threads on Now, then an Agents page listing each, what it waits on before its title; after its own agents; dials count the pages", () => {
+		const thread = (i: number, fields: Partial<SideView> = {}): SideView => ({ key: `local_t${i}`, title: `Thread ${i}`, status: "working", need: null, startedAt: i, ...fields });
+		const lighting = [thread(1, { title: "Doc 40 T1: the lamp behind the film" }), thread(2, { title: "Doc 40 T2: the safelight", status: "approval", need: "approval" })];
+		const s = view({ status: "background", since: NOW - 240_000, sideSessions: lighting });
+		assert.deepEqual(nowLine(s, NOW), { value: "Background: 2 threads", color: "#4A9EFF" });
+		assert.deepEqual(agentPages(null, lighting), [["● Doc 40 T1: the lamp behind the film", "● Approve? Doc 40 T2: the safelight"]]);
+		const page = slotStrip({ kind: "pages", slot: SLOT, session: s, page: 1, pages: 4 }, NOW).feedback;
+		assert.deepEqual(strings(page, "dots", "line1", "line2", "line3"), ["○●○○", "2 threads", "● Doc 40 T1: the lamp b…", "● Approve? Doc 40 T2: t…"]);
+		assert.equal((page.line1 as { color: string }).color, SLOT_STRIP_COLORS.accent);
+		assert.deepEqual(strings(slotStrip({ kind: "pages", slot: SLOT, session: s, page: 2, pages: 4 }, NOW).feedback, "line1"), ["Context —"]);
+		// The first line with its own agents too, which the pages list first; a needs-you thread; +n more past three pages.
+		assert.deepEqual(agentsHead(null, lighting), { text: "2 threads", keep: 0 });
+		assert.deepEqual(agentsHead({ running: 1, agents: [], runs: [] }, [thread(1)]), { text: "1 agent, 1 thread", keep: 0 });
+		assert.deepEqual(agentsHead({ running: 0, agents: [], runs: [] }, [thread(1)]), { text: "1 thread", keep: 0 });
+		assert.deepEqual(agentsHead({ running: 3, agents: [], runs: [run()] }, [thread(1)]), { text: "review · 5/9 done", keep: 11 }, "a run in a turn first");
+		assert.deepEqual(agentPages({ running: 1, agents: agents(1), runs: [] }, [thread(1, { status: "needs-you", need: "input" })]), [["● agent 1: Grep: pattern 1", "● Needs you Thread 1"]]);
+		const many = agentPages({ running: 4, agents: agents(4), runs: [] }, [thread(1), thread(2), thread(3)]);
+		assert.equal(many.length, MAX_AGENT_PAGES);
+		assert.deepEqual(many[2], ["● Thread 1", "+2 more"]);
+		assert.deepEqual(agentPages({ running: 0, agents: [], runs: [] }, []), []);
 	});
 
 	test("which agents the pages list (format.ts's agentPages): two a page, up to three pages, +n more for those running beyond what fits or what the snapshot lists; none while none is in a turn", () => {

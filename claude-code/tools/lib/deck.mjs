@@ -52,6 +52,8 @@ function display(v) {
 
 const IN_FLIGHT = new Set(['delivered', 'waiting'])
 const FINAL = new Set(FINAL_STATES)
+/** A thread's statuses while it's unfinished, which keep the session that started it in the background (rule 9). */
+const UNFINISHED = new Set(['approval', 'needs-you', 'background', 'working'])
 const RECENT_KEPT = 50
 /** The `surface` of the desktop app's own `attach` and `detach`, the only ones the deck counts (PROTOCOL.md, "Events"). */
 const DESKTOP_SURFACE = 'desktop'
@@ -1358,13 +1360,32 @@ export class FakeDeck {
 
   // ---- views ---------------------------------------------------------------------------------------------
 
-  /** PROTOCOL.md, "The deck's session model": the first status that applies. */
-  #status(host) {
+  /**
+   * PROTOCOL.md, "The deck's session model": the first status that applies, rule 9 last. Rule 9 (2026-11-08): where
+   * the session would read done or idle, a thread of it, a listed session its record links to it and not archived,
+   * that's unfinished makes it background. `path` stops a loop of parents, which the app never makes.
+   */
+  #status(host, path = new Set()) {
+    const own = this.#ownStatus(host)
+    if (own !== 'done' && own !== 'idle') return own
+    const inner = new Set([...path, host])
+    for (const h of this.#registry.keys()) {
+      const r = this.#records.get(h)
+      if (inner.has(h) || r?.parent !== host || r.archived) continue
+      if (UNFINISHED.has(this.#status(h, inner))) return 'background'
+    }
+    return own
+  }
+
+  /** Rules 1 to 8: the session's status by what it does itself. */
+  #ownStatus(host) {
     const held = this.#heldOf(host)
     if (held.some((h) => h.kind === 'tool')) return 'approval'
     if (held.some((h) => h.kind === 'ask')) return 'needs-you'
     const reg = this.#registry.get(host)?.status
     if (reg === 'waiting') return 'needs-you'
+    // Rule 2 (2026-11-08): an offer card holds the session's turn until the user answers it in the app.
+    if (this.#records.get(host)?.offer) return 'needs-you'
     const s = this.#sessions.get(host)
     // Rule 3's background (Phase 9): the main loop isn't in a turn, and the session's latest threads counts other loops
     // in one, whatever the registry says: they keep it busy, and an idle then is a reading that trails.

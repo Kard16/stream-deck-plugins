@@ -1415,6 +1415,22 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **The Others key alerts** on a press when no session off the slots needs you, as designed (`session-keys.md`, Others). The user had expected something to happen.
     - **A stale slot:** the deck keeps a slot's session after its key is gone. If "Lightroom plugin feedback and improvements" ran, no key would show it: Others leaves out every session with a slot, shown or not (`Slots.slotted()`). Approve and Deny would still show its requests. Not fixed; the user didn't take it up.
   - T and 11-06's throwaway still run, until the user's word to archive them.
+- 2026-11-08, **committed, released and pushed** at the user's word: 3acd86e, 113 files.
+  - Before it, the full run passed again: deck 524 of 524 three ways, with its build and validate; the plugin's tsc, validate, sync check and 178 of 178; tools 302; install 20; recheck 39 ok; the fixtures unchanged; fake-claude 21 of 21.
+  - The release copy went from 6282cef to 3acd86e, version 0.4.0: 9 files changed and 2 added. `status` says installed and current.
+  - The push took GitHub's `main` from 3bf4406 to 3acd86e, and `git ls-remote` shows it there. The commit held no copy of the deck token.
+- 2026-11-08, **task cards and threads** (deck 0.7.0; PROTOCOL.md's amendment of the same day). The user, at 18:20: "Site lighting effects improvement" read Done though it had two threads, and had waited on them to start the threads without the deck saying so.
+  - **What happened,** from the deck's log and the app's records (times CST):
+    - 17:47:42, the turn ended with two "New task" cards, T1 and T2. The record's summary said `blocked`, "awaiting your start", click "Start both". Its wrap-up asked nothing, as the cards were the ask, so rule 6 made it `review_ready`, as the app does (4.23118.0's `Cy` and `Jx`, unchanged since 4.4212.0). The key went Done, and seen at once, with the session on screen.
+    - 18:11:04, the user started both. Each is a session of its own (pids 86749 and 86758), linked to the parent only by `spawnedFrom` in its record. The mod's `threads` covers only loops in one process, so the parent stayed Done.
+    - The pending cards were in the record's `backgroundTaskSuggestions`, which the deck never read; the app moves a started one to `resolvedBackgroundTaskSuggestions`.
+  - **The user's answers:** threads show as Background and `2 threads` on the parent, listed on its Agents page, and keep their own keys. For cards, "any pending card unless there is a lean way to determine if the card is a legitimate request vs. a suggestion": the app's own summary is that way, one condition on what the deck already reads. Of this Mac's 48 records, one has a card pending, a suggestion since 11-05 whose summary says `completed`: it stays Done.
+  - **Built:** the records' three fields; rule 6's exception while cards wait; offers within rule 2; rule 9; `2 threads` and the threads on the Agents pages; recheck's `rare` fields; the fake deck's rules 2, 6 and 9; the README.
+  - **Checks:** deck 536 of 536 three ways (the clock two days ahead and a week back), typecheck, build and validate; a mutation of each new rule fails a test; tools 304; recheck 40 ok on this Mac.
+  - **Live,** deck 0.7.0 from 00:38:17Z: `STATUS local_77373387… → background` and `SIDES local_77373387…: 2 unfinished: local_4047ebf2… working, local_4f1f894d… working`. The device was away (display asleep from 00:35:41Z), so the key paints when it comes back.
+  - **Not seen live:** an offer card, and cards waiting with a blocked summary. Both are tested from the records' real shapes.
+  - Later, 00:41:23Z: T2's turn ended, and the parent went to `1 unfinished`, T1 still working. The device had come back at 00:40:27Z and repainted every key.
+  - **Committed** at the user's word, the same day. Not pushed: the work Mac takes it once the user pushes, then runs `git pull` and `setup` there.
 
 ## Progress
 
@@ -1473,4 +1489,6 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - The build, the review and its fixes are done, and every check passes (Log, 2026-11-07).
   - A second review, of the fixes, is done too.
   - **The smoke test passed live,** 2026-11-08, on deck 0.6.0: 15 of 16 steps by the log, and the user saw the rest. Step 1 had no key reading Not running on the user's layout.
-  - Still to come: the commit and release, and a day on the work Mac.
+  - **Committed (3acd86e), released and pushed,** 2026-11-08, with every check passing on the final tree. Plugin 0.4.0 is in the release copy, and `status` says installed and current; sessions load it when they next start. GitHub's `main` is at 3acd86e.
+  - Still to come: a day on the work Mac, once the user runs `git pull` and `setup` there.
+  - **Task cards and threads,** 2026-11-08 (Log): deck 0.7.0 is built, live and committed, with every check passing. The plugin didn't change, so nothing is released. Not pushed. The user's key for the parent session is to be looked at on the device.

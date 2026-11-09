@@ -129,9 +129,29 @@ export function needsInput(record) {
   let category = validSummary(record.postTurnSummary)?.status_category
   if (valid && category !== 'failed') {
     if (wrapUp.needsUser !== undefined) category = 'blocked'
-    else if (category === 'blocked' || category === 'need_input') category = 'review_ready'
+    // While cards wait for the user, they're the turn's ask: the summary's own category stands (2026-11-08).
+    else if ((category === 'blocked' || category === 'need_input') && waitingCards(record).length === 0) category = 'review_ready'
   }
   return category === 'blocked' || category === 'need_input'
+}
+
+/**
+ * The session cards waiting for the user (PROTOCOL.md's 2026-11-08 amendment): `backgroundTaskSuggestions` entries that
+ * are objects with a string `id`, an accepted offer left out, which waits for its brief.
+ */
+export function waitingCards(record) {
+  const cards = record.backgroundTaskSuggestions
+  return Array.isArray(cards) ? cards.filter((c) => isObject(c) && typeof c.id === 'string' && c.accepted !== true) : []
+}
+
+/**
+ * The session a record's session is a thread of (PROTOCOL.md's 2026-11-08 amendment): `spawnedFrom.sessionId` when
+ * another session started it, not the user's own side chat, nor one detached. Null for any other.
+ */
+export function parentOf(record) {
+  const from = record.spawnedFrom
+  if (!isObject(from) || from.sideSession !== true || from.btw === true || from.userFork === true || record.lineageDetached === true) return null
+  return typeof from.sessionId === 'string' && /^local_[A-Za-z0-9-]{1,64}$/.test(from.sessionId) ? from.sessionId : null
 }
 
 /**
@@ -149,5 +169,9 @@ export async function readRecord(file) {
   if (!isObject(obj)) return null
   const out = pick(obj, ['model', 'effort', 'permissionMode', 'lastFocusedAt'])
   out.needsUser = needsInput(obj)
+  // 2026-11-08: an offer card waiting (status rule 2), and the session this one is a thread of (rule 9).
+  out.offer = waitingCards(obj).some((c) => c.offer === true)
+  out.parent = parentOf(obj)
+  out.archived = obj.isArchived === true
   return out
 }
