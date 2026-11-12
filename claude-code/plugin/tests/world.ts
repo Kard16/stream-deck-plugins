@@ -181,7 +181,8 @@ export function world(on: On, o: WorldOptions = {}) {
       route: url.pathname,
       query,
       headers,
-      body: init.body === undefined ? undefined : JSON.parse(init.body),
+      // The mod sends text alone; a `{ base64 }` body (the API's since 2.1.321) is kept as it is.
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : init.body,
       at: clock.now(),
     }
     sent.push(req)

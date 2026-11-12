@@ -203,8 +203,9 @@ async function play($: Engine, on: On, lines: readonly Json[]): Promise<string[]
     const headers: Record<string, string> = {}
     for (const [k, v] of Object.entries(init.headers ?? {})) headers[k.toLowerCase()] = v
     let body: Json
+    // The mod sends text alone. A `{ base64 }` body (the API's since 2.1.321) shows as it is, and matches no line.
     try {
-      body = init.body === undefined ? undefined : JSON.parse(init.body)
+      body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body
     } catch {
       body = init.body
     }
