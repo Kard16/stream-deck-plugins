@@ -1,7 +1,6 @@
 import { CONTEXT_HIGH, clip, clipKeep, fits, wrap } from "../keys/art.js";
 import { agentPages, agentsHead, costText, ENDED_COLOR, type Label, modeName, modelAndEffort, sinceText, STATUS_COLORS, tokensText, workLabel } from "../model/format.js";
-import type { SessionView } from "../model/sessions.js";
-import { EXIT_PLAN } from "../protocol/wire.js";
+import { askNeed, type SessionView } from "../model/sessions.js";
 import type { Feedback } from "../util/painter.js";
 import { contextPercent, NEED_WORDS, toolName } from "./art.js";
 import type { SlotScreen, SlotStripRender } from "./dials.js";
@@ -282,13 +281,14 @@ function approvalStrip(screen: Extract<SlotScreen, { kind: "approval" }>, now: n
 }
 
 /**
- * A question or a plan, which the deck never answers (PROTOCOL.md, Held requests): the key's word for it (`Question`,
- * `Plan`), its summary on up to two lines, and `Answer in app`, which a press opens.
+ * An `ask`, which the deck never answers (PROTOCOL.md, Held requests): the key's word for it (`Question`, `Plan`, or
+ * `Approve?` for a tool the app approves on its own card), its summary on up to two lines, and `Answer in app`, which
+ * a press opens.
  */
 function inAppStrip(screen: Extract<SlotScreen, { kind: "inApp" }>, now: number): Feedback {
 	const [l1 = "", l2 = ""] = lines("inApp", "line1", screen.summary, 2);
 	return {
-		head: text("inApp", "head", NEED_WORDS[screen.tool === EXIT_PLAN ? "plan" : "question"]),
+		head: text("inApp", "head", NEED_WORDS[askNeed(screen.tool)]),
 		since: text("inApp", "since", sinceText(screen.session.since, now) ?? ""),
 		line1: { value: l1 },
 		line2: { value: l2 },

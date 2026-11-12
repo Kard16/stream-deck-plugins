@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 import type { PollReply } from "../src/bridge/commands.js";
 import { PromptKeys } from "../src/keys/commands.js";
 import { DecisionKeys, type KeySurface, SETTLE_MS } from "../src/keys/decision.js";
-import { Devices, DRIFT_RATIO, sleptText, WAKE_REPAINTS_MS, WAKE_WINDOW_MS, wakeLine } from "../src/model/devices.js";
+import { BEAT_MS, Devices, SLEEP_GAP_MS, sleptText, WAKE_REPAINTS_MS, WAKE_WINDOW_MS, wakeLine } from "../src/model/devices.js";
 import { SessionModel } from "../src/model/sessions.js";
 import { ALLOW_DECISION } from "../src/protocol/wire.js";
 import type { RegistrySession } from "../src/registry/registry.js";
@@ -18,30 +18,32 @@ import { OthersKeys } from "../src/slots/others.js";
 import { Slots } from "../src/slots/slots.js";
 import { MemorySlotStore } from "../src/slots/store.js";
 import { slotStrip } from "../src/slots/strip.js";
+import { idleCounts, resetIdleCounts } from "../src/util/idle.js";
 import { FakeClock } from "./helpers/fake-clock.js";
 import { deckRoot } from "./helpers/paths.js";
 import { RecordingLog } from "./helpers/recording-log.js";
 
 const DECK = { id: "D1", name: "Stream Deck +" };
 
-/** Devices on a fake clock, with a wall clock the test moves, counting its repaints and what it told onLive. */
+/** Devices on a fake clock, with a wall clock that goes with it, counting its repaints and what it told onLive. */
 function setup() {
 	const clock = new FakeClock();
-	let wall = 1_793_600_000_000;
+	const from = clock.now();
+	/** How far the wall clock went on its own: a sleep the timers didn't count, or the clock being set. */
+	let apart = 0;
 	const log = new RecordingLog();
 	const told: boolean[] = [];
 	let repaints = 0;
-	const devices = new Devices({ log, clock, wallNow: () => wall, repaint: () => repaints++, onLive: (live) => told.push(live) });
-	/** Time awake: both clocks move. */
-	const advance = (ms: number): void => {
-		wall += ms;
-		clock.advance(ms);
+	const devices = new Devices({ log, clock, wallNow: () => 1_793_600_000_000 + (clock.now() - from) + apart, repaint: () => repaints++, onLive: (live) => told.push(live) });
+	/** Time awake: both clocks move, and the timers due on the way run when they're due. */
+	const advance = (ms: number): void => clock.advance(ms);
+	/** System sleep as macOS has it: both clocks go on and nothing runs, so the timers due meanwhile run at the wake. */
+	const sleep = (ms: number): void => clock.sleep(ms);
+	/** The wall clock alone moves: system sleep under timers that don't count it, or the clock set forward or back. */
+	const wallOnly = (ms: number): void => {
+		apart += ms;
 	};
-	/** System sleep: only the wall clock moves, as performance.now() stops while macOS sleeps. */
-	const sleep = (ms: number): void => {
-		wall += ms;
-	};
-	return { devices, clock, log, told, repaints: () => repaints, advance, sleep, info: () => log.at("info").map((l) => l.slice("info ".length)) };
+	return { devices, clock, log, told, repaints: () => repaints, advance, sleep, wallOnly, info: () => log.at("info").map((l) => l.slice("info ".length)) };
 }
 
 describe("which Stream Decks are connected (src/model/devices.ts, agents-and-wake.md C1)", () => {
@@ -158,7 +160,7 @@ describe("the wake (src/model/devices.ts, agents-and-wake.md C2 and C4)", () => 
 		advance(1);
 		assert.equal(repaints(), 4);
 		advance(10_000);
-		assert.deepEqual([repaints(), clock.pendingTimers], [5, 0]);
+		assert.deepEqual([repaints(), clock.pendingTimers], [5, 1], "the beat alone is waiting");
 		devices.disconnected(DECK.id, DECK.name);
 		devices.woke();
 		advance(20_000);
@@ -166,7 +168,7 @@ describe("the wake (src/model/devices.ts, agents-and-wake.md C2 and C4)", () => 
 		assert.ok(log.at("debug").includes("debug no repaint 10 s after the wake: no device is connected"));
 		devices.woke();
 		devices.dispose();
-		assert.equal(clock.pendingTimers, 0, "dispose stops a wake's repaints");
+		assert.equal(clock.pendingTimers, 0, "dispose stops a wake's repaints, and the beat");
 	});
 
 	test("a device that connects within 60 s of a wake says how long after it, to a tenth of a second; later, it doesn't", () => {
@@ -186,28 +188,80 @@ describe("the wake (src/model/devices.ts, agents-and-wake.md C2 and C4)", () => 
 		);
 	});
 
-	test("the wake line says how long the Mac was in system sleep, from how much further the wall clock went than the monotonic clock; a display's sleep is no system sleep", () => {
+	test("the wake line says how long the Mac was in system sleep, by how late the deck's beat came; a display's sleep is no system sleep", () => {
 		const { devices, advance, sleep } = setup();
+		assert.deepEqual([BEAT_MS, SLEEP_GAP_MS], [30_000, 2000]);
+		resetIdleCounts();
 		advance(10 * 60_000);
-		assert.equal(devices.woke(), 0, "awake throughout: the display only");
+		assert.equal(idleCounts().beat, 20, "a beat every 30 s, counted for the idle line");
+		assert.equal(devices.woke(), 0, "awake throughout, every beat on time: the display only");
 		assert.equal(wakeLine(0), "woke up: rescanning; no system sleep");
-		advance(60_000);
+		// The Mac sleeps 41 min, 20 s into a beat. The clocks go on and nothing runs; the beat due meanwhile runs at the
+		// wake, 41 min less the 10 s it had left late, and the app's wake comes 3 s after it.
+		advance(20_000);
 		sleep(41 * 60_000);
 		advance(3000);
 		const slept = devices.woke();
-		assert.equal(slept, 41 * 60_000);
+		assert.equal(slept, 41 * 60_000 - 10_000);
 		assert.equal(wakeLine(slept), "woke up: rescanning; slept 41 min");
-		sleep(1900);
-		assert.equal(devices.woke(), 0, "under 2 s: the clocks' jitter, or a time sync");
-		sleep(2500);
-		assert.equal(wakeLine(devices.woke()), "woke up: rescanning; slept 3 s");
-		// Two days awake, which the clocks drift apart in by a few seconds: that isn't sleep, though a minute is.
-		advance(2 * 86_400_000);
-		sleep(2 * 86_400_000 * DRIFT_RATIO * 0.9);
+		assert.equal(devices.woke(), 0, "a sleep is told once");
+		// The app's wake can come before the late beat: it reads the same, and the beat, timed afresh, doesn't count it again.
+		advance(5000);
+		sleep(10 * 60_000);
+		assert.equal(devices.woke(), 10 * 60_000 - 25_000);
+		advance(10 * 60_000);
 		assert.equal(devices.woke(), 0);
-		advance(2 * 86_400_000);
-		sleep(60_000);
-		assert.equal(devices.woke(), 60_000);
+	});
+
+	test("a beat under 2 s late isn't sleep, and a sleep shorter than what was left of its beat goes unseen", () => {
+		const { devices, advance, sleep } = setup();
+		advance(29_000);
+		sleep(2900);
+		advance(0);
+		assert.equal(devices.woke(), 0, "1.9 s late: the loop's own lag");
+		advance(29_000);
+		sleep(3500);
+		advance(0);
+		assert.equal(wakeLine(devices.woke()), "woke up: rescanning; slept 3 s");
+		advance(1000);
+		sleep(25_000);
+		advance(0);
+		assert.equal(devices.woke(), 0, "the beat still came on time: what the measure can't see");
+	});
+
+	test("a night's sleep with dark wakes between adds up to the one wake line", () => {
+		const { devices, advance, sleep } = setup();
+		advance(10_000);
+		sleep(3_600_000);
+		// A dark wake, 1 s long: the late beat runs, and the next is timed from it.
+		advance(1000);
+		sleep(2 * 3_600_000);
+		advance(1000);
+		const slept = devices.woke();
+		assert.equal(slept, 3 * 3_600_000 - 20_000 - 29_000, "each stretch short by what was left of its beat");
+		assert.equal(wakeLine(slept), "woke up: rescanning; slept 2 h 59 min");
+	});
+
+	test("the measure holds under timers that don't count the sleep, and a wall clock set back is no sleep", () => {
+		const { devices, advance, wallOnly } = setup();
+		// The wake before the beat: 23 s of the beat gone awake, and 41 min asleep.
+		advance(20_000);
+		wallOnly(41 * 60_000);
+		advance(3000);
+		assert.equal(devices.woke(), 41 * 60_000 - 7000);
+		// The beat first: it waited its whole 30 s awake, so it's late by the sleep exactly.
+		advance(20_000);
+		wallOnly(10 * 60_000);
+		advance(15_000);
+		assert.equal(devices.woke(), 10 * 60_000);
+		// The clock set back an hour, then time awake: no sleep, and the next one is still measured.
+		wallOnly(-3_600_000);
+		advance(5 * 60_000);
+		assert.equal(devices.woke(), 0);
+		advance(30_000);
+		wallOnly(90_000);
+		advance(30_000);
+		assert.equal(devices.woke(), 90_000);
 	});
 
 	test("how long it slept reads as seconds, minutes, or hours and minutes", () => {

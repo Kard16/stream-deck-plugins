@@ -104,7 +104,7 @@ function findKey(v, keys, at) {
  *   pass.
  * - A 2xx answer, the one Claude Code parses, is exactly Allow, Deny or {}. No field of its own, at the top (Claude
  *   Code's own HOOK_FIELDS among them) or inside `hookSpecificOutput`.
- * - With `request`, the hook's input the answer is for: an AskUserQuestion or an ExitPlanMode gets no decision. The deck
+ * - With `request`, the hook's input the answer is for: a kind ask request (ASK_TOOLS) gets no decision. The deck
  *   never answers one, and only a release rule's {} ends it (Phase 9).
  * - Any other is an error answer, which Claude Code doesn't parse: `{"error": "<reason>"}` exactly, as
  *   "Transport" writes it. auth's 405 for `GET /v1/permission` is one.

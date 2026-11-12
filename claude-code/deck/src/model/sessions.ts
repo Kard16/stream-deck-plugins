@@ -5,6 +5,7 @@ import { type Held, HeldRequests } from "../bridge/held.js";
 import type { BridgeRoutes, BridgeState, RouteAnswer } from "../bridge/server.js";
 import { fingerprint, summary } from "../protocol/fingerprint.js";
 import {
+	ASK_QUESTION,
 	ASK_TOOLS,
 	asHost,
 	EXIT_PLAN,
@@ -36,12 +37,25 @@ import { type SessionState, type SessionStatus, sessionState, UNFINISHED } from 
 import { asVersion, type VersionCheck } from "./versions.js";
 
 /**
- * What a session waits on (session-keys.md, What each session shows): `approval`, a held `tool` request; `question`,
- * a held AskUserQuestion; `plan`, a held ExitPlanMode; `input`, the registry's `waiting` with nothing held, or the
- * app's own needs-input sign. It follows the session's oldest held request, which its Session Slot dial shows, so with
- * several held it can differ from the status, which puts a `tool` request first.
+ * What a session waits on (session-keys.md, What each session shows): `approval`, a held `tool` request, or a held
+ * `ask` that's a tool's approval on the app's own card (the app's terminal tools); `question`, a held
+ * AskUserQuestion; `plan`, a held ExitPlanMode; `input`, the registry's `waiting` with nothing held, or the app's own
+ * needs-input sign. It follows the session's oldest held request, which its Session Slot dial shows, so with several
+ * held it can differ from the status, which puts a `tool` request first.
  */
 export type Need = "approval" | "question" | "plan" | "input";
+
+/** What a held `ask` waits on: a plan, a question, or for any other tool, its approval in the app. */
+export function askNeed(tool: string): "plan" | "question" | "approval" {
+	return tool === EXIT_PLAN ? "plan" : tool === ASK_QUESTION ? "question" : "approval";
+}
+
+/**
+ * How long after the deck's Allow a session may still read `waiting` before the Allow counts as not taken. A taken
+ * one frees the session at once: the registry left `waiting` 56–167 ms after each of the nine Allows in the logs of
+ * 2026-11-06 to 11-08. The two that Claude Code didn't take, on 2026-11-11, waited 6.6 s and 9.9 s for the app's card.
+ */
+export const ALLOW_TAKEN_MS = 2000;
 
 /**
  * One of a session's unfinished threads (PROTOCOL.md's 2026-11-08 amendment): a session it started, which the app's
@@ -369,7 +383,7 @@ export class SessionModel implements BridgeRoutes {
 		this.#versions = opts.versions ?? null;
 		this.#refusals = new QuietLog(this.#log, { clock: this.#clock });
 		this.#noHellos = new QuietLog(this.#log, { clock: this.#clock });
-		this.held = new HeldRequests({ log: this.#log });
+		this.held = new HeldRequests({ log: this.#log, wallNow: this.#wallNow });
 		this.commands = new CommandQueue({ clock: this.#clock, log: this.#log, inFlightMs: opts.inFlightMs });
 		this.#inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
 		this.#front = opts.front ? new FrontWatcher(opts.front, () => this.#claudeInFront(), { clock: this.#clock, log: this.#log }) : null;
@@ -439,6 +453,7 @@ export class SessionModel implements BridgeRoutes {
 			const host = asHost(s.hostSessionId);
 			if (host === null) continue;
 			const old = before.get(key);
+			if (s.status !== "waiting") this.#allowTaken(host, old, s.statusUpdatedAt ?? now);
 			if (old?.status === "waiting" && s.status !== "waiting") {
 				const mine = this.held.forHost(host);
 				const changedAt = s.statusUpdatedAt ?? now;
@@ -1191,6 +1206,21 @@ export class SessionModel implements BridgeRoutes {
 	}
 
 	/**
+	 * Whether Claude Code took the session's last Allow from the deck, now that it no longer reads `waiting`: it didn't
+	 * if the session went on waiting {@link ALLOW_TAKEN_MS} past it, in the `waiting` that began before it. Then the
+	 * app's own card answered, as for a tool that needs the person, and the press on the deck did nothing: the warning
+	 * names the tool, which belongs in ASK_TOOLS if Claude Code never takes an Allow for it (PROTOCOL.md, Permission
+	 * requests). A `waiting` that began after the Allow is another wait, which the Allow led to.
+	 */
+	#allowTaken(host: string, old: RegistrySession | undefined, changedAt: number): void {
+		const allowed = this.held.takeAllowed(host);
+		if (!allowed || old?.status !== "waiting" || (old.statusUpdatedAt ?? 0) > allowed.at) return;
+		const waited = changedAt - allowed.at;
+		if (waited < ALLOW_TAKEN_MS) return;
+		this.#log.warn(`ALLOW NOT TAKEN #${allowed.held.id} ${quote(allowed.held.tool, 60)}: ${host} waited ${(waited / 1000).toFixed(1)} s more, until the app answered it; a tool Claude Code takes no Allow for belongs in ASK_TOOLS`);
+	}
+
+	/**
 	 * A PermissionRequest from a confirmed session. Its mode and effort are the session's, the engine's own at that
 	 * moment, which no hello replaces (`take`). It's held (PROTOCOL.md, Permission requests), and nothing of its
 	 * `tool_input` is kept beyond its summary and fingerprint (Held requests).
@@ -1252,6 +1282,7 @@ export class SessionModel implements BridgeRoutes {
 	 */
 	#ended(host: string): void {
 		for (const h of this.held.forHost(host)) this.held.release(h.id, "no registry file lists the session any more (rule 4)");
+		this.held.takeAllowed(host);
 		this.commands.failHost(host, "the session ended");
 		this.#bridge.delete(host);
 		this.#pressedAt.delete(host);
@@ -1570,9 +1601,9 @@ function since(
 	}
 }
 
-/** What the session waits on: its oldest held request's kind, else `input` while its status says it needs you. */
+/** What the session waits on: its oldest held request's, else `input` while its status says it needs you. */
 function needOf(state: SessionState, oldest: Held | null): Need | null {
-	if (oldest) return oldest.kind === "tool" ? "approval" : oldest.tool === EXIT_PLAN ? "plan" : "question";
+	if (oldest) return oldest.kind === "tool" ? "approval" : askNeed(oldest.tool);
 	return state.status === "needs-you" ? "input" : null;
 }
 

@@ -2,7 +2,7 @@
 	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
 	"UUID": "com.karimdhanji.claude",
 	"Name": "Claude Code",
-	"Version": "0.7.0.0",
+	"Version": "0.7.2.0",
 	"Author": "Karim Dhanji",
 	"Description": "Live status for Claude Code desktop sessions, with a key and a dial for each session, approvals and saved prompts.",
 	"Category": "Claude Code",

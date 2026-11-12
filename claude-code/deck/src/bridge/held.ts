@@ -10,8 +10,8 @@ export interface Responder {
 
 /**
  * `tool`: Approve and Deny answer it, and so does its session's Session Slot dial. `ask` (AskUserQuestion,
- * ExitPlanMode): the keys and the dial show it, and a press on any of them jumps to its session; the deck never answers
- * one (PROTOCOL.md, Permission requests).
+ * ExitPlanMode, the app's terminal tools: wire.ts's ASK_TOOLS): the keys and the dial show it, and a press on any of
+ * them jumps to its session; the deck never answers one (PROTOCOL.md, Permission requests).
  */
 export type HeldKind = "tool" | "ask";
 
@@ -37,11 +37,14 @@ export type Held = {
 
 export type Decision = "allow" | "deny";
 
+/** An Allow a press sent, and the wall-clock ms it went at: see {@link HeldRequests.takeAllowed}. */
+export type Allowed = { readonly held: Held; readonly at: number };
+
 export type DialAnswerResult =
 	| { ok: true; held: Held; remaining: number }
 	/**
 	 * empty: the session has nothing held. changed: its oldest isn't the request the strip showed. gone: the oldest's
-	 * client had already gone; it's removed. ask: the oldest is a question or a plan, which the deck never answers.
+	 * client had already gone; it's removed. ask: the oldest is an `ask`, which the deck never answers.
 	 * Nothing is sent in any of these.
 	 */
 	| { ok: false; why: "empty" | "changed" | "gone" | "ask"; held: Held | null; detail: string };
@@ -66,11 +69,15 @@ type Entry = { held: Held; responder: Responder };
 export class HeldRequests {
 	readonly #entries: Entry[] = [];
 	readonly #listeners = new Set<() => void>();
+	/** Each session's latest Allow from a press, while it's the last thing the deck knows of that session's waiting. */
+	readonly #allowed = new Map<string, Allowed>();
 	readonly #log: Log;
+	readonly #wallNow: () => number;
 	#nextId = 1;
 
-	constructor(opts: { log?: Log } = {}) {
+	constructor(opts: { log?: Log; wallNow?: () => number } = {}) {
 		this.#log = opts.log ?? nullLog;
+		this.#wallNow = opts.wallNow ?? Date.now;
 	}
 
 	get size(): number {
@@ -102,6 +109,8 @@ export class HeldRequests {
 	hold(req: Omit<Held, "id">, responder: Responder): Held {
 		const held: Held = { ...req, id: this.#nextId++ };
 		this.#entries.push({ held, responder });
+		// Whatever the session waits on now is this request, not what became of an earlier Allow.
+		this.#allowed.delete(held.host);
 		// The fp is logged so ladder step 4 can compare it with the mod's for the same call (PROTOCOL.md).
 		this.#log.info(`HELD #${held.id} ${held.kind} ${quote(held.tool, 60)} ${quote(held.summary, 40)} fp ${held.fp ?? "none"} from ${held.host}${held.agent === null ? "" : ` agent ${quote(held.agent, 40)}`}; ${this.size} held`);
 		this.#emit();
@@ -145,6 +154,7 @@ export class HeldRequests {
 		this.#entries.shift();
 		this.#send(entry, decision === "allow" ? ALLOW_DECISION : DENY_DECISION);
 		this.#log.info(`ANSWER #${entry.held.id} ${quote(entry.held.tool, 60)}: ${decision}, from a key press; ${this.size} held`);
+		if (decision === "allow") this.#noteAllow(entry.held);
 		this.#emit();
 		return { ok: true, did: "answered", held: entry.held, decision, remaining: this.size };
 	}
@@ -166,12 +176,30 @@ export class HeldRequests {
 			this.#emit();
 			return { ok: false, why: "gone", held: entry.held, detail: `#${entry.held.id} had already closed; removed` };
 		}
-		if (entry.held.kind === "ask") return { ok: false, why: "ask", held: entry.held, detail: `#${entry.held.id} is a question or a plan, which is answered in the app` };
+		if (entry.held.kind === "ask") return { ok: false, why: "ask", held: entry.held, detail: `#${entry.held.id} is an ask, which is answered in the app` };
 		this.#entries.splice(i, 1);
 		this.#send(entry, decision === "allow" ? ALLOW_DECISION : DENY_DECISION);
 		this.#log.info(`ANSWER #${entry.held.id} ${quote(entry.held.tool, 60)}: ${decision}, from its session's dial; ${this.size} held`);
+		if (decision === "allow") this.#noteAllow(entry.held);
 		this.#emit();
 		return { ok: true, held: entry.held, remaining: this.size };
+	}
+
+	/**
+	 * The session's latest Allow from a press, once: null when it had none, when another of its requests was held as
+	 * it went, or when one has come since. The model takes it when the registry shows the session no longer waiting,
+	 * to tell an Allow that Claude Code didn't take (PROTOCOL.md, Permission requests).
+	 */
+	takeAllowed(host: string): Allowed | null {
+		const allowed = this.#allowed.get(host) ?? null;
+		this.#allowed.delete(host);
+		return allowed;
+	}
+
+	#noteAllow(held: Held): void {
+		// With another of its requests still held, the session goes on waiting whatever became of this one.
+		if (this.#entries.some((e) => e.held.host === held.host)) this.#allowed.delete(held.host);
+		else this.#allowed.set(held.host, { held, at: this.#wallNow() });
 	}
 
 	#take(id: number): Entry | null {

@@ -19,7 +19,7 @@ export const RETRY_TICK_MS = 1000;
  * Runs `fn` at the wall-clock moment its owner asks for (`at`): the slots repaint their keys, dials and Others with it
  * when a `since` they show next reads differently, a `59s` becoming `1m` say, and at no other time (hardening.md, B6).
  * Each `at` replaces the moment asked for before and times it afresh from the wall clock now, so a repaint after a
- * sleep, which the timers don't count, puts the next tick back on time. `fn`, which repaints, asks for the next; null
+ * sleep puts the next tick back on time, whether or not the timers counted it (on macOS they do). `fn`, which repaints, asks for the next; null
  * asks for none. A throw from `fn` is logged at error, and unless `fn` asked for a moment first, it runs again
  * RETRY_TICK_MS later: it runs from a timer, where a throw would be uncaught, and the SDK logs only the first uncaught
  * exception before the plugin goes down with the held requests. The timer never keeps the process up.

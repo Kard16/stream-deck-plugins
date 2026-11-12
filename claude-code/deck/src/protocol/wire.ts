@@ -38,11 +38,17 @@ export const ASK_QUESTION = "AskUserQuestion";
 export const EXIT_PLAN = "ExitPlanMode";
 
 /**
+ * The app's terminal tools, which it approves on a card of its own: Claude Code doesn't take a hook's plain Allow for
+ * them either, and the session went on waiting on that card (the user's two presses of 2026-11-11, plan.md's Log).
+ */
+export const TERMINAL_TOOLS: readonly string[] = ["mcp__terminal__run_in_terminal", "mcp__terminal__open_terminal_tab"];
+
+/**
  * Kind `ask`: the deck never answers these (Phase 9, at the user's word). The Approve and Deny keys and the session's
  * Session Slot dial read "Answer in app", and a press on any of them jumps to the session (PROTOCOL.md, Permission
  * requests).
  */
-export const ASK_TOOLS: ReadonlySet<string> = new Set([ASK_QUESTION, EXIT_PLAN]);
+export const ASK_TOOLS: ReadonlySet<string> = new Set([ASK_QUESTION, EXIT_PLAN, ...TERMINAL_TOOLS]);
 
 /**
  * The app's `local_…` ids, as its own `claude://code/continue` route accepts them (S5). Anything else, an

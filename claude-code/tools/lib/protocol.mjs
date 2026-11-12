@@ -59,11 +59,12 @@ export const AT_ONCE_MS = 60_000
 export const HOST_PATTERN = /^local_[A-Za-z0-9-]{1,64}$/
 
 /**
- * Requests for these are kind ask (PROTOCOL.md, "Permission requests", as amended on 2026-11-07 for Phase 9): Claude
- * Code needs the person for them, and the deck never answers one. The keys and the session's Session Slot dial read
- * "Answer in app", and a press jumps to the session. Only a release rule ends one.
+ * Requests for these are kind ask (PROTOCOL.md, "Permission requests", as amended on 2026-11-07 for Phase 9 and on
+ * 2026-11-11 for the app's terminal tools): Claude Code takes no plain Allow for them, and the deck never answers one.
+ * The keys and the session's Session Slot dial read "Answer in app", and a press jumps to the session. Only a release
+ * rule ends one.
  */
-export const ASK_TOOLS = Object.freeze(['AskUserQuestion', 'ExitPlanMode'])
+export const ASK_TOOLS = Object.freeze(['AskUserQuestion', 'ExitPlanMode', 'mcp__terminal__run_in_terminal', 'mcp__terminal__open_terminal_tab'])
 
 /**
  * A `threads` agent's kinds (PROTOCOL.md, "Events", Phase 9), from its `agent.spawn`; `other` for a loop the mod saw no

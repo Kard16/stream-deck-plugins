@@ -59,6 +59,19 @@ test('deck: requests sort into tool and ask, and both are held', () => {
   assert.deepEqual(view().held.map((h) => [h.tool, h.kind]), [['Write', 'tool'], ['AskUserQuestion', 'ask'], ['ExitPlanMode', 'ask']])
 })
 
+test("deck: the app's terminal tools are asks, which it approves on its own card; the terminal's other tools aren't", () => {
+  const { reg, hello, perm, view } = setup()
+  reg([A, 'busy'])
+  hello(A)
+  const held = [
+    perm(A, 'mcp__terminal__run_in_terminal', { command: 'make' }),
+    perm(A, 'mcp__terminal__open_terminal_tab', { title: 'logs' }),
+    perm(A, 'mcp__terminal__read_terminal', {}),
+  ]
+  assert.deepEqual(held.map((p) => [p.kind, p.r.sent]), [['ask', []], ['ask', []], ['tool', []]])
+  assert.deepEqual(view().held.map((h) => [h.summary, h.kind]), [['run in terminal', 'ask'], ['open terminal tab', 'ask'], ['read terminal', 'tool']])
+})
+
 test('deck: Approve and Deny act on the oldest held request across sessions, and only on the one the key showed', () => {
   const { deck, reg, perm, view } = setup()
   reg([A, 'busy'], [B, 'busy'])

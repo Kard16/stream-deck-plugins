@@ -152,7 +152,7 @@ export type DecisionLook = {
 
 /**
  * Approve or Deny: the oldest held request's session and what it's for, with the count in a badge. Green
- * (Approve) or red (Deny) while a tool waits; amber with "Answer in app" for a question or a plan. With nothing
+ * (Approve) or red (Deny) while a tool waits; amber with "Answer in app" for an `ask`. With nothing
  * held, dimmed and saying "Offline" while the bridge isn't listening. A request held when the bridge's server closed
  * or failed stays on the key all the same, as on its Session Slot dial: that server keeps its connection open, so a
  * press still answers it (PROTOCOL.md, Failure and recovery), and the key shows what a press acts on.

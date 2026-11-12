@@ -58,7 +58,7 @@ export type ApprovalChoice = (typeof APPROVAL_CHOICES)[number];
  * - `pages`: the session has nothing held: info page `page` of `pages`, counting from 0: Now, its Agents pages if any,
  *   Context, Setup.
  * - `approval`: a held `tool` request; `choices` as chips, `pick` the one turned to, null until a turn.
- * - `inApp`: a held question or plan ("Answer in app"), which the deck never answers (PROTOCOL.md, Held requests): a
+ * - `inApp`: a held `ask` ("Answer in app"), which the deck never answers (PROTOCOL.md, Held requests): a
  *   press jumps to the session.
  * Every screen with a request names it (`request`, the held id), which is what a press acts on.
  */
@@ -184,7 +184,7 @@ type Current =
  * about COALESCE_MS are painted together; nothing else is coalesced, and there's no acceleration.
  *
  * **A press or a tap:** on the pages, jumps to the session (jumpTo); on an approval, sends the chip turned to, or jumps
- * with none; on "Answer in app", a question or a plan, jumps and answers nothing, since the deck never answers one
+ * with none; on "Answer in app", an `ask`, jumps and answers nothing, since the deck never answers one
  * (Phase 9); on an empty slot, alerts. A press that turned while held is no press. A jump goes only to the session the
  * strip showed, at a push's dialDown or at a tap; one the slot took since alerts, as on a slot key.
  *

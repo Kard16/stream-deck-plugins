@@ -14,7 +14,7 @@ The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, d
 | Where | Action | What it does |
 |---|---|---|
 | Bottom row, 4 keys | **Session Slot** | One session per key: its state, title, context and what it's doing. Press to jump to it; hold to put the session on screen in the app on this key. |
-| The 4 dials | **Session Slot**, the same action on a dial | The session on the key above. The strip shows its details, or what it's waiting on: an approval to allow or deny, or a question or plan to answer in the app. Turn to page or pick; press or tap to jump or send. |
+| The 4 dials | **Session Slot**, the same action on a dial | The session on the key above. The strip shows its details, or what it's waiting on: an approval to allow or deny, or a question, a plan or a terminal command to answer in the app. Turn to page or pick; press or tap to jump or send. |
 | Top row | **Other Sessions**, and any of the keys below | How many sessions on no slot need you. Press to jump to the one that has waited longest. |
 
 The other keys work as before, on this page or another.
@@ -85,6 +85,7 @@ A placed one of these shows as a missing action, on this Mac or another: remove 
 - **The app's dialog stays up beside the deck's request, and still works.** Whichever answers first wins.
 - **A press counts only once its request has been on the key for 1 s,** so a double press can't answer a request you didn't see.
 - **A question or a plan reads "Answer in app".** A press on it jumps to its session, where you answer it. Its Session Slot dial reads the same.
+- **So does a command for the app's Terminal panel** (`run in terminal`, `open terminal tab`). The app approves those on a card of its own, and Claude Code takes no approval for them from the deck. Its key says `Approve?`.
 - **After an Esc in a session,** a Saved Prompt to it is refused until you type there yourself. That's Claude Code's rule.
 
 ## Statuses
@@ -228,7 +229,8 @@ Only the Mac where the repository is developed changes it. Another Mac pulls wha
 - **A session is on no key, and Other Sessions doesn't count it,** after you moved or removed a Session Slot key: the key's old place still holds it, as a slot on another page would. Open the session in the app, then hold the slot key you want it on.
 - **A key stays lit after you looked:** the deck counts a look when the session comes on screen in the app on this Mac, or while it's on screen there with Claude in front. It checks which app is in front only while a Session Slot or Other Sessions key is on the deck. A press on its key counts too.
 - **A dial alerts and sends nothing:** the request had been on the strip for under a second, your pick had only just shown, or it was answered somewhere else first. Look at the strip again, then press.
-- **A dial reads Answer in app:** the session waits on a question or a plan, which the deck never answers. Press the dial to jump to the session, and answer there.
+- **A dial reads Answer in app:** the session waits on a question, a plan or a command for the app's Terminal panel, which the deck never answers. Press the dial to jump to the session, and answer there.
+- **An Approve did nothing, and the app's card stayed up:** Claude Code took no approval from the deck for that tool. The deck's log has an `ALLOW NOT TAKEN` line naming it. Approve in the app, and tell a session in this repo: the tool belongs with the ones that read Answer in app.
 - **A Saved Prompt press alerts:** the deck's log says why. Often the target has ended, or its last prompt is still waiting. It can also mean the session's plugin hasn't checked in for a minute, as when the session's process was replaced while the deck restarted. The deck sends it nothing until it checks in again, which a live plugin does within a second. Approve and Deny still work meanwhile.
 - **Logs:**
   - The deck: `deck/com.karimdhanji.claude.sdPlugin/logs/com.karimdhanji.claude.0.log`. For more detail, write `debug` to `deck/com.karimdhanji.claude.sdPlugin/log-level.txt` and restart the plugin.
@@ -245,8 +247,14 @@ The Stream Deck app turns the Stream Deck off at every display sleep or lock, an
    mise exec node -- node claude-code/tools/doctor.mjs | tee ~/Desktop/deck-doctor.txt
    ```
    It says whether macOS sees the Stream Deck on USB, whether the Stream Deck app has it, the deck plugin's Device, wake and Bridge lines, and macOS's sleep history, over the last 12 hours (`--hours 48` for more), then what to try. It's read only.
-3. **Quit and reopen the Stream Deck app.**
-4. **Re-plug** the Thunderbolt cable.
+3. **Restart the deck plugin alone,** from `claude-code/deck` in the clone:
+   ```bash
+   npx streamdeck restart com.karimdhanji.claude
+   ```
+4. **Quit and reopen the Stream Deck app.**
+5. **Re-plug** the Thunderbolt cable.
+
+Note which step brought it back: it names the part that failed, the plugin, the Stream Deck app, or the USB link below both.
 
 **Settings worth trying on the work Mac:**
 - **System Settings, Battery, Options:** turn on "Prevent automatic sleeping on power adapter when the display is off", if MDM allows it. The Mac then stays out of system sleep on power; the app still turns the Stream Deck off while the display sleeps.

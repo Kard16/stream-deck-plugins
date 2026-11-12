@@ -148,8 +148,8 @@ streamDeck.actions.onDialDown((ev) => pressed(ev.action.device));
 streamDeck.actions.onTouchTap((ev) => pressed(ev.action.device));
 
 // After sleep: re-read everything at once, listen again if the bridge had stopped, and repaint the slots' keys, dials
-// and Others, which times their next repaint afresh: the timers don't count the sleep. The user is likely back, so the
-// front-app check asks every second again. The line says whether the Mac slept, or only its display (C4).
+// and Others, which times their next repaint afresh from the wall clock. The user is likely back, so the front-app
+// check asks every second again. The line says whether the Mac slept, or only its display, by Devices' beat (C4).
 streamDeck.system.onSystemDidWakeUp(() => {
 	log.info(wakeLine(devices.woke()));
 	void registry.scanNow();

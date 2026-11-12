@@ -205,6 +205,7 @@ function screens(): [string, SlotScreen][] {
 	out.push(["in app, question", { kind: "inApp", slot: SLOT, session: question, request: 5, tool: "AskUserQuestion", summary: "Which colour should the test use for th…" }]);
 	out.push(["in app, short question", { kind: "inApp", slot: SLOT, session: question, request: 6, tool: "AskUserQuestion", summary: "Red or blue?" }]);
 	out.push(["in app, plan", { kind: "inApp", slot: SLOT, session: plan, request: 7, tool: "ExitPlanMode", summary: "Plan ready" }]);
+	out.push(["in app, terminal", { kind: "inApp", slot: SLOT, session: approve, request: 8, tool: "mcp__terminal__run_in_terminal", summary: "run in terminal" }]);
 	return out;
 }
 
@@ -421,7 +422,7 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		assert.equal(value(strip("approval mcp"), "head"), "Allow set sessi…");
 	});
 
-	test("Answer in app: the key's Question or Plan, the summary on up to two lines, and the chip; an empty slot says how to fill it", () => {
+	test("Answer in app: the key's Question, Plan or Approve?, the summary on up to two lines, and the chip; an empty slot says how to fill it", () => {
 		const all = new Map(screens());
 		const strip = (name: string) => slotStrip(all.get(name) as SlotScreen, NOW).feedback;
 		const chip = { value: "Answer in app", color: "#FFFFFF", background: SLOT_STRIP_COLORS.inApp };
@@ -433,6 +434,10 @@ describe("the Session Slot strip's screens (session-keys.md, The strip)", () => 
 		const plan = strip("in app, plan");
 		assert.deepEqual(strings(plan, "head", "since", "line1", "line2"), ["Plan", "1m", "Plan ready", ""]);
 		assert.deepEqual(plan.chip, chip);
+		// A tool the app approves on its own card (the app's terminal tools) is the key's Approve?, answered in the app.
+		const terminal = strip("in app, terminal");
+		assert.deepEqual(strings(terminal, "head", "line1", "line2"), ["Approve?", "run in terminal", ""]);
+		assert.deepEqual(terminal.chip, chip);
 		assert.deepEqual(strings(slotStrip({ kind: "empty", slot: SLOT }, NOW).feedback, "name", "line1", "line2"), ["No session", "Hold the key above", "to add the one on screen"]);
 	});
 });

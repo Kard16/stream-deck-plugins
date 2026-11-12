@@ -48,8 +48,8 @@ type Key = {
 
 /**
  * The Approve or the Deny keys, without the SDK (PROTOCOL.md, Held requests). Each shows the oldest held
- * request across sessions: its session's title and what it's for, or "Answer in app" for a question or a
- * plan. A press acts only on the request the key last showed, and only once it has been in sight for
+ * request across sessions: its session's title and what it's for, or "Answer in app" for an `ask`: a
+ * question, a plan, or a tool the app approves on its own card. A press acts only on the request the key last showed, and only once it has been in sight for
  * {@link SETTLE_MS}: a `tool` request is answered (allow or deny); an `ask` jumps to its session, shows the
  * OK so the press reads as done, and stays held. A press after the shown request ended, or before it could
  * be seen, does nothing but alert.

@@ -8,6 +8,8 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
   - **Phase 8, efficiency and update resilience,** planned 2026-11-05. Built and committed 2026-11-06: deck 0.5.0 and plugin 0.3.0, live and released. The smoke test passed live the same day. Left are the reboot and a day of use; the plan's Log says where it stands. Its spec: `docs/claude-code/hardening.md`.
   - **Now: Phase 9, approvals, agents and wake,** started 2026-11-07 after a day on the work Mac. The dial stops answering questions and plans, and the Session key and Sessions dial go. Sessions running subagents or workflows show `Background`, a workflow's progress and an Agents page. The deck handles the device leaving and returning after sleep, and `tools/doctor.mjs` diagnoses a drop. Deck 0.6.0 and plugin 0.4.0: the smoke test passed live 2026-11-08, and they were committed (3acd86e), released and pushed that day. Left is a day on the work Mac. Its spec: `docs/claude-code/agents-and-wake.md`.
     - **Task cards and threads,** 2026-11-08 after the release, deck 0.7.0 (PROTOCOL.md's amendment of that day): a session whose cards wait for the user's start reads Needs you, and one whose threads (sessions it started) are unfinished reads Background. Built, live and committed that day; the plugin didn't change, so nothing is released. Not pushed.
+    - **The app's terminal tools,** 2026-11-11, deck 0.7.2 (PROTOCOL.md's amendment of that day): Claude Code takes no hook's Allow for `mcp__terminal__run_in_terminal` and `mcp__terminal__open_terminal_tab`, which the app approves on a card of its own, so they're kind `ask` and read "Answer in app". The deck warns `ALLOW NOT TAKEN` for any other tool whose Allow wasn't taken. The routine after the app's update passes on 2.1.321, and its smoke test passed live that evening, 15 of 16 steps by the log, with a terminal request reading "Answer in app". Built, live, committed and released that day (the plugin's tests changed); not pushed.
+    - **The wake line's sleep measure,** 2026-11-11, deck 0.7.1: every wake had read `no system sleep`, and the deck now tells a system sleep by a 30 s beat. This Mac never system-sleeps on power, so the drops on the work Mac can't be reproduced here unless the user sleeps it by hand, and a `slept` line is still to be seen live. Built and live, and committed with 0.7.2. The plan's Log of that day has the diagnosis.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
 ## Rules
@@ -101,6 +103,7 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 **System**
 - `streamDeck.system.openUrl` can't open custom URL schemes; run `open` through `child_process`.
 - macOS 26 can refuse localhost connections for minutes after a reboot. Retry with backoff, and resync on `onSystemDidWakeUp`.
+- Node's `performance.now()` and its timers count system sleep on macOS (libuv's `mach_continuous_time`), as the wall clock does. Tell a sleep by a timer that comes late, never by comparing clocks.
 - Two plugins share the Stream Deck app. Restart only your own with `streamdeck restart <uuid>`, never the app.
 
 ## Claude Code plugin (hooks and a mod)
@@ -120,6 +123,7 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 - Never give the hook `onFailure: "block"`: with the bridge down, it would deny every tool call.
 - A session reads `hooks.json` when it starts. A hot reload doesn't add a new hook.
 - PermissionRequest ignores exit code 2; answer with JSON.
+- Claude Code takes no hook's plain Allow for a call that needs the person: a question, a plan, or a tool the app approves on a card of its own. The hook's request doesn't say which, so those tools are listed (`ASK_TOOLS` in the deck's `wire.ts`), and the deck's log says `ALLOW NOT TAKEN` for one that isn't.
 
 **The desktop app**
 - Sessions are SDK-hosted. Their environment has `CLAUDE_CODE_SESSION_ID` and the app's own id, `CLAUDE_CODE_HOST_SESSION_ID` (`local_…`).

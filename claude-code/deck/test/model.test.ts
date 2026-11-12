@@ -478,6 +478,77 @@ describe("session model", () => {
 		assert.deepEqual([view(A)?.status, view(B)?.status], ["approval", "needs-you"]);
 	});
 
+	test("the app's terminal tools are asks: the app approves them on a card of its own, so they read needs-you, wait on an approval, and a press jumps", () => {
+		const { model, permission, view } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "busy" })]);
+		const run = permission(A, "mcp__terminal__run_in_terminal", { command: "ha core check" });
+		permission(B, "mcp__terminal__open_terminal_tab", { title: "logs" });
+		assert.deepEqual(
+			model.held.list().map((h) => [h.host, h.kind, h.summary]),
+			[
+				[A, "ask", "run in terminal"],
+				[B, "ask", "open terminal tab"],
+			],
+		);
+		assert.deepEqual([view(A)?.status, view(A)?.need, view(B)?.status, view(B)?.need], ["needs-you", "approval", "needs-you", "approval"]);
+		const oldest = model.held.oldest;
+		assert.deepEqual(model.held.press(oldest?.id ?? null, "allow"), { ok: true, did: "jump", held: oldest });
+		assert.deepEqual(run.answers, []);
+		// The terminal's other tools ask nothing of the app's card.
+		permission(A, "mcp__terminal__read_terminal", {});
+		assert.equal(model.held.list().at(-1)?.kind, "tool");
+	});
+
+	test("an Allow the session still waited on long after wasn't taken, and one warning names its tool; none for an Allow that freed it at once, a Deny, a wait that began after the Allow, or a newer request", () => {
+		const { model, at, permission, log } = setup([reg(1, A, { status: "busy" }), reg(2, B)]);
+		const notTaken = (): string[] => log.at("warn").filter((l) => l.includes("ALLOW NOT TAKEN"));
+		/** A request held at `t`, the registry's waiting a moment later, and a press at `pressAt`. */
+		const answer = (tool: string, t: number, pressAt: number, decision: "allow" | "deny" = "allow"): void => {
+			at(t);
+			permission(A, tool, { command: "x" });
+			model.setRegistry([reg(1, A, { status: "waiting", statusUpdatedAt: t + 1 }), reg(2, B)]);
+			at(pressAt);
+			assert.equal(model.held.press(model.held.oldest?.id ?? null, decision).ok, true);
+		};
+		const leaves = (t: number, status: "busy" | "idle" = "busy"): void => model.setRegistry([reg(1, A, { status, statusUpdatedAt: t }), reg(2, B)]);
+
+		// Taken: the session leaves waiting 100 ms after the Allow.
+		answer("Bash", 5000, 8000);
+		leaves(8100);
+		assert.deepEqual(notTaken(), []);
+		// Not taken: it waits 9.9 s more, until the app's own card is answered. Another session's change says nothing of it.
+		answer("mcp__x__card_tool", 10_000, 13_000);
+		model.setRegistry([reg(1, A, { status: "waiting", statusUpdatedAt: 10_001 }), reg(2, B, { status: "busy", statusUpdatedAt: 15_000 })]);
+		assert.deepEqual(notTaken(), []);
+		leaves(22_900);
+		const line = `warn ALLOW NOT TAKEN #2 "mcp__x__card_tool": ${A} waited 9.9 s more, until the app answered it; a tool Claude Code takes no Allow for belongs in ASK_TOOLS`;
+		assert.deepEqual(notTaken(), [line]);
+		// Once: the session's later changes say nothing more.
+		model.setRegistry([reg(1, A, { status: "waiting", statusUpdatedAt: 30_000 }), reg(2, B)]);
+		leaves(50_000, "idle");
+		assert.deepEqual(notTaken(), [line]);
+		// A Deny is always taken.
+		answer("Bash", 60_000, 61_000, "deny");
+		leaves(70_000, "idle");
+		// A wait that began after the Allow is another wait: the busy between them was shorter than a reading.
+		answer("Bash", 80_000, 81_000);
+		model.setRegistry([reg(1, A, { status: "waiting", statusUpdatedAt: 81_200 }), reg(2, B)]);
+		leaves(95_000);
+		// A newer request from the session: it waits on that one now.
+		answer("Bash", 100_000, 101_000);
+		at(101_100);
+		permission(A, "Write", { file_path: "/x/y" });
+		leaves(110_000);
+		// Another of its requests still held as the Allow went.
+		at(120_000);
+		permission(A, "Bash", { command: "a" });
+		permission(A, "Bash", { command: "b" });
+		model.setRegistry([reg(1, A, { status: "waiting", statusUpdatedAt: 120_001 }), reg(2, B)]);
+		const first = model.held.forHost(A).find((h) => h.summary === "a");
+		assert.equal(model.held.answer(A, first?.id ?? null, "allow").ok, true);
+		leaves(130_000);
+		assert.deepEqual(notTaken(), [line]);
+	});
+
 	test("rule 1: the session's tool.end with the same fp releases the oldest match; another session's doesn't", () => {
 		const { model, events, permission } = setup([reg(1, A, { status: "busy" }), reg(2, B, { status: "busy" })]);
 		const write = { file_path: "/x/s5.txt", content: "five" };

@@ -1,4 +1,5 @@
 import { type Clock, realClock, type TimerHandle } from "../util/clock.js";
+import { countIdle } from "../util/idle.js";
 import { describeError, type Log, nullLog, quote } from "../util/log.js";
 
 /**
@@ -12,16 +13,18 @@ export const WAKE_REPAINTS_MS: readonly number[] = [10_000, 20_000];
 export const WAKE_WINDOW_MS = 60_000;
 
 /**
- * The least gap that counts as system sleep: how much further the wall clock went than the monotonic one, which stops
- * while macOS sleeps (performance.now). Display sleep stops neither (agents-and-wake.md, C4).
+ * How often the deck notes the time (the beat), to tell a system sleep by (agents-and-wake.md, C4). No clock a Node
+ * process reads stops while macOS sleeps: performance.now and the timers run on mach_continuous_time (libuv's
+ * uv_hrtime), which counts the sleep as the wall clock does. But macOS stops every process while it sleeps, so the
+ * deck's own beat comes late by about as long. Display sleep stops nothing.
  */
-export const SLEEP_GAP_MS = 2000;
+export const BEAT_MS = 30_000;
 
 /**
- * Awake, the two clocks drift apart too, the monotonic one by its crystal while the wall clock is kept to time: a gap
- * under this share of the time awake since the last look is drift, not sleep. 100 ppm is a few times a crystal's.
+ * How late a beat is before it counts as system sleep. Awake, the deck's once-a-minute timer came at most 0.25 s late
+ * in 8,658 beats over six days, the display asleep or not (the IDLE lines, 2026-11-06 to 11-11).
  */
-export const DRIFT_RATIO = 1e-4;
+export const SLEEP_GAP_MS = 2000;
 
 /** How long the Mac slept, for the wake line: `38 s`, `41 min`, `2 h 5 min`. */
 export function sleptText(ms: number): string {
@@ -47,9 +50,9 @@ export type DevicesOptions = {
 	/** Some device is connected now, or none is any more (`live`): the front-app check and the slots' tick follow it. */
 	onLive?: (live: boolean) => void;
 	log?: Log;
-	/** Monotonic: the repaints after a wake, and the time since it. */
+	/** Monotonic: the beat, the repaints after a wake, and the time since it. */
 	clock?: Clock;
-	/** Wall-clock ms: how much further it went than the monotonic clock is how long the Mac slept. */
+	/** Wall-clock ms: how late a beat came by it is how long the Mac slept. */
 	wallNow?: () => number;
 };
 
@@ -67,6 +70,11 @@ export type DevicesOptions = {
  *   app sends willAppear at a plugin start for a device that's asleep or on the other Mac too.
  * - **The wake:** `woke` says how long the Mac was in system sleep, and a device that connects within WAKE_WINDOW_MS
  *   of it says how long after (C4).
+ * - **System sleep** is told by the beat: every BEAT_MS, from when it's made, it notes the wall clock, and a beat or a
+ *   wake that comes over SLEEP_GAP_MS later than a beat allows found the Mac asleep for that much longer. It holds
+ *   whichever clock the timers run on, one that counts the sleep (macOS) or one that doesn't. What it can't tell: a
+ *   sleep shorter than what was left of its beat goes unseen, each sleep reads short by up to a beat, and a wall clock
+ *   set forward, or the deck itself stalled, by over a beat reads as sleep.
  * Its lines, at info: `Device "<name>" (<id>) connected[, <s> s after the wake]`, `Device "<name>" (<id>)
  * disconnected`, and `Repaint: every key and strip (<why>)`, the formats claude-code/tools/smoke-check.mjs reads.
  */
@@ -82,8 +90,12 @@ export class Devices {
 	#wokeAt: number | null = null;
 	/** The repaints the last wake asked for. */
 	#timers: TimerHandle[] = [];
-	/** Both clocks at the last look, the start or a wake: the next wake's sleep is measured from them. */
-	#ref: { wall: number; mono: number };
+	/** The next beat's timer; null once disposed. */
+	#beat: TimerHandle | null = null;
+	/** The wall clock when it was last noted: at the start, a beat or a wake. */
+	#beatAt: number;
+	/** The system sleep the beats found since the last wake, in ms. */
+	#slept = 0;
 
 	constructor(opts: DevicesOptions) {
 		this.#repaint = opts.repaint;
@@ -91,7 +103,8 @@ export class Devices {
 		this.#log = opts.log ?? nullLog;
 		this.#clock = opts.clock ?? realClock;
 		this.#wallNow = opts.wallNow ?? Date.now;
-		this.#ref = this.#look();
+		this.#beatAt = this.#wallNow();
+		this.#arm();
 	}
 
 	/** Whether any device is connected: the painters hold their paints while none is. */
@@ -134,28 +147,54 @@ export class Devices {
 
 	/**
 	 * The Mac woke (the SDK's onSystemDidWakeUp, which comes at a display wake or an unlock too): asks for the repaints
-	 * after it, in place of the last wake's, and returns how long the Mac was in system sleep since the last look, in
-	 * ms; 0 for none.
+	 * after it, in place of the last wake's, and returns how long the Mac was in system sleep since the last wake, in
+	 * ms; 0 for none. The wake can come before the beat the sleep made late, so it notes the time as a beat does, and
+	 * times the next beat afresh: a beat is always due BEAT_MS after the time last noted.
 	 */
 	woke(): number {
-		const now = this.#look();
-		const awake = now.mono - this.#ref.mono;
-		const gap = now.wall - this.#ref.wall - awake;
-		this.#ref = now;
-		this.#wokeAt = now.mono;
-		this.dispose();
+		this.#note();
+		this.#arm();
+		const slept = this.#slept;
+		this.#slept = 0;
+		this.#wokeAt = this.#clock.now();
+		this.#stopRepaints();
 		this.#timers = WAKE_REPAINTS_MS.map((ms) => {
 			const timer = this.#clock.setTimeout(() => this.#afterWake(ms), ms);
 			(timer as { unref?: () => void }).unref?.();
 			return timer;
 		});
-		return gap > Math.max(SLEEP_GAP_MS, awake * DRIFT_RATIO) ? gap : 0;
+		return slept;
 	}
 
-	/** Stops the repaints a wake asked for. */
+	/** Stops the beat and the repaints a wake asked for. */
 	dispose(): void {
+		this.#stopRepaints();
+		if (this.#beat !== null) this.#clock.clearTimeout(this.#beat);
+		this.#beat = null;
+	}
+
+	#stopRepaints(): void {
 		for (const timer of this.#timers) this.#clock.clearTimeout(timer);
 		this.#timers = [];
+	}
+
+	/** Times the next beat a full BEAT_MS from now, in place of the one waiting. It never keeps the process up. */
+	#arm(): void {
+		if (this.#beat !== null) this.#clock.clearTimeout(this.#beat);
+		this.#beat = this.#clock.setTimeout(() => {
+			countIdle("beat");
+			this.#note();
+			this.#arm();
+		}, BEAT_MS);
+		(this.#beat as { unref?: () => void }).unref?.();
+	}
+
+	/** Notes the wall clock, and counts as system sleep whatever it went on by beyond a beat since it was last noted. */
+	#note(): void {
+		const wall = this.#wallNow();
+		const late = wall - this.#beatAt - BEAT_MS;
+		if (late > SLEEP_GAP_MS) this.#slept += late;
+		this.#beatAt = wall;
 	}
 
 	#afterWake(ms: number): void {
@@ -182,9 +221,5 @@ export class Devices {
 		} catch (err) {
 			this.#log.error(`repainting every key and strip threw: ${describeError(err)}`);
 		}
-	}
-
-	#look(): { wall: number; mono: number } {
-		return { wall: this.#wallNow(), mono: this.#clock.now() };
 	}
 }

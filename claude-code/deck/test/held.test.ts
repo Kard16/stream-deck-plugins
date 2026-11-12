@@ -82,6 +82,36 @@ describe("held requests", () => {
 		assert.equal(held.size, 1);
 	});
 
+	test("takeAllowed gives a session's last Allow once, with when it went: not a Deny, not with another of its requests held, and not once a newer one has come", () => {
+		let wall = 5000;
+		const held = new HeldRequests({ wallNow: () => wall });
+		assert.equal(held.takeAllowed("local_a"), null);
+		const a = held.hold(req("Bash"), new FakeResponder());
+		const b = held.hold(req("Write", { host: "local_b" }), new FakeResponder());
+		wall = 6000;
+		held.press(a.id, "allow");
+		assert.equal(held.takeAllowed("local_b"), null, "another session's");
+		assert.deepEqual(held.takeAllowed("local_a"), { held: a, at: 6000 });
+		assert.equal(held.takeAllowed("local_a"), null, "once");
+		// From a dial, as from a key.
+		wall = 7000;
+		held.answer("local_b", b.id, "allow");
+		assert.deepEqual(held.takeAllowed("local_b"), { held: b, at: 7000 });
+		// A Deny.
+		const c = held.hold(req("Bash"), new FakeResponder());
+		held.press(c.id, "deny");
+		assert.equal(held.takeAllowed("local_a"), null);
+		// Another of the session's requests is still held: it goes on waiting for that one.
+		const d = held.hold(req("Bash"), new FakeResponder());
+		const e = held.hold(req("Edit"), new FakeResponder());
+		held.press(d.id, "allow");
+		assert.equal(held.takeAllowed("local_a"), null);
+		// A newer request comes after the Allow.
+		held.press(e.id, "allow");
+		held.hold(req("Read"), new FakeResponder());
+		assert.equal(held.takeAllowed("local_a"), null);
+	});
+
 	test("a Session Slot dial answers its own session's oldest, Allow or Deny, and only the one its strip showed", () => {
 		const held = new HeldRequests();
 		const b = new FakeResponder();
