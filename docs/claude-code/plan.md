@@ -239,7 +239,7 @@ The user's revision after a day of use, 2026-11-04. The spec, with the user's an
 - The dial under each key belongs to its session. The strip pages through details, and the dial answers the session's questions, plans and approvals.
 - An Others key counts the sessions off the keys that need the user.
 - Verified by: the deck's checks and the new fixtures, then the user on the hardware with a throwaway session that asks a question, a plan and an approval.
-- Done 2026-11-04, committed as `00c7622`, and checked live by the user.
+- Done 2026-11-04, committed as `b8f4c1a`, and checked live by the user.
 
 ### Phase 8: efficiency and update resilience (only when the user says so)
 
@@ -515,7 +515,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - The tools import the reference implementation from `make-fixtures.mjs` instead of copying it.
   - **Re-run by the main thread:** plugin 51/51 with `tsc`, validate and the fixtures check; deck 155/155 with typecheck, build and validate; tools 89/89. The deck's and the tools' tests pass with the clock two days ahead too.
   - **The questions it raised went into a second set of amendments,** the most visible being that status rule 6 now follows the app's own `Dw`: a turn wrap-up's `needsUser` replaces the summary's `needs_action`. A third round brings the code up to them.
-- 2026-11-01, **ladder step 4 started** with S0, on a snapshot of the plugin and tools at b5685f5 (in the scratchpad, so the third round's edits can't reload mid-test). The spike bridge is stopped; the fake bridge holds 47600 with the spike token. `claude-code/sandbox-plugin` points at the snapshot for now.
+- 2026-11-01, **ladder step 4 started** with S0, on a snapshot of the plugin and tools at 78de707 (in the scratchpad, so the third round's edits can't reload mid-test). The spike bridge is stopped; the fake bridge holds 47600 with the spike token. `claude-code/sandbox-plugin` points at the snapshot for now.
   - **Works:**
     - **The real mod loads by hot reload** about 4 s after the old plugin folder was touched. Its hello carried plugin 0.1.0, Claude Code 2.1.309 and the engine's model (`claude-sonnet-5-5`, while the app's record still says Haiku, as S4 found).
     - **Mode command:** lowering to Manual was `done` in 31 ms with no permission request, then `settings {mode: "default"}` on the same ordered line.
@@ -534,7 +534,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Tools:** permission answers are checked exactly, values from mod bodies are stored only as strings, the fingerprint check pairs only by fp, rule 3 goes by observation, and the write guard sees the firmlink. Also the Saved Prompt lock, the old poll's answer, "not delivered" and rule 6. The refixer fixed one major: a subagent's `failed` had ended the main loop's fingerprint wait.
   - **Re-run by the main thread:** plugin 55/55, `tsc`, validate and the fixtures check; deck 168/168, typecheck, build and validate; tools 100/100. The deck's and the tools' tests pass with the clock two days ahead too.
   - **Left open:** a handful of minors and contract questions, batched with step 4's findings into the next round.
-- 2026-11-01, **ladder step 4 passes in Deck test T1** (the snapshot at b5685f5 against the fake bridge; run log in the scratchpad's `step4/run/`). T1 loaded the real plugin at start, hooks and mod, with no prompt.
+- 2026-11-01, **ladder step 4 passes in Deck test T1** (the snapshot at 78de707 against the fake bridge; run log in the scratchpad's `step4/run/`). T1 loaded the real plugin at start, hooks and mod, with no prompt.
   - **Approve:** a Write in Manual reached `/v1/permission` and was held as `p1` (`Write`, `t1-a.txt`). Both sides' fingerprints were `42e4136f` (`fp-check match: true`). Approve with `shown: p1` allowed it, and the Write finished 10 ms later. The turn ended `done`, and the file holds "alpha".
   - **Deny:** held as `p2` with matching fps (`a4326d9c`). The Deny stopped the turn (`turn.end` reason `answer`), and no file was written.
   - **Prompts:** a prompt right after the Deny went in at once, so a deck Deny doesn't block prompts. A second prompt sent while T1 was busy reported `waiting` and went in 20 s later, when that turn ended.
@@ -573,7 +573,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **Approve and Deny:** each answered the request shown: T2's `t2-a.txt` allowed, then T3's `t3-b.txt` denied 3.5 s later. T3 then refused to try `t3-d.txt`, even when a peer message called the Deny a test. That's the right call.
     - **Double press:** T2 issued `t2-c.txt` and `t2-e.txt` back to back, so `#4` reached the key 24 ms after the first Approve. The second press 251 ms later was refused (in sight 151 ms, under 1000 ms).
     - **Question:** held as `ask`. Each press opened T2 in about 60 ms, and the app's record shows T2 focused 151 ms after the first. Answered in the app, it was released by rule 1.
-  - **The user found a press on a question looked dead,** since the key gave no feedback. They chose a plain label over answering from the deck. The key now reads "Answer in app", and the press shows the OK (b108275).
+  - **The user found a press on a question looked dead,** since the key gave no feedback. They chose a plain label over answering from the deck. The key now reads "Answer in app", and the press shows the OK (e61bb45).
   - **A fast deck restart skips the hello:**
     - `streamdeck restart` brought the deck back 85 ms after it stopped. T2's and T3's polls failed, and round 4's quick retry reached the new deck with no hello or version check.
     - PROTOCOL.md now makes the quick retry a quiet hello. A subagent is building the mod's side in a scratch copy, to be applied between the user's steps.
@@ -753,10 +753,10 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - 2026-11-03, **the protocol round for Phase 5** (uncommitted until it's built):
   - **PROTOCOL.md's 2026-11-03 amendment:** the mode hook and `POST /v1/pretool`; "Desktop sessions only"; only a hello makes an `inst` current; and the fixtures `mode-from-auto`, `stray-instance` and `not-desktop`, with `mode-raise` and `mode-not-ours` changed (17 in all).
   - **Before the build:** the deck failed 6 checks, the tools 11 and the plugin 2.
-  - **Also committed tonight:** `claude-code/tools/recheck.mjs` (5ccf1c2) re-checks the app internals after an update. 18 tests pass, and on this Mac it reports 29 ok, 0 warn, 0 fail.
+  - **Also committed tonight:** `claude-code/tools/recheck.mjs` (cbbe187) re-checks the app internals after an update. 18 tests pass, and on this Mac it reports 29 ok, 0 warn, 0 fail.
   - **Building:** workflow `wf_614315da-297` covers deck, plugin and tools, each built, reviewed adversarially, then refixed. An agent writes `claude-code/install/deck-install.mjs` (status, release, install, undo).
-- 2026-11-03, **the round is built and committed (911188a); its reviews found a gap in the contract.**
-  - **Also committed:** `claude-code/install/deck-install.mjs` with 10 tests (401545c), and the user guide `claude-code/README.md` (911188a).
+- 2026-11-03, **the round is built and committed (25cf97a); its reviews found a gap in the contract.**
+  - **Also committed:** `claude-code/install/deck-install.mjs` with 10 tests (7d18029), and the user guide `claude-code/README.md` (25cf97a).
   - **Built:**
     - Deck 0.3.0: `/v1/pretool`, confirmation with one more registry reading, 409 hellos, and quiet logs for refusals.
     - Plugin 0.2.0: the mode hook, and the mod talks only from a desktop session of its own. T2–T4 hot-reloaded it and said hello as 0.2.0.
@@ -790,11 +790,11 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **A repeated hello from the current instance,** as after every Deny: its mode and effort are only what the mod last told the deck. So it could put back a mode older than the PermissionRequest's the deck just took, until the next prompt. It will take `cwd` and `model` only. Both decks take everything today.
     - **Contract wording:** the registry's `startedAt`, and which of two files for one host the deck shows; release rule 4 when no file lists the host; `plugin.json` declares nothing; `refused` covers the engine refusing the call. The recheck script watches the engine's wording.
   - **Next:** commit, restart the deck, the live checks, then the release and the install.
-- 2026-11-03, **round 2 is committed (f90bc6f) and live, and the plugin is installed for the user's sessions.**
+- 2026-11-03, **round 2 is committed (4981ad7) and live, and the plugin is installed for the user's sessions.**
   - **Spot checks by the main thread,** each in a scratch copy:
     - The deck with no 409 fails 8 tests. With the 409 sent to stray instances too, 10 fail.
     - The mod taking the 409 as a failure fails 4 tests, and so does the mod taking any 409 as a call for hello.
-  - **The deck restarted at 08:41 UTC** with f90bc6f's build. T2, T3 and T4 said hello within 30 ms of it, each after the restart rejected its open poll. There have been no 409s or restarts since, and each keeps a 20 s poll open.
+  - **The deck restarted at 08:41 UTC** with 4981ad7's build. T2, T3 and T4 said hello within 30 ms of it, each after the restart rejected its open poll. There have been no 409s or restarts since, and each keeps a 20 s poll open.
   - **Live checks, all 8 pass** (the main thread's script, using T2's host and made-up ones, so nothing reaches any session):
     - a PermissionRequest with no `X-Deck-Host` gets `{}` at once, and so does one under T2's host with another `session_id`;
     - T2's own mode check with no command in flight gets `{}`;
@@ -803,7 +803,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - a poll for a host no instance has said hello for gets 409 `hello first`;
     - a wrong token gets 401, and a foreign `Host` gets 403.
     - The deck logged each refusal once at info.
-  - **The release:** f90bc6f, version 0.2.0, 16 files, validated with 2.1.309.
+  - **The release:** 4981ad7, version 0.2.0, 16 files, validated with 2.1.309.
   - **The install:**
     - `settings.json` is backed up, and the diff, with the token masked, adds only the `env` block.
     - `deck-install.mjs status` exits 0, "installed and current".
@@ -843,9 +843,9 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Accepted as minor:**
     - The plugin's version-stop line JSON-encodes before it hides the token. The deck's token is hex, so nothing changes.
     - A held poll that drops more than 2 s after each quick hello cycles quietly, no faster than about 2 s a round, as the window allows.
-  - **Committed** as cfe4554. CLAUDE.md now runs `plugin test` under a time limit.
+  - **Committed** as d86211f. CLAUDE.md now runs `plugin test` under a time limit.
 - 2026-11-03, **round 3 live:**
-  - Released the plugin from cfe4554 (0.2.1); `deck-install.mjs status` says installed and current.
+  - Released the plugin from d86211f (0.2.1); `deck-install.mjs status` says installed and current.
   - Restarted only the Claude deck plugin, on 0.3.1. T2–T4 said hello with plugin 0.2.1 within 30 ms of the bridge listening.
   - All 8 live checks pass, and nothing reached any session. The log has no warning, loop or stale line.
 - 2026-11-03, **round 4 for Phase 6, built and verified:**
@@ -875,7 +875,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - Both are narrow, and both matter only through the Mode dial's press without a turn, which applies the shown mode. That's a design question for the user.
   - **Also accepted as nits:** the fake has no test for moving to the newest place, nor for its 2 s window's length, nor for kind mode's source. The real deck has a test for the first. It takes kind mode's mode and effort as any PermissionRequest's, before its kind-mode branch.
   - `claude-code/README.md`'s "When something's off" now covers a press that alerts because a session's plugin hasn't checked in for a minute.
-  - **Committed** as 86054e1.
+  - **Committed** as 32dedbe.
 - 2026-11-03, **round 4 live:**
   - Restarted only the Claude deck plugin, on 0.3.2, at 12:02Z. T2–T4 said hello with plugin 0.2.1 within 22 ms of the bridge listening.
   - All 8 live checks pass.
@@ -907,7 +907,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - re-applying the shown mode fails the new test;
     - alerting on an unturned press fails both.
   - `claude-code/README.md`'s Mode dial bullet says so.
-  - **Committed** as cdef222. Only the Claude deck plugin was restarted, on 0.3.3, at 14:18:57Z. Both running sessions said hello with plugin 0.2.1 within 22 ms.
+  - **Committed** as d3391bf. Only the Claude deck plugin was restarted, on 0.3.3, at 14:18:57Z. Both running sessions said hello with plugin 0.2.1 within 22 ms.
 - 2026-11-03, **the user's checks so far, by the deck's log** (the user hasn't reported yet):
   - Item 2: the Claude app was restarted. The registry lists 2 sessions, and T2–T4 aren't running.
   - Item 3, at 14:13 on the session "Stream Deck Claude Code plugin":
@@ -1053,8 +1053,8 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - 2026-11-05, **Phase 8 started, at the user's word** (session "Stream Deck Claude Code Phase 8", `local_2f4a7a56-…`, without `ultracode`):
   - **A fourth goal:** the user's prompt added "make it easy to deploy on other machines" to the spec's three. The spec doesn't cover it, so it goes to the questions round.
   - **The tree wasn't clean:** the last session's two pieces of work were uncommitted. At the user's word, after every check passed again, they went in as two commits:
-    - `af7c773`, the 2.1.317 reference;
-    - `cb4a85e`, Phase 7's close and Phase 8's plan.
+    - `a54b6fa`, the 2.1.317 reference;
+    - `9ccaf9a`, Phase 7's close and Phase 8's plan.
     - The checks: tsc, sync `--check`, `plugin validate`, `plugin test` 159/159, tools 256/256, install 11/11, recheck 35 ok.
   - **Released:** `release` put out `register.ts`'s comment-only change, and `status` says installed and current.
   - **From the deck's log, before the baseline** (debug since the deck's start at 04:08Z on 11-05):
@@ -1234,7 +1234,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - tools 273/273; recheck 39 ok, 0 warn, 0 fail;
     - install 20/20;
     - the plugin's tsc, sync `--check` and its 15 tests, `plugin validate`, `plugin test` 155/155.
-  - **Committed** as 6282cef. Plugin 0.3.0 is released, and `status` says installed and current. The two running sessions kept 0.2.1, with no reload, as the installer says.
+  - **Committed** as c7d1d4f. Plugin 0.3.0 is released, and `status` says installed and current. The two running sessions kept 0.2.1, with no reload, as the installer says.
 - 2026-11-06, **Wave 3: drift on the deck (C1), the smoke test (C2), and the routine's pointers (D1):**
   - **C1:** the deck reads two versions from the repo: the Claude Code version on the vendored reference's first line, and the plugin's in its plugin.json. It reads both at startup, and again when a hello brings a newer one.
     - **A newer Claude Code:** one info line per version a run (`Versions: Claude Code <v> in <host>: newer than …`). Its session's Setup page reads `<mode> mode · <version> ↑`, in amber. An equal version shows in grey.
@@ -1260,7 +1260,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **The skew, seen live:** this session, still on plugin 0.2.1, set T's mode. Its old mode hook got `404 POST "/v1/pretool"`, and the change went through.
   - **The user:** "I did the tests and everything looked good", for the steps the log can't show.
 - 2026-11-06, **the user's work Mac** (the fourth goal): the user asked how to install the Claude Code side on a work MacBook Pro that has Claude Code and the Stream Deck app, and how to keep both Macs current.
-  - **GitHub** stopped at 0b6ecaf, 2026-11-01, 41 commits back, with none of the Claude Code side. The user pushed: `0b6ecaf..7a19008`.
+  - **GitHub** stopped at bbed05e, 2026-11-01, 41 commits back, with none of the Claude Code side. The user pushed: `bbed05e..2c13291`.
   - **mise refuses a fresh clone:** a copy of `mise.toml` is untrusted, and `mise exec` stops on it until `mise trust` (mise 2026.5.12, tried on a copy in the scratchpad). The README's Setup lacked the step.
   - **A managed Mac's policy** can keep the deck's parts off, going by Claude Code 2.1.317's settings schema:
     - `allowManagedHooksOnly` and `disableAllHooks` stop the hook, and `allowManagedModsOnly` the mod;
@@ -1415,10 +1415,10 @@ Record kickoff answers, spike results and decisions here, newest last, with date
     - **The Others key alerts** on a press when no session off the slots needs you, as designed (`session-keys.md`, Others). The user had expected something to happen.
     - **A stale slot:** the deck keeps a slot's session after its key is gone. If "Lightroom plugin feedback and improvements" ran, no key would show it: Others leaves out every session with a slot, shown or not (`Slots.slotted()`). Approve and Deny would still show its requests. Not fixed; the user didn't take it up.
   - T and 11-06's throwaway still run, until the user's word to archive them.
-- 2026-11-08, **committed, released and pushed** at the user's word: 3acd86e, 113 files.
+- 2026-11-08, **committed, released and pushed** at the user's word: 5c11bfa, 113 files.
   - Before it, the full run passed again: deck 524 of 524 three ways, with its build and validate; the plugin's tsc, validate, sync check and 178 of 178; tools 302; install 20; recheck 39 ok; the fixtures unchanged; fake-claude 21 of 21.
-  - The release copy went from 6282cef to 3acd86e, version 0.4.0: 9 files changed and 2 added. `status` says installed and current.
-  - The push took GitHub's `main` from 3bf4406 to 3acd86e, and `git ls-remote` shows it there. The commit held no copy of the deck token.
+  - The release copy went from c7d1d4f to 5c11bfa, version 0.4.0: 9 files changed and 2 added. `status` says installed and current.
+  - The push took GitHub's `main` from f3958d6 to 5c11bfa, and `git ls-remote` shows it there. The commit held no copy of the deck token.
 - 2026-11-08, **task cards and threads** (deck 0.7.0; PROTOCOL.md's amendment of the same day). The user, at 18:20: "Site lighting effects improvement" read Done though it had two threads, and had waited on them to start the threads without the deck saying so.
   - **What happened,** from the deck's log and the app's records (times CST):
     - 17:47:42, the turn ended with two "New task" cards, T1 and T2. The record's summary said `blocked`, "awaiting your start", click "Start both". Its wrap-up asked nothing, as the cards were the ask, so rule 6 made it `review_ready`, as the app does (4.23118.0's `Cy` and `Jx`, unchanged since 4.4212.0). The key went Done, and seen at once, with the session on screen.
@@ -1468,7 +1468,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Found: a request nothing waits on.** In Manual, T's `mcp__terminal__read_terminal` raised a PermissionRequest that the app allowed with no card. The deck held it as a `tool` (#10) and read `approval` for 2.0 s, while the registry read `busy`, until the call's end let it go (rule 1). It's a two-second `Approve?` for a call that needs no one, in Manual only: the user's own session, in Auto, raised none for the same tool. Left as it is.
   - **What the user saw** in the steps the log can't show: "everything looks good", of the test as a whole. They named no step.
   - **Committed** at the user's word that evening, in two commits: the reference for 2.1.321 with the plugin's two test helpers, then deck 0.7.1 and 0.7.2 together, since both moved the version's lines. The plugin is released, since its tests changed. Not pushed. T isn't archived yet, and slot 2's session is the user's to put back.
-  - **Pushed** at the user's word, just after: GitHub's `main` went from 3acd86e to a18ab32, with 1c8b6e4, 62ffdb3 and a18ab32.
+  - **Pushed** at the user's word, just after: GitHub's `main` went from 5c11bfa to 20ea5a2, with 61d07e6, 59356b5 and 20ea5a2.
 - 2026-11-13, **getting the repo ready to go public,** at the user's word. They chose the MIT licence, taking Anthropic's files out, and a history rewrite that keeps the commits.
   - **The audit:** no token, key or credential in the tree or in any of the 63 commits. The icons are the repo's own, and `json.lua` keeps its MIT notice. Found: no licence; the mods API reference, Anthropic's text, in `claude-code/vendor/mods-api/` and in three versions in history; the user's email address as every commit's author; a few titles of the user's sessions in other projects, in tests and in this Log.
   - **The reference left git.** `.gitignore` has `claude-code/vendor/mods-api/`, and `refresh.mjs` makes it on each Mac as before. Git keeps `claude-code/vendor/checked-version.txt`, the declarations' first line, which `refresh.mjs` writes with the folder when the folder is the repo's own.
@@ -1478,6 +1478,13 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - **Checks:** the deck's type check and 542 tests, the plugin's type check, `sync-fixtures --check`, the 20 install tests and the 305 tools tests pass. The tools and deck tests pass too in a copy of the tracked files with no reference in it, as a fresh clone is. `refresh.mjs` ran twice: the reference didn't change, and the second run left the file alone. recheck `--skip-plugin`: 40 ok. Live, after a restart with nothing held: `Versions: read Claude Code 2.1.321 from …/claude-code/vendor/checked-version.txt`.
   - **Committed and pushed** at the user's word, the same day, in two commits: the reference's move out of git, then the licence and the docs. GitHub's `main` has both, and the repo there is still private. The plugin didn't change, so nothing is released. The other Mac takes the deck's change with `git pull` and `setup`.
   - **Not done:** the history rewrite, at the user's word: the author's address becomes GitHub's noreply one, and `claude-code/vendor/mods-api*` leaves every commit. Hashes change, so the rewritten history is pushed by the user, and their other Mac resets to the new `main`. Then the switch to public on GitHub. The titles of other sessions stay unless the user says otherwise.
+- 2026-11-13, **the history rewrite,** at the user's word, after the push above.
+  - **What changed in every commit:** the author's and the committer's address is GitHub's noreply one, and `claude-code/vendor/mods-api/` and `claude-code/vendor/mods-api-2.1.309/` are gone. Two commit messages quoted another commit's hash, and each now quotes the rewritten one. Done with `git filter-branch` in a scratch clone; the folder here only had `main` moved to the result.
+  - **Checked against the old history, commit by commit:** 65 commits in the same order, with the same names, dates and messages but for those two hashes. Each tree is the old one less those two folders, and no commit came out empty. None of the 13 files that were under them is anywhere in the new history, and the old address isn't either. The last commit's tree is the same one, so no file in the folder changed.
+  - **`main` here is 417d10f.** The hashes this Log, CLAUDE.md and `hardening.md` quote are the rewritten ones, changed in 54 places; each is a commit on `main`.
+  - **This repo's `user.email` is the noreply address,** in `.git/config`, so a new commit here doesn't bring the old one back. Another clone needs the same before it commits.
+  - **The old history is kept** in `.git/before-public-rewrite-2026-11-13.bundle`, with its commits listed beside it. It has what was taken out, so it stays on this Mac, and the user deletes it when they're sure.
+  - **Not pushed.** GitHub still has the old history, and this folder's `main` and `origin/main` have 65 commits each that the other lacks. The user pushes. A new, empty repository is the safe place: GitHub goes on serving a repository's old commits to anyone who has their hashes, and the old versions of this Log quote them. The user's other Mac then resets its clone to the new `main` and runs `setup`.
 
 ## Progress
 
@@ -1486,7 +1493,7 @@ Record kickoff answers, spike results and decisions here, newest last, with date
 - [x] Phase 1: spike results shown to the user, and their go, 2026-11-01
 - [x] Phase 2: contract frozen, 2026-11-01
 - [x] Track A: Claude Code plugin · [x] Track B: deck plugin · [x] Track C: tools, 2026-11-01
-- [x] Protocol amendments and the reviewers' minors: three sets, rounds 2–4 committed, and Phase 4's quick hello (579f240)
+- [x] Protocol amendments and the reviewers' minors: three sets, rounds 2–4 committed, and Phase 4's quick hello (4f46238)
 - [x] Ladder steps 4–5, 2026-11-01 (what needs a person or the app's dialogs moves to Phase 4)
 - [ ] Phase 4: on hardware with the user. Resumed 2026-11-03; "Next" in the Log's last entry says where it stands.
   - Pass: steps 1–4.
@@ -1499,14 +1506,14 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Step 10: dropped.
   - Step 11: later.
 - [ ] Phase 5: daily use. Started 2026-11-03 as an overnight run; the Log's last entry says where it stands.
-  - Installed for the user's sessions, 2026-11-03: release f90bc6f in settings `env`.
+  - Installed for the user's sessions, 2026-11-03: release 4981ad7 in settings `env`.
   - Still to come: the user's morning checks, then a day of real use.
 - [ ] Phase 6: hardening. Overnight 2026-11-03; the Log's last entries say where it stands.
-  - Round 3 committed (cfe4554) and live: deck 0.3.1, plugin 0.2.1 released.
+  - Round 3 committed (d86211f) and live: deck 0.3.1, plugin 0.2.1 released.
     - It covers stale instances, repeated hellos, status rules 3 and 6, registry failures and the quick hello's window.
     - It adds tests with 30 sessions, quieter info logs, and recheck checks for the summary loader and the engine's refusal wording.
   - The guide is `claude-code/README.md`.
-  - Round 4 committed (86054e1) and live: deck 0.3.2; the plugin is unchanged, so 0.2.1 stays released.
+  - Round 4 committed (32dedbe) and live: deck 0.3.2; the plugin is unchanged, so 0.2.1 stays released.
   - The overnight scope is done. The user's checklist is in the Log's last entries; item 9 is answered, and deck 0.3.3 does it.
   - The Claude app's update to Claude Code 2.1.317 (2026-11-03) was found on 2026-11-04, and rechecked 35 ok on 2026-11-05 after the vendored reference was refreshed.
   - Still to come: a reboot (macOS 26's localhost delay), and a day of real use.
@@ -1515,30 +1522,30 @@ Record kickoff answers, spike results and decisions here, newest last, with date
   - Contract: PROTOCOL.md's amendment "2026-11-04, session keys", 26 fixtures.
   - Built and reviewed: deck 0.4.0 and the tools, with the main thread's checks passing.
   - Live with the user, 2026-11-04: a question, a plan and an approval answered on the dial, plus slots, seen, jumps and the long press. The user: "All worked".
-  - Committed (00c7622) and released, 2026-11-04. Only `tests/fixtures.gen.ts` changed in the release copy, and `status` says installed and current.
+  - Committed (b8f4c1a) and released, 2026-11-04. Only `tests/fixtures.gen.ts` changed in the release copy, and `status` says installed and current.
   - The app's cards close when the dial answers, seen by the user. T5, T6 and T7 archived, 2026-11-05.
   - Left for Phase 8's smoke test: a swap between two slots, tried live.
 - [ ] Phase 8: efficiency and update resilience. Started 2026-11-05; the spec is `docs/claude-code/hardening.md`, and the Log's last entries say where it stands.
   - The idle counters are built and live, and the baseline is measured (A1), 2026-11-06.
   - The questions round is answered. A fourth goal, deploying to the user's other Macs, is in.
   - **Committed, 2026-11-06:**
-    - 64d2e71: the counters and the baseline;
-    - b19a2c3: setup on other Macs;
-    - d1121bc: recheck's gaps, its check of the vendored reference, and the refresh test;
-    - 672c50e: the idle fixes, which meet the target;
-    - 6282cef: mode changes removed. Deck 0.5.0 is live since 05:06:58Z. Plugin 0.3.0 is released; `status` says installed and current, and sessions load it when they next start.
-    - 3b782b0: C1, the deck showing a newer Claude Code or an older plugin; C2, the smoke test and its log checker. Live since 05:33:55Z.
+    - dc4b380: the counters and the baseline;
+    - 3936076: setup on other Macs;
+    - 3e8c4d8: recheck's gaps, its check of the vendored reference, and the refresh test;
+    - d7fde09: the idle fixes, which meet the target;
+    - c7d1d4f: mode changes removed. Deck 0.5.0 is live since 05:06:58Z. Plugin 0.3.0 is released; `status` says installed and current, and sessions load it when they next start.
+    - 5912a24: C1, the deck showing a newer Claude Code or an older plugin; C2, the smoke test and its log checker. Live since 05:33:55Z.
   - **The smoke test passed live,** 2026-11-06: 13 of 14 steps by the log, and the user saw the rest. The Approve and Deny keys weren't pressed.
-  - **The user's work Mac,** 2026-11-06: the README's Setup now covers a managed Mac, and a new section covers keeping a second Mac current. GitHub has everything to 7a19008, pushed by the user.
+  - **The user's work Mac,** 2026-11-06: the README's Setup now covers a managed Mac, and a new section covers keeping a second Mac current. GitHub has everything to 2c13291, pushed by the user.
   - **Still to come:** the reboot (C7), a day of use, the idle count after it, and the first real `setup`, on the work Mac.
 - [ ] Phase 9: approvals, agents and wake. Started 2026-11-07; the spec is `docs/claude-code/agents-and-wake.md`, and the Log's last entries say where it stands.
   - The questions rounds are answered, the investigation is done, and the contract is written (21 fixtures).
   - The build, the review and its fixes are done, and every check passes (Log, 2026-11-07).
   - A second review, of the fixes, is done too.
   - **The smoke test passed live,** 2026-11-08, on deck 0.6.0: 15 of 16 steps by the log, and the user saw the rest. Step 1 had no key reading Not running on the user's layout.
-  - **Committed (3acd86e), released and pushed,** 2026-11-08, with every check passing on the final tree. Plugin 0.4.0 is in the release copy, and `status` says installed and current; sessions load it when they next start. GitHub's `main` is at 3acd86e.
+  - **Committed (5c11bfa), released and pushed,** 2026-11-08, with every check passing on the final tree. Plugin 0.4.0 is in the release copy, and `status` says installed and current; sessions load it when they next start. GitHub's `main` is at 5c11bfa.
   - Still to come: a day on the work Mac, once the user runs `git pull` and `setup` there.
   - **Task cards and threads,** 2026-11-08 (Log): deck 0.7.0 is built, live and committed, with every check passing. The plugin didn't change, so nothing is released. Pushed 2026-11-11, with deck 0.7.2. The user's key for the parent session is to be looked at on the device.
   - **The drops, looked at again,** 2026-11-11 (Log): this Mac never system-sleeps, so it has only shown that display sleep is safe; the work Mac's logs are needed to name the part that fails. The wake line read `no system sleep` at every wake, and deck 0.7.1 tells a sleep by a beat instead: built and live, with every check passing. Committed with deck 0.7.2 that evening. Still to come: a `slept` line seen live, and the work Mac's logs.
-  - **The app's terminal tools,** 2026-11-11 (Log): two Approve presses for `run_in_terminal` sent Allow and did nothing, since Claude Code takes no hook's Allow for a tool the app approves on its own card. Deck 0.7.2 reads "Answer in app" for the app's two terminal tools and warns of an Allow that wasn't taken: built and live, with every check passing. The routine after the app's update passes on 2.1.321. **The smoke test passed live** that evening, 15 of 16 steps by the log (step 1 had no key reading Not running, as on 11-08), a terminal request read "Answer in app" and was let go once approved on the app's card, and the user said everything looked good. Committed (62ffdb3, a18ab32), released and pushed that evening, at the user's word: GitHub's `main` is at a18ab32. Still to come: `git pull` and `setup` on the work Mac.
-- **Going public,** 2026-11-13 (Log): the licence, the docs and the reference's move out of git are done and checked, and committed and pushed that day, to a repo that's still private. Still to come: the history rewrite, the push of it, and the switch to public on GitHub.
+  - **The app's terminal tools,** 2026-11-11 (Log): two Approve presses for `run_in_terminal` sent Allow and did nothing, since Claude Code takes no hook's Allow for a tool the app approves on its own card. Deck 0.7.2 reads "Answer in app" for the app's two terminal tools and warns of an Allow that wasn't taken: built and live, with every check passing. The routine after the app's update passes on 2.1.321. **The smoke test passed live** that evening, 15 of 16 steps by the log (step 1 had no key reading Not running, as on 11-08), a terminal request read "Answer in app" and was let go once approved on the app's card, and the user said everything looked good. Committed (59356b5, 20ea5a2), released and pushed that evening, at the user's word: GitHub's `main` is at 20ea5a2. Still to come: `git pull` and `setup` on the work Mac.
+- **Going public,** 2026-11-13 (Log): the licence, the docs and the reference's move out of git are done and checked, and committed and pushed that day, to a repo that's still private. The history is rewritten here, checked commit by commit, and not pushed: `main` is 417d10f. Still to come: the user's push of it, to a new repository, the other Mac's reset, and the switch to public on GitHub.

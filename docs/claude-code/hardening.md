@@ -17,7 +17,7 @@ Remove before you add, and measure before and after.
 
 As of 2026-11-05:
 - **Deck 0.4.0** is live on the user's Stream Deck. **Plugin 0.2.1** is released to the user's sessions through `deck-install.mjs`.
-- **Phase 7** (session keys and dials) is committed as `00c7622`, and the user checked it live.
+- **Phase 7** (session keys and dials) is committed as `b8f4c1a`, and the user checked it live.
 - **The 2.1.317 update** followed it:
   - the vendored mods API is now `claude-code/vendor/mods-api/`, rebuilt by `claude-code/vendor/refresh.mjs`;
   - `recheck.mjs` reads the version it expects from that file's first line;
@@ -30,7 +30,7 @@ As of 2026-11-05:
   - `recheck.mjs`: 35 ok, 0 warn, 0 fail.
 - **The Claude app** bundles Claude Code 2.1.309 and 2.1.317, and new sessions run 2.1.317.
 
-Line references below are as of `00c7622`. Paths are under `claude-code/`.
+Line references below are as of `b8f4c1a`. Paths are under `claude-code/`.
 
 ## Rules for this phase
 
@@ -222,7 +222,7 @@ Split `model/sessions.ts` only if a change in this phase needs it. Don't refacto
 | The Bun file table in the Claude Code binary (`__BUN,__bun`) | `vendor/refresh.mjs` | not checked (C4) |
 | The Stream Deck SDK 3: `pressed` on rotate, `hold` on tap, `device.size.rows`, `setFeedbackLayout`, `onSystemDidWakeUp`; `@elgato/streamdeck` 3.0.4 | the actions | the deck's tests with a fake SDK; `streamdeck validate` sees only the layout the manifest names, and the slot strip tests check all six |
 
-## Appendix B: continuous work while idle, as of `00c7622`
+## Appendix B: continuous work while idle, as of `b8f4c1a`
 
 **The deck, always:**
 - the registry scan every 1 s, with a readdir and a stat per session file (`registry/watcher.ts:39`);
