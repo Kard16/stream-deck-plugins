@@ -1,6 +1,6 @@
 # Lightroom Classic on the Stream Deck +
 
-Develop sliders on the dials, plus culling, preset and Before/After keys, for Lightroom Classic 15.3 on this Mac. Two plugins talk over localhost:
+Develop sliders on the dials, plus culling, preset and Before/After keys, for Lightroom Classic 15.3 on macOS. Two plugins talk over localhost:
 
 - **Deck Bridge** (`lua/DeckBridge.lrdevplugin`) runs inside Lightroom. It listens on ports 58780 (commands) and 58781 (events).
 - **The Stream Deck plugin** (`deck/`) runs in the Stream Deck app. It connects to Deck Bridge, and reconnects on its own when either side restarts.
@@ -11,7 +11,7 @@ The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, d
 
 Place **Develop Dial** on a dial, then choose its slider in the dial's settings: select the dial in the Stream Deck app. A dial placed without a choice shows Temp, Tint, Exposure or Contrast, by its position. Two dials can show the same slider.
 
-For more sliders, use Stream Deck pages, each with its own dials. Change pages with the Stream Deck app's own page navigation, for example by swiping the strip. A layout for the 17 sliders that starts with the old banks:
+For more sliders, use Stream Deck pages, each with its own dials. Change pages with the Stream Deck app's own page navigation, for example by swiping the strip. A layout for 16 of the 17 sliders:
 
 | Page | Dial 1 | Dial 2 | Dial 3 | Dial 4 |
 |---|---|---|---|---|
@@ -53,7 +53,7 @@ Strips also dim outside Develop, and while writes are off (see [the guard](#the-
 
 ## Setup
 
-This is already done on this Mac; the steps are here for a rebuild.
+You need Lightroom Classic, the Stream Deck app (7.1 or later), a clone of this repository in a folder you'll keep, and [mise](https://mise.jdx.dev) for Node 24: the [root README](../README.md#toolchain) has its two commands. Both apps load the plugins from the clone, so don't move it afterwards.
 
 1. **Lightroom:** choose File ▸ Plug-in Manager ▸ Add, then `lightroom/lua/DeckBridge.lrdevplugin`. Its status is under File ▸ Plug-in Extras ▸ Deck Bridge: Status.
 2. **Stream Deck:** the plugin is linked from `lightroom/deck/com.karimdhanji.lightroom.sdPlugin`. It doesn't come from the Marketplace, so it needs Stream Deck's developer mode. From `lightroom/deck`:
@@ -86,7 +86,7 @@ To check these or find others, press Cmd-/ in Lightroom; it lists the current mo
 
 ## Several photos at once
 
-- **Dials** edit the active photo. With Auto Sync on, Lightroom carries each edit to every selected photo; spike S5 confirmed this.
+- **Dials** edit the active photo. With Auto Sync on, Lightroom carries each edit to every selected photo.
 - **Pick, Reject and Unflag** follow Lightroom's own rule for the selection, like its P, X and U keys.
 - **Apply Preset** applies to every selected photo.
 
@@ -106,10 +106,12 @@ The sliders live in `deck/com.karimdhanji.lightroom.sdPlugin/sliders.json`, and 
 
 ## The test-catalog guard
 
-With the guard on, Deck Bridge refuses every write unless the test catalog, `/Users/karimdhanji/Pictures/Plugin Test/Plugin Test.lrcat`, is open. Writes are dial turns, resets, flags and presets. When it refuses one, Lightroom shows a bezel saying why, and the deck shows an alert on the key or dial.
+The guard is off in this repo, so the deck works in any catalog. It kept my own catalogs safe while the plugins were built.
 
-The guard kept your catalogs safe while the plugins were built. It's been off since 2026-11-01, so the deck works in any catalog. To change it:
-1. Open `lua/DeckBridge.lrdevplugin/Config.lua` and set `GUARD` to `true` or `false`.
+With the guard on, Deck Bridge refuses every write unless one test catalog is open. Writes are dial turns, resets, flags and presets. When it refuses one, Lightroom shows a bezel saying why, and the deck shows an alert on the key or dial.
+
+To change it:
+1. Open `lua/DeckBridge.lrdevplugin/Config.lua`. Set `GUARD` to `true` or `false`, and `TEST_CATALOG` to the path of a catalog you can afford to break. The path there is mine, and the tests and protocol fixtures use it too.
 2. Click Reload Plug-in in the Plug-in Manager, then Done.
 
 Turn it on while an agent works on the Lua plugin. Only you decide to turn it off: the repo's rules in `CLAUDE.md` keep agents from doing it on their own.

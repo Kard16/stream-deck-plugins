@@ -1,44 +1,75 @@
-# Stream Deck + plugins
+# Stream Deck + plugins for Lightroom Classic and Claude Code
 
-My own Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Code, for this Mac only.
+Two plugins that put Adobe Lightroom Classic and Claude Code on an [Elgato Stream Deck +](https://www.elgato.com/stream-deck-plus): eight keys, four dials and a touch strip.
 
-| Part | What it does | Status |
+| Side | What it does | Guide |
 |---|---|---|
-| Lightroom Classic | Develop sliders on the dials with live values on the touch strip, culling and rating keys, presets and one-click tools | Done, 2026-11-01: [plan](docs/lightroom/plan.md) |
-| Claude Code | Live session status, approve/deny from the deck, Saved Prompt and Mode buttons (model and effort shown only), an overview of all sessions with jump-to-session | In daily use since 2026-11-03, hardening: [guide](claude-code/README.md), [plan](docs/claude-code/plan.md) |
+| **Lightroom Classic** | Develop sliders on the dials, with live values on the touch strip. Keys for pick, reject, next and previous, Before/After and presets. | [lightroom/README.md](lightroom/README.md) |
+| **Claude Code** | A key and a dial for each session in the Claude desktop app, showing what it's doing and what it needs from you. Approve and Deny keys for permission requests, saved prompts, and a press to jump to a session. | [claude-code/README.md](claude-code/README.md) |
 
-## How the Claude Code side fits together
+The two sides are independent. Install either one, or both.
 
-```
-Stream Deck + ── Stream Deck app ── deck plugin (TypeScript, claude-code/deck)
-                                        │  hosts the bridge on 127.0.0.1:47600,
-                                        │  reads the session registry and the app's records
-                                        │
-                                        │  localhost HTTP
-                                        │
-                        streamdeck-bridge, a Claude Code plugin (claude-code/plugin),
-                        in each Claude desktop session: a mod and two http hooks
-```
+I built these for my own desk, and Claude Code wrote most of the code. They aren't on the Elgato Marketplace and come with no support, but everything needed to run them is here.
 
-## How the Lightroom side fits together
+## Before you install
+
+- **macOS only,** with a Stream Deck + and the Stream Deck app, 7.1 or later. Developed on macOS 26 with Stream Deck 7.6.
+- **Not from the Marketplace.** Each plugin is built from a clone of this repo and linked into the Stream Deck app, which needs its developer mode. The guides have the steps.
+- **The Lightroom side** is built for Lightroom Classic 15.3.
+- **The Claude Code side** needs the Claude desktop app: it works with the sessions in its Code tab, not with Claude Code in a terminal. It relies on Claude Code's mods API, which is early access, and on undocumented files the app keeps, so an app update can break it. When that happens the app's own dialogs keep working, and [a routine](claude-code/README.md#after-a-claude-app-update) checks what changed. Last checked with Claude Code 2.1.321.
+
+## How it fits together
+
+Each side is a pair of plugins that talk over localhost.
+
+**Lightroom Classic:**
 
 ```
 Stream Deck + ── Stream Deck app ── deck plugin (TypeScript, lightroom/deck)
                                         │
                                         │  two localhost sockets, JSON lines
                                         │
-                        Lua plugin inside Lightroom Classic (lightroom/lua)
+                        Deck Bridge, a Lua plugin inside Lightroom Classic (lightroom/lua)
 ```
 
-## Docs
+**Claude Code:**
 
-- [docs/research/](docs/research/): Stream Deck, Lightroom Classic and Claude Code research, as of 31 October 2026
-- [docs/lightroom/plan.md](docs/lightroom/plan.md): the Lightroom build plan and progress
-- [docs/lightroom/kickoff-prompt.md](docs/lightroom/kickoff-prompt.md): how to start the build session
-- [claude-code/README.md](claude-code/README.md): the Claude Code side's guide: the dials and keys, setup, and what to do when something's off
-- [docs/claude-code/plan.md](docs/claude-code/plan.md): the Claude Code build plan and progress
-- [CLAUDE.md](CLAUDE.md): working rules for Claude Code in this repo
+```
+Stream Deck + ── Stream Deck app ── deck plugin (TypeScript, claude-code/deck)
+                                        │  hosts the bridge on 127.0.0.1:47600, behind a token,
+                                        │  and reads the app's list of running sessions
+                                        │
+                                        │  localhost HTTP
+                                        │
+                        streamdeck-bridge, a Claude Code plugin (claude-code/plugin),
+                        in each desktop session: a mod, and a hook for permission requests
+```
+
+## What's in the repo
+
+| Path | What |
+|---|---|
+| [`lightroom/`](lightroom/README.md) | The Lightroom side: the Lua plugin, the deck plugin, the wire protocol and test tools |
+| [`claude-code/`](claude-code/README.md) | The Claude Code side: the Claude Code plugin, the deck plugin, the bridge protocol, the installer and test tools |
+| [`docs/`](docs/README.md) | Research, plans and build logs |
+| `spikes/` | Early experiments, kept for the record |
+| [`CLAUDE.md`](CLAUDE.md) | The working rules and commands Claude Code follows in this repo |
+
+## How it was built
+
+Claude Code sessions did the research, wrote the plans and built both sides, with me at the hardware for the checks only a person can do. The record is in [`docs/`](docs/README.md): the research, each side's plan with its dated log, and the prompts that started each build session.
 
 ## Toolchain
 
-Run `mise install` in this folder to get Node 24 and Lua 5.1.5, which are pinned in `mise.toml`.
+[mise](https://mise.jdx.dev) pins Node 24 and Lua 5.1.5 in `mise.toml`. From the top of the clone:
+
+```bash
+mise trust
+mise install
+```
+
+Lua is only for the Lightroom plugin's tests. The Claude Code side's guide installs Node alone.
+
+## License
+
+[MIT](LICENSE). `lightroom/lua/DeckBridge.lrdevplugin/json.lua` is [rxi's json.lua](https://github.com/rxi/json.lua), also MIT, with its notice in the file.

@@ -7,9 +7,10 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
   - **Phase 7, session keys and dials,** done 2026-11-04, deck 0.4.0, checked live by the user: a key and a dial per session, answering questions, plans and approvals on the dial. Its spec: `docs/claude-code/session-keys.md`.
   - **Phase 8, efficiency and update resilience,** planned 2026-11-05. Built and committed 2026-11-06: deck 0.5.0 and plugin 0.3.0, live and released. The smoke test passed live the same day. Left are the reboot and a day of use; the plan's Log says where it stands. Its spec: `docs/claude-code/hardening.md`.
   - **Now: Phase 9, approvals, agents and wake,** started 2026-11-07 after a day on the work Mac. The dial stops answering questions and plans, and the Session key and Sessions dial go. Sessions running subagents or workflows show `Background`, a workflow's progress and an Agents page. The deck handles the device leaving and returning after sleep, and `tools/doctor.mjs` diagnoses a drop. Deck 0.6.0 and plugin 0.4.0: the smoke test passed live 2026-11-08, and they were committed (3acd86e), released and pushed that day. Left is a day on the work Mac. Its spec: `docs/claude-code/agents-and-wake.md`.
-    - **Task cards and threads,** 2026-11-08 after the release, deck 0.7.0 (PROTOCOL.md's amendment of that day): a session whose cards wait for the user's start reads Needs you, and one whose threads (sessions it started) are unfinished reads Background. Built, live and committed that day; the plugin didn't change, so nothing is released. Not pushed.
-    - **The app's terminal tools,** 2026-11-11, deck 0.7.2 (PROTOCOL.md's amendment of that day): Claude Code takes no hook's Allow for `mcp__terminal__run_in_terminal` and `mcp__terminal__open_terminal_tab`, which the app approves on a card of its own, so they're kind `ask` and read "Answer in app". The deck warns `ALLOW NOT TAKEN` for any other tool whose Allow wasn't taken. The routine after the app's update passes on 2.1.321, and its smoke test passed live that evening, 15 of 16 steps by the log, with a terminal request reading "Answer in app". Built, live, committed and released that day (the plugin's tests changed); not pushed.
+    - **Task cards and threads,** 2026-11-08 after the release, deck 0.7.0 (PROTOCOL.md's amendment of that day): a session whose cards wait for the user's start reads Needs you, and one whose threads (sessions it started) are unfinished reads Background. Built, live and committed that day; the plugin didn't change, so nothing is released. Pushed 2026-11-11.
+    - **The app's terminal tools,** 2026-11-11, deck 0.7.2 (PROTOCOL.md's amendment of that day): Claude Code takes no hook's Allow for `mcp__terminal__run_in_terminal` and `mcp__terminal__open_terminal_tab`, which the app approves on a card of its own, so they're kind `ask` and read "Answer in app". The deck warns `ALLOW NOT TAKEN` for any other tool whose Allow wasn't taken. The routine after the app's update passes on 2.1.321, and its smoke test passed live that evening, 15 of 16 steps by the log, with a terminal request reading "Answer in app". Built, live, committed (62ffdb3, a18ab32), released (the plugin's tests changed) and pushed that day, at the user's word.
     - **The wake line's sleep measure,** 2026-11-11, deck 0.7.1: every wake had read `no system sleep`, and the deck now tells a system sleep by a 30 s beat. This Mac never system-sleeps on power, so the drops on the work Mac can't be reproduced here unless the user sleeps it by hand, and a `slept` line is still to be seen live. Built and live, and committed with 0.7.2. The plan's Log of that day has the diagnosis.
+- **Going public,** started 2026-11-13: MIT licence, the docs rewritten for outside readers, and the mods API reference out of git. Committed and pushed that day, at the user's word; the repo on GitHub is still private. Left are the history rewrite, the push of it and the switch on GitHub; the Claude Code plan's Log of that day says where it stands.
 - **Research (2026-10-31):** `docs/research/`. Check it before searching the web, and cite the section you rely on.
 
 ## Rules
@@ -33,6 +34,11 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
   - Reading, never writing: `~/.claude/sessions/*.json` (never the `.key` files), the sandbox sessions' transcripts under `~/.claude/projects/`, the Claude app's session records in `~/Library/Application Support/Claude/claude-code-sessions/`, and the Claude app bundle.
 - Verification means commands you ran and their output. "Should work" isn't verification.
 - Never push. Commit only when the user's instructions say to.
+- The repo is public, or about to be: the user's decision, 2026-11-13. Keep out of every commit:
+  - tokens and keys;
+  - Anthropic's own files, such as the mods API reference, which git ignores;
+  - the user's email address;
+  - the titles and contents of the user's sessions in other projects. In logs, tests and docs, use a throwaway session's.
 
 ## Layout
 
@@ -48,7 +54,7 @@ Personal Elgato Stream Deck + plugins for Adobe Lightroom Classic and Claude Cod
 | `claude-code/tools/` | Fake Claude, fake bridge, fixture runner | Tools track |
 | `claude-code/protocol/` | Bridge protocol spec, plus fixture streams both sides test against | Main thread |
 | `claude-code/sandbox/` | The folder throwaway test sessions run in | Main thread |
-| `claude-code/vendor/` | The mods API reference for the app's Claude Code version | Main thread |
+| `claude-code/vendor/` | `refresh.mjs`; the mods API reference it makes on this Mac, which git ignores; and `checked-version.txt`, the Claude Code version the repo was checked against | Main thread |
 | `claude-code/install/` | `deck-install.mjs`: releases the plugin from HEAD, and installs it in or takes it out of settings `env` | Main thread |
 | `claude-code/release/` | The release copy the user's sessions load, and backups of `settings.json`. Git ignores it, and only `deck-install.mjs` writes it | Main thread |
 | `spikes/` | Phase 1 experiments for both sides | Whoever runs the spike |
@@ -112,6 +118,7 @@ Work in this folder, not a worktree. Lightroom, the Stream Deck app and the sand
 
 **Mods API**
 - The reference is `claude-code/vendor/mods-api/`. Its version is on the first line of `claude-code.d.ts`, which declares every event and every call on `$`, with examples (grep it). `reference.md` covers loading, testing and failures. It's early access and changes between releases.
+- **The reference is Anthropic's text, so git ignores it,** since 2026-11-13. `refresh.mjs` makes it, and a fresh clone has none until that runs. Git keeps `claude-code/vendor/checked-version.txt` instead: the declarations' first line, which `refresh.mjs` writes with the reference and the deck reads for the version the repo was checked against.
 - **After a Claude app update,** `node claude-code/vendor/refresh.mjs` rebuilds the reference from the newest bundled binary, without loading the skill. The whole routine is under Commands, "After a Claude app update". recheck warns until the reference matches the newest bundled version, and `deck-install.mjs release` validates with the newest on its own.
 - A mod has no Node and no DOM. It reaches everything through `$`: `$.http.fetch`, `$.clock`, `$.process`, `$.env`, `$.session`, `$.prompt`.
 - Don't load the plugin-authoring skill: it arms the session's mods folder. Read the vendored copy instead.
@@ -154,7 +161,7 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 
 **Claude Code plugin** (from the repo root; `CC` is the newest bundled binary: `CC="$(ls -d "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude | sort -V | tail -1)"`, 2.1.321 since 2026-11-11)
 - Run every `claude` or `"$CC"` command with `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`: the install puts both in this session's environment, and they would load the release copy too.
-- `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`
+- `node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc`. It needs the reference: in a fresh clone, run `node claude-code/vendor/refresh.mjs` first.
 - `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN CLAUDE_CONFIG_DIR="$(mktemp -d)" "$CC" plugin validate claude-code/plugin`, and the same with `plugin test`. The scratch config keeps the checks out of `~/.claude`. Put `perl -e 'alarm 180; exec @ARGV'` before `"$CC"` for `plugin test`: the test kit has no time limit of its own, and a mod that retries at once can hang it.
 - `node claude-code/plugin-tsc/sync-fixtures.mjs --check`: the plugin's copy of the fixtures is current, `hooks.json` is PROTOCOL.md's block, `plugin.json` only describes the plugin, and its version is the mod's `PLUGIN_VERSION`. `claude plugin test` can't read files outside the plugin, so after `make-fixtures.mjs` changes them, run it without `--check`.
 - `node --test claude-code/plugin-tsc/sync-fixtures.test.mjs`: that script's own tests. Name the file: Node 24 takes a bare folder as a module.
@@ -172,13 +179,13 @@ Run node, npm and lua through `mise exec --`: the shell's bare `node` is 22, and
 - `node --test claude-code/install/test/`
 
 **After a Claude app update** (Phase 8's routine, D1), in this order:
-1. `node claude-code/vendor/refresh.mjs`: the vendored mods API, from the newest bundled Claude Code.
+1. `node claude-code/vendor/refresh.mjs`: the mods API reference, from the newest bundled Claude Code, and `checked-version.txt` with it.
 2. The plugin's type check, above. It includes `plugin-tsc/hook-contract.ts`, which holds the deck's answers to the engine's types.
 3. `node claude-code/tools/recheck.mjs`: the app internals the deck and the plugin rely on. Read each warn; a fail stops the routine.
 4. `plugin validate` and `plugin test` with the new `CC`.
 5. The smoke test, `docs/claude-code/smoke-test.md`, in a throwaway session.
 
-Then commit the refreshed reference, and run `deck-install.mjs release` if the plugin changed.
+Then commit `checked-version.txt`, and run `deck-install.mjs release` if the plugin changed.
 
 **Claude tools and protocol** (from the repo root)
 - `node --test claude-code/tools/test/`

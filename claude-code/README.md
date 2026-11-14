@@ -7,6 +7,8 @@ Live status for the Claude desktop app's Code-tab sessions, with a key and a dia
   - a PermissionRequest hook that puts approvals on the deck.
 - **The Stream Deck plugin** (`deck/`, `com.karimdhanji.claude`) runs in the Stream Deck app and hosts the bridge on 127.0.0.1:47600. It also reads the session registry (`~/.claude/sessions/`) and the app's session records, so it lists every running session, with or without the plugin.
 
+It needs macOS, a Stream Deck + and the Claude desktop app; [Setup](#setup) has the steps. It relies on Claude Code's mods API, which is early access, and on undocumented files the app keeps, so a Claude app update can break it. Whatever the deck can't handle falls back to the app's own dialogs, and [After a Claude app update](#after-a-claude-app-update) says how to check it.
+
 The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, decisions and test results are in [`docs/claude-code/plan.md`](../docs/claude-code/plan.md).
 
 ## The layout
@@ -17,7 +19,7 @@ The wire protocol is [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md). The plan, d
 | The 4 dials | **Session Slot**, the same action on a dial | The session on the key above. The strip shows its details, or what it's waiting on: an approval to allow or deny, or a question, a plan or a terminal command to answer in the app. Turn to page or pick; press or tap to jump or send. |
 | Top row | **Other Sessions**, and any of the keys below | How many sessions on no slot need you. Press to jump to the one that has waited longest. |
 
-The other keys work as before, on this page or another.
+[Approve, Deny and Saved Prompt](#the-other-keys) go on any other key, on this page or another.
 
 ## Session Slot keys
 
@@ -53,7 +55,7 @@ Each dial belongs to the session on the key above it, and its strip shows what d
    - when more run than fit, the last page ends with `+3 more`.
    When they finish while you're on one of these pages, the strip goes back to Now.
 3. **Context:** the context %, with its bar, the tokens, and the cost so far.
-4. **Setup:** model and effort; the mode and the session's Claude Code version; and the project. A version newer than the one this repo was checked against ends in ↑, with the line in amber: run the routine after an update (`CLAUDE.md`).
+4. **Setup:** model and effort; the mode and the session's Claude Code version; and the project. A version newer than the one this repo was checked against ends in ↑, with the line in amber: see [After a Claude app update](#after-a-claude-app-update).
 
 Turn to page. Press or tap to jump to the session. Long-touch goes back to the first page. As on the key, a press in the moment before the strip shows another session alerts and does nothing.
 
@@ -66,12 +68,6 @@ Turn to page. Press or tap to jump to the session. Long-touch goes back to the f
 ## Other Sessions
 
 A key for the top row, about the running sessions on no Session Slot. It shows how many need you, and the title of the one that has waited longest, with what it waits on and for how long. How many are done and not seen is in small type. With none needing you, it's dim and says how many others are running. Press to jump to the one that has waited longest, which becomes the target; with none, it alerts. As on a Session Slot key, a press in the moment before the key shows a change alerts.
-
-## Actions that went
-
-A placed one of these shows as a missing action, on this Mac or another: remove it in the Stream Deck app.
-- **The Session key and the Sessions dial,** in Phase 9 (2026-11-07). The Session Slots and Other Sessions show the sessions and jump to them, and a jump makes the session the target.
-- **The Mode dial and Mode keys,** in Phase 8 (2026-11-06). The deck never changes a session's mode, model or effort; a Session Slot's Setup page shows them.
 
 ## The other keys
 
@@ -103,8 +99,6 @@ A placed one of these shows as a missing action, on this Mac or another: remove 
 
 Without the plugin, a session shows only what the registry and the app's records give: working, needs you or idle.
 
-A session started before plugin 0.4.0 shows Working instead of Background, with no workflow or agents, until it restarts: its plugin doesn't report other agents.
-
 ## The target session
 
 The target, where Saved Prompts go, is the session last jumped to from a Session Slot or Other Sessions. Until you jump to one, it's the session most recently on screen in the app. A press for a session that has ended alerts and sends nothing.
@@ -119,9 +113,13 @@ The target, where Saved Prompts go, is the session last jumped to from a Session
 
 ## Setup
 
-`setup` is for a new Mac, from a clone of this repository. On the Mac where the repository is developed, use the dev commands in [`CLAUDE.md`](../CLAUDE.md) instead. To bring a Mac up to date after its setup, see [Keeping another Mac current](#keeping-another-mac-current).
+One command, `setup`, builds the deck plugin, links it into the Stream Deck app, and installs the Claude Code plugin for your sessions. Run it from a clone of this repository.
 
-**First:**
+- **Outside the clone it changes two things:** the Stream Deck app gets a link to the deck plugin and its developer mode turned on, and `~/.claude/settings.json` gets two keys in its `env` block, after a backup. [The release copy](#the-release-copy) says what they do, and [Keeping another Mac current](#keeping-another-mac-current) how to take it all off again.
+- **To bring a Mac up to date** after its setup, see [Keeping another Mac current](#keeping-another-mac-current).
+- **If you change the code in the clone,** use the dev commands in [`CLAUDE.md`](../CLAUDE.md) instead: `setup` refuses uncommitted changes to the deck or the plugin.
+
+**What you need:**
 - **The Stream Deck app,** 7.1 or later. Install it, open it once, so it makes its plugins folder, then quit it. setup's restart starts it again, with developer mode on and the link in place: an app already running may not see developer mode until it relaunches.
 - **The Claude app,** signed in, with one session started in its Code tab, so it has a Claude Code of its own. Claude Code in a terminal isn't enough: only the app's sessions talk to the deck.
 - **git and [mise](https://mise.jdx.dev),** for example `brew install mise`. mise brings the Node 24 the deck is built with.
@@ -131,16 +129,14 @@ The target, where Saved Prompts go, is the session last jumped to from a Session
   ```
   - **Only `checked`:** none does.
   - **A file above it:** look in it for those names. `allowedHttpHookUrls` is fine when one of its patterns matches `http://127.0.0.1:47600/v1/permission`, and `httpHookAllowedEnvVars` when it has both `DECK_TOKEN` and `CLAUDE_CODE_HOST_SESSION_ID`.
-  - **A policy that comes with the organization's Claude account** doesn't show here. The test approval under **Then** finds it.
+  - **A policy that comes with the organization's Claude account** doesn't show here. The test approval under **After setup** finds it.
   - Whatever a policy turns off, the app's own dialogs keep working.
-- **The clone,** in a folder you'll keep, on a path without a `:`. `install` writes the path into `~/.claude/settings.json`, and the Stream Deck app links the deck from there. The repository is private on GitHub, so sign in first, with `gh auth login`, or with a token when git asks for a password:
+- **The clone,** in a folder you'll keep, on a path without a `:`. `install` writes the path into `~/.claude/settings.json`, and the Stream Deck app links the deck from there.
   ```bash
   git clone https://github.com/Kard16/stream-deck-plugins.git ~/Projects/stream-deck-plugins
   ```
-  - GitHub has only what the Mac where the repository is developed has pushed.
-  - **Without a GitHub sign-in:** run `git bundle create deck.bundle main` on the Mac where the repository is developed, copy the file over, and clone from it. Each update then needs a new bundle.
 
-**Then, from the top of the clone:**
+**Run setup,** from the top of the clone:
 ```bash
 mise trust
 mise install node
@@ -161,7 +157,7 @@ Run it again after fixing what stopped it. It skips `npm ci` while `node_modules
 
 **If the wait times out,** quit and reopen the Stream Deck app, then run `setup` again.
 
-**Then:**
+**After setup:**
 1. **Quit the Claude app** (⌘Q) and open it again. A session loads the plugin when it starts.
 2. **Start a session in the Code tab, then check that it worked:**
    ```bash
@@ -172,7 +168,7 @@ Run it again after fixing what stopped it. It skips `npm ci` while `node_modules
 3. **In the Stream Deck app,** place the actions from the **Claude Code** category, as in [The layout](#the-layout), or import a profile exported from another Mac. Each Mac keeps its own record of which session is on which slot.
    - **No Claude Code category:** quit and reopen the Stream Deck app.
 4. **Try an approval:** in a session in Manual mode, ask Claude to write a small file. The Approve key shows its request, and a press allows it.
-   - **The app asks and the deck shows nothing:** a policy is the likely cause; see **First**, above. Answer in the app.
+   - **The app asks and the deck shows nothing:** a policy is the likely cause; see **What you need**, above. Answer in the app.
 
 ### The release copy
 
@@ -193,7 +189,7 @@ chmod 600 ~/.claude/settings.json
 
 ### Keeping another Mac current
 
-Only the Mac where the repository is developed changes it. Another Mac pulls what that Mac pushes, then runs `setup` again.
+A Mac set up from a clone only follows the repository: it pulls, then runs `setup` again. Changes are made on one Mac, the one where the repository is developed.
 
 - **After a change,** once it's committed, released and pushed. On the other Mac, from the top of the clone:
   ```bash
@@ -222,7 +218,7 @@ Only the Mac where the repository is developed changes it. Another Mac pulls wha
   mise exec node -- npx streamdeck unlink com.karimdhanji.claude
   ```
 - **A session shows no details,** only working or idle: it started before the install or the last update. Restart it.
-- **The app asks for permission and the Approve key shows nothing:** the deck couldn't confirm which session asked, or the deck restarted while the request was held. On a Mac an employer manages, a Claude Code policy may also keep the hook from running ([Setup](#setup), **First**). Answer in the app; it always works.
+- **The app asks for permission and the Approve key shows nothing:** the deck couldn't confirm which session asked, or the deck restarted while the request was held. On a Mac an employer manages, a Claude Code policy may also keep the hook from running ([Setup](#setup), **What you need**). Answer in the app; it always works.
 - **After a Stream Deck or Claude app restart, or after sleep,** the deck and the sessions find each other again within seconds, and when the Stream Deck comes back, every key and strip is repainted. A held request is lost on a deck restart, and its session shows needs you until you answer it in the app. If the keys stay dark or stale, see [When the deck stops responding](#when-the-deck-stops-responding).
 - **A slot key shows the wrong session:** open the one you want in the app, then hold the key.
 - **A slot stays empty:** every running session is on another slot. Hold its key to take the one on screen.
@@ -230,7 +226,10 @@ Only the Mac where the repository is developed changes it. Another Mac pulls wha
 - **A key stays lit after you looked:** the deck counts a look when the session comes on screen in the app on this Mac, or while it's on screen there with Claude in front. It checks which app is in front only while a Session Slot or Other Sessions key is on the deck. A press on its key counts too.
 - **A dial alerts and sends nothing:** the request had been on the strip for under a second, your pick had only just shown, or it was answered somewhere else first. Look at the strip again, then press.
 - **A dial reads Answer in app:** the session waits on a question, a plan or a command for the app's Terminal panel, which the deck never answers. Press the dial to jump to the session, and answer there.
-- **An Approve did nothing, and the app's card stayed up:** Claude Code took no approval from the deck for that tool. The deck's log has an `ALLOW NOT TAKEN` line naming it. Approve in the app, and tell a session in this repo: the tool belongs with the ones that read Answer in app.
+- **An Approve did nothing, and the app's card stayed up:** Claude Code took no approval from the deck for that tool. The deck's log has an `ALLOW NOT TAKEN` line naming it. Approve in the app. The tool belongs with the ones that read Answer in app: `ASK_TOOLS` in `deck/src/protocol/wire.ts`.
+- **A key or dial shows as a missing action:** it's one that has gone. Remove it in the Stream Deck app.
+  - **The Session key and the Sessions dial** went on 2026-11-07. Session Slots and Other Sessions show the sessions and jump to them.
+  - **The Mode dial and Mode keys** went on 2026-11-06. The deck never changes a session's mode, model or effort; a Session Slot's Setup page shows them.
 - **A Saved Prompt press alerts:** the deck's log says why. Often the target has ended, or its last prompt is still waiting. It can also mean the session's plugin hasn't checked in for a minute, as when the session's process was replaced while the deck restarted. The deck sends it nothing until it checks in again, which a live plugin does within a second. Approve and Deny still work meanwhile.
 - **Logs:**
   - The deck: `deck/com.karimdhanji.claude.sdPlugin/logs/com.karimdhanji.claude.0.log`. For more detail, write `debug` to `deck/com.karimdhanji.claude.sdPlugin/log-level.txt` and restart the plugin.
@@ -252,14 +251,15 @@ The Stream Deck app turns the Stream Deck off at every display sleep or lock, an
    npx streamdeck restart com.karimdhanji.claude
    ```
 4. **Quit and reopen the Stream Deck app.**
-5. **Re-plug** the Thunderbolt cable.
+5. **Re-plug** the Stream Deck's cable, or the monitor's cable to the Mac when the Stream Deck is on the monitor's USB hub.
 
 Note which step brought it back: it names the part that failed, the plugin, the Stream Deck app, or the USB link below both.
 
-**Settings worth trying on the work Mac:**
-- **System Settings, Battery, Options:** turn on "Prevent automatic sleeping on power adapter when the display is off", if MDM allows it. The Mac then stays out of system sleep on power; the app still turns the Stream Deck off while the display sleeps.
-- **The monitor's firmware, M2T102 or later:** the OSD's Others, Display Info shows it. Update it with Dell Display and Peripheral Manager.
-- **The lid open:** Dell lists USB devices on the monitor's hub not found after a wake with the lid closed.
+**If it keeps happening after sleep,** these are worth trying:
+- **System Settings, Battery, Options:** turn on "Prevent automatic sleeping on power adapter when the display is off", if the Mac's management allows it. The Mac then stays out of system sleep on power; the app still turns the Stream Deck off while the display sleeps.
+- **With the Stream Deck on a monitor's USB hub,** here a Dell U2725QE on Thunderbolt:
+  - **The monitor's firmware, M2T102 or later:** the OSD's Others, Display Info shows it. Update it with Dell Display and Peripheral Manager.
+  - **The lid open:** Dell lists USB devices on the monitor's hub not found after a wake with the lid closed.
 
 ## After a Claude app update
 
@@ -284,5 +284,6 @@ Another Mac runs none of this. Once it's done and pushed, pull and run `setup` t
       tr -d '\n' < claude-code/deck/com.karimdhanji.claude.sdPlugin/run/token | pbcopy
       pbcopy < /dev/null
       ```
+- **The mods API reference isn't in the repo,** since it's Anthropic's. `node claude-code/vendor/refresh.mjs` makes it from the Claude app's own Claude Code, in `claude-code/vendor/mods-api/`, which git ignores. The plugin's type check needs it. Git keeps `claude-code/vendor/checked-version.txt`, the Claude Code version the repo was last checked against.
 - **Checks** are in [`CLAUDE.md`](../CLAUDE.md), under Commands. Once the plugin is installed, run `claude` commands with `env -u CLAUDE_CODE_PLUGIN_DIRS -u DECK_TOKEN`, so they don't load the release copy too.
 - **The fake Claude, fake deck, fixture player and recheck** are in [`tools/`](tools/README.md).
