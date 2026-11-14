@@ -234,7 +234,7 @@ It checks the deck's log for `docs/claude-code/smoke-test.md`, the live test aft
 - **The watch list** is the whole deck's: each `RELEASED … (rule 2)`, a wrong release while the app's dialog is still up, flagged when its session reads needs-you within 5 s with nothing held; each `woke up` line, with what slept; each `Bridge: listening again after the server closed|errored: …`, which nothing has shown yet; each `Devices: Device "<name>" (<id>): a press came from it, though the deck had it as not connected; taking it as connected`, a connect the deck missed, which fails no step, though step 16's detail says so when its return was one; and every warn and error line, its first line only.
 - **The logs:** by default the deck's newest, `com.karimdhanji.claude.0.log`, and the older ones in its folder back to `--since`, as the SDK starts a new one each time the deck starts. `--log FILE` reads that one only. Steps 2, 7, 9, 11, 14 and 15 need the deck at debug, and with no debug line in the window it says so.
 
-It's read only: it reads the logs and the vendored mods API's first line, and writes nothing. It exits 0 when every step's proof is there, 1 when one is missing or the log can't be read, and 2 for a usage error.
+It's read only: it reads the logs and `claude-code/vendor/checked-version.txt`, and writes nothing. It exits 0 when every step's proof is there, 1 when one is missing or the log can't be read, and 2 for a usage error.
 
 ## When the deck stops responding: doctor.mjs
 

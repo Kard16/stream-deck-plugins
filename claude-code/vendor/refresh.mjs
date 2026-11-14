@@ -3,6 +3,10 @@
 // declarations (claude-code.d.ts) and the plugin-authoring skill's long form (reference.md) and examples, exactly as
 // that version ships them. Read only on the binary, so it never loads the skill or arms a session's mods folder.
 //
+// The folder is Anthropic's text, so git ignores it: each Mac that needs it makes its own, with this. What git keeps
+// is checked-version.txt, beside the folder: the declarations' first line, which names the Claude Code version the
+// repo was checked against. This writes it with the folder, and the deck reads it (deck/src/model/versions.ts).
+//
 //   node claude-code/vendor/refresh.mjs                  the newest bundled version
 //   node claude-code/vendor/refresh.mjs --version 2.1.309
 //   node claude-code/vendor/refresh.mjs --out DIR        somewhere else, to compare
@@ -33,6 +37,8 @@ import zlib from 'node:zlib'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 export const ROOT = path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code')
 export const EXAMPLES = Object.freeze(['band-state.d.ts', 'band.tsx', 'pane-state.d.ts', 'pane.test.tsx', 'pane.tsx', 'tool-call.ts'])
+/** The file git keeps, beside mods-api/: the declarations' first line, so the version the repo was checked against. */
+export const MARKER = 'checked-version.txt'
 /** A bundled version's folder name. */
 export const VERSION_DIR = /^\d+\.\d+\.\d+$/
 export const TRAILER = Buffer.from('\n---- Bun! ----\n')
@@ -222,7 +228,7 @@ export function modsApi(files, version) {
 function main() {
   const { values } = parseArgs({ options: { version: { type: 'string' }, out: { type: 'string' }, help: { type: 'boolean', short: 'h' } } })
   if (values.help) {
-    console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 9).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'))
+    console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 13).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'))
     return
   }
   const out = path.resolve(values.out ?? path.join(HERE, 'mods-api'))
@@ -247,6 +253,17 @@ function main() {
   fs.renameSync(tmp, out)
   console.log(`refresh: ${path.relative(process.cwd(), out) || out} from Claude Code ${version} (${binary})`)
   console.log(changed.length ? `  changed: ${changed.join(', ')}` : '  no change')
+  // The marker goes only with the repo's own copy: a copy made somewhere else, to compare, says nothing of the repo.
+  if (values.out === undefined) {
+    const marker = path.join(HERE, MARKER)
+    const line = `${firstLine(version)}\n`
+    let had = null
+    try {
+      had = fs.readFileSync(marker, 'utf8')
+    } catch {}
+    if (had !== line) fs.writeFileSync(marker, line)
+    console.log(`  ${MARKER}: ${had === line ? 'no change' : `now ${version}`}`)
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

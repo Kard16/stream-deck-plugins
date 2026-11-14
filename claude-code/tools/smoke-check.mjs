@@ -5,7 +5,7 @@
 // if the app's dialog was still up, each wake and what slept, each time the bridge listened again, each device the deck
 // took as connected though it had missed its connect, and every warn and error line.
 //
-// Read only: it reads the deck's logs and the vendored mods API's first line, and writes nothing. Node 24, no
+// Read only: it reads the deck's logs and claude-code/vendor/checked-version.txt, and writes nothing. Node 24, no
 // dependencies.
 
 import fs from 'node:fs'
@@ -755,7 +755,7 @@ lines that prove it or why not, and what only the user can say they saw. Then th
 each RELEASED … (rule 2), a wrong release if the app's dialog was still up, each wake and what slept,
 each time the bridge listened again, each device the deck took as connected, its connect missed, and
 every warn and error.
-Read only: it reads the deck's logs and the vendored mods API's first line, and writes nothing.
+Read only: it reads the deck's logs and claude-code/vendor/checked-version.txt, and writes nothing.
 
   --since ISO   where the window starts: when the test began (required)
   --host HOST   only this session's lines prove a step (the throwaway session's local_… id), but for

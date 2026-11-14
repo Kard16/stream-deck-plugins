@@ -1,5 +1,5 @@
 {
-  "//": "Type-checks the streamdeck-bridge mod and its tests against the vendored mods API d.ts, of the Claude Code version its first line names (claude-code/vendor/refresh.mjs makes it). It lives outside the plugin folder because the engine lays its own .claude-plugin/types/ and tsconfig.json into a plugin folder it hot-reloads. Options from the d.ts header. Run: mise exec -- node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc",
+  "//": "Type-checks the streamdeck-bridge mod and its tests against the mods API d.ts, of the Claude Code version its first line names. claude-code/vendor/refresh.mjs makes it, and git ignores it, so run that first in a fresh clone. It lives outside the plugin folder because the engine lays its own .claude-plugin/types/ and tsconfig.json into a plugin folder it hot-reloads. Options from the d.ts header. Run: mise exec -- node claude-code/deck/node_modules/typescript/bin/tsc -p claude-code/plugin-tsc",
   "compilerOptions": {
     "target": "es2023",
     "lib": ["es2023"],

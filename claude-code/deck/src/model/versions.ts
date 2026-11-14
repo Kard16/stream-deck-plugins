@@ -7,9 +7,10 @@ import { type Log, nullLog, quote } from "../util/log.js";
 /**
  * Drift, caught the day it lands (hardening.md, C1). Each session's hello says which Claude Code it runs (`cc`) and
  * which plugin (`plugin`), and the deck holds both to the repo it's linked from:
- * - **Claude Code:** the version on the first line of the vendored mods API reference, the one the repo was checked
- *   against (vendor/refresh.mjs writes it, tools/recheck.mjs reads it). A session on a newer one gets one log line per
- *   version a run, and its Session Slot's Setup page marks its version (slots/strip.ts).
+ * - **Claude Code:** the version vendor/checked-version.txt names, the one the repo was checked against. The file is
+ *   the first line of the mods API reference's declarations: vendor/refresh.mjs writes it with the reference, which
+ *   git doesn't keep. A session on a newer one gets one log line per version a run, and its Session Slot's Setup
+ *   page marks its version (slots/strip.ts).
  * - **The plugin:** the version in the plugin's own plugin.json. A session on an older one hasn't started since a
  *   release: one log line per session.
  *
@@ -24,7 +25,7 @@ const VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
 /** The reference's first line, as vendor/refresh.mjs writes it (its `firstLine`) and tools/recheck.mjs reads it. */
 const FIRST_LINE = /^\/\/ Written by Claude Code (\d+\.\d+\.\d+)\.$/;
 
-/** How much of the reference is read: its first line is about 35 bytes, and the whole file about 700 kB. */
+/** How much of the file is read: its one line is about 35 bytes. */
 const HEAD_BYTES = 256;
 
 /** `v` when it's a release's x.y.z, else null: the mod's `unknown` when it can't read one, a dev build's, anything else. */
@@ -44,7 +45,7 @@ export function compareVersions(a: string | null, b: string | null): number | nu
 	return 0;
 }
 
-/** The Claude Code version the reference's first line names, from the start of the file; null when it names none. */
+/** The Claude Code version checked-version.txt's line names, from the start of the file; null when it names none. */
 export function checkedVersion(head: string): string | null {
 	return FIRST_LINE.exec(firstLine(head))?.[1] ?? null;
 }
@@ -65,7 +66,7 @@ function firstLine(text: string): string {
 
 /** The two files a VersionCheck reads. */
 export type VersionFiles = {
-	/** claude-code/vendor/mods-api/claude-code.d.ts: its first line names the Claude Code version the repo was checked against. */
+	/** claude-code/vendor/checked-version.txt: its line names the Claude Code version the repo was checked against. */
 	reference: string;
 	/** claude-code/plugin/.claude-plugin/plugin.json: its `version` is the plugin's in the repo. */
 	plugin: string;
@@ -79,7 +80,7 @@ export type VersionFiles = {
 export function versionFiles(pluginDir: string): VersionFiles {
 	const claudeCode = path.join(pluginDir, "..", "..");
 	return {
-		reference: path.join(claudeCode, "vendor", "mods-api", "claude-code.d.ts"),
+		reference: path.join(claudeCode, "vendor", "checked-version.txt"),
 		plugin: path.join(claudeCode, "plugin", ".claude-plugin", "plugin.json"),
 	};
 }

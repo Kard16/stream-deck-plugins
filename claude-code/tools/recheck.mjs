@@ -26,20 +26,23 @@ export const DEFAULTS = Object.freeze({
   infoPlist: path.join(APP, 'Contents', 'Info.plist'),
   claudeCodeRoot: path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code'),
   repo: REPO,
-  /** The vendored mods API reference, which claude-code/vendor/refresh.mjs makes from a bundled Claude Code. */
+  /** The mods API reference, which claude-code/vendor/refresh.mjs makes on this Mac from a bundled Claude Code; git ignores it. */
   vendored: path.join(REPO, 'claude-code', 'vendor', 'mods-api', 'claude-code.d.ts'),
   /** What the deck's "seen" check runs: front.ts's LSAPPINFO, which the drift test holds this to. */
   lsappinfo: '/usr/bin/lsappinfo',
 })
 
 export const VENDORED_DTS = DEFAULTS.vendored
+/** What git keeps of the reference: its declarations' first line, which refresh.mjs writes beside the folder. */
+export const CHECKED_FILE = path.join(REPO, 'claude-code', 'vendor', refresh.MARKER)
 
 /**
- * The Claude Code version the vendored mods API reference and these checks are for: the one its declarations' first
- * line names (`// Written by Claude Code <version>.`), so a refresh moves it and nothing else has to. Null when the
- * file is missing or its first line says no version, which check 1 reports.
+ * The Claude Code version the mods API reference and these checks are for: the one its declarations' first line names
+ * (`// Written by Claude Code <version>.`), so a refresh moves it and nothing else has to. `file` is the declarations
+ * or the tracked copy of that line, CHECKED_FILE, which a fresh clone has too. Null when the file is missing or its
+ * first line says no version, which check 1 reports.
  */
-export function vendoredVersion(file = VENDORED_DTS) {
+export function vendoredVersion(file = CHECKED_FILE) {
   let head
   try {
     const fd = fs.openSync(file, 'r')

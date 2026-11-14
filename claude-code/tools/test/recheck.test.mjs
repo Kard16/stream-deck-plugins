@@ -317,9 +317,9 @@ test('recheck: the checked version is the one the vendored d.ts names on its fir
   }
   assert.equal(R.vendoredVersion(path.join(f.root, 'missing.d.ts')), null)
 
-  // The repository's own: CHECKED_CC_VERSION is what its first line says, so a refresh moves it.
-  const first = fs.readFileSync(R.VENDORED_DTS, 'utf8').split('\n', 1)[0]
-  assert.equal(first, `// Written by Claude Code ${R.CHECKED_CC_VERSION}.`)
+  // The repository's own: CHECKED_CC_VERSION is what checked-version.txt says, the line refresh.mjs writes with the
+  // reference, so a refresh moves it. Git keeps that file and not the reference, so a fresh clone has it.
+  assert.equal(fs.readFileSync(R.CHECKED_FILE, 'utf8'), `// Written by Claude Code ${R.CHECKED_CC_VERSION}.\n`)
 
   const rows = await R.checkVersions({ infoPlist: f.infoPlist, claudeCodeRoot: f.claudeCodeRoot, checkedVersion: null })
   assert.equal(byId(rows, 'versions.claude-code').status, 'fail')

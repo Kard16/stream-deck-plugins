@@ -234,7 +234,7 @@ describe("the versions a hello is held to (versions.ts, hardening.md C1)", () =>
 	test("the deck's plugin folder finds the repo's reference and plugin.json, and both read", () => {
 		const f = versionFiles(path.join(deckRoot(), "com.karimdhanji.claude.sdPlugin"));
 		assert.deepEqual(f, {
-			reference: path.join(deckRoot(), "..", "vendor", "mods-api", "claude-code.d.ts"),
+			reference: path.join(deckRoot(), "..", "vendor", "checked-version.txt"),
 			plugin: path.join(deckRoot(), "..", "plugin", ".claude-plugin", "plugin.json"),
 		});
 		const log = new RecordingLog();
